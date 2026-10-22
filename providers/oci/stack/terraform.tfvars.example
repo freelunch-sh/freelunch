@@ -4,6 +4,10 @@
 region       = "eu-frankfurt-1"                        # your HOME region (Console > Tenancy details)
 tenancy_ocid = "ocid1.tenancy.oc1..aaaaaaaa..."        # grep tenancy ~/.oci/config
 
+# Signing in with a session token (`oci session authenticate`) instead of an API key:
+# oci_auth           = "SecurityToken"
+# oci_config_profile = "DEFAULT"   # the profile the session was saved under
+
 ssh_public_keys = [
   "ssh-ed25519 AAAA... you@laptop",
 ]

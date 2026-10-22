@@ -1,0 +1,31 @@
+# Copy to terraform.tfvars and fill in (it is git-ignored).
+# Full reference: providers/azure/stack/terraform.tfvars.example in freelunch.
+
+subscription_id = "00000000-0000-0000-0000-000000000000"   # az account show --query id -o tsv
+location        = "eastus"
+
+ssh_public_keys = [
+  "ssh-ed25519 AAAA... you@laptop",
+]
+
+# freelunch deploy connects over SSH. Narrow this to your own IP (x.x.x.x/32) if you can.
+ssh_source_cidrs = ["0.0.0.0/0"]
+
+# The app is reached through the Cloudflare Tunnel, so no other port is open.
+# Without the cloudflare stack, list the ports your app publishes, e.g. [80, 443].
+ingress_tcp_ports = []
+
+# The VM and its 64 GB P6 disk are free for 12 months, but Standard public IPv4
+# addresses are billed (about $3.65/month each); the $200 credit covers them for the first
+# 30 days. New subnets have no default outbound access, so a VM without one can't reach
+# the internet. The plan fails until you choose:
+# acknowledge_public_ipv4_charge = true
+
+# One AMD host: B2ats v2 (2 vCPUs, 1 GiB), 64 GB Premium SSD. Apps come from freelunch
+# deploy, not from cloud-init, so nothing is listed here.
+instances = {
+  main = {
+    size         = "Standard_B2ats_v2"
+    swap_size_gb = 2 # 1 GiB RAM is tight for Docker
+  }
+}

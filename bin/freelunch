@@ -269,7 +269,7 @@ ready_stacks() {
 }
 
 cmd_init() {
-  local base cfg s stacks=()
+  local base cfg s src stacks=()
   base="${FREELUNCH_PROJECT:-$PWD}"; base="${base%/}"
   [[ "$(basename "$base")" != ".freelunch" ]] || base="$(dirname "$base")"
   [[ -d "$base" ]] || die "no such directory: $base"
@@ -298,14 +298,14 @@ inventory.json
 known_hosts
 EOF
 
+  # Host stacks have a project.tfvars.example: only SSH open and no apps in cloud-init,
+  # since the tunnel serves the apps and deploy runs them. Other stacks get their
+  # terraform.tfvars.example.
   for s in "${stacks[@]}"; do
     mkdir -p "$cfg/$s"
-    if [[ -e "$cfg/$s/terraform.tfvars.example" ]]; then
-      log "kept $(rel "$cfg/$s/terraform.tfvars.example")"
-    else
-      cp "$(stack_dir "$s")/terraform.tfvars.example" "$cfg/$s/terraform.tfvars.example"
-      log "wrote $(rel "$cfg/$s/terraform.tfvars.example")"
-    fi
+    src="$(stack_dir "$s")/project.tfvars.example"
+    [[ -f "$src" ]] || src="$(stack_dir "$s")/terraform.tfvars.example"
+    write_new "$cfg/$s/terraform.tfvars.example" < "$src"
   done
 
   local app host="" compose="compose.yaml" f

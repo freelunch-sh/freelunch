@@ -12,8 +12,10 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
 
 - **Project mode.** `freelunch init` creates a `.freelunch/` folder in any repository, with a
   `terraform.tfvars.example` per stack, `apps.tfvars`, `.env.example` and a `.gitignore`.
-  In that folder's tree every command reads tfvars and writes state, `inventory.json` and
-  provider plugins in the project. Inside the freelunch checkout nothing changes.
+  Host stacks get their `project.tfvars.example`, with only SSH open and no apps in
+  cloud-init, since the tunnel serves the apps and `deploy` runs them. In that folder's
+  tree every command reads tfvars and writes state, `inventory.json` and provider plugins
+  in the project. Inside the freelunch checkout nothing changes.
 - **`freelunch deploy`.** Copies each app's Compose file and env file to its host over SSH,
   logs in to private registries, runs `docker compose up --wait` and fails when a container
   stays unhealthy, then starts `cloudflared` and prunes unused images. Targets a host, a

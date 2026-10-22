@@ -44,7 +44,12 @@ update that file; the modules read it at plan time.
    so it also resolves inside the container.
 3. **OpenTofu ≥ 1.6, Terraform ≥ 1.6, or Docker** (see the root README).
 
-Session auth also works: `oci session authenticate`, then set `oci_auth = "SecurityToken"`.
+`oci_config_profile` picks the profile in `~/.oci/config` (default `DEFAULT`). A session
+token works instead of an API key: run `oci session authenticate`, then set
+`oci_auth = "SecurityToken"` and `oci_config_profile` to the profile the session was saved
+under. A session lasts an hour; `oci session refresh --profile <name>` extends it, up to
+24 hours. With the Docker runner, change the absolute `key_file` and `security_token_file`
+paths the session wrote into `~` paths as well.
 
 ## Usage
 
@@ -58,6 +63,8 @@ bin/freelunch apply oci
 
 To serve an app through a Cloudflare Tunnel instead of open ports, set
 `ingress_tcp_ports = []` and follow [docs/deploy-a-container.md](../../docs/deploy-a-container.md).
+In a project, `freelunch init` starts from [`stack/project.tfvars.example`](stack/project.tfvars.example),
+which is already set up that way and leaves the apps to `freelunch deploy`.
 
 Or use it as a module from your own root module, pinned to a release:
 

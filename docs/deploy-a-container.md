@@ -13,7 +13,9 @@ or as a Docker image.
 ## What you need
 
 - An **OCI account**, with an [API signing key](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/apisigningkey.htm)
-  in `~/.oci/config`. Free resources exist only in your home region.
+  in `~/.oci/config`, or a [session token](../providers/oci/README.md#prerequisites) from
+  `oci session authenticate`, which needs `oci_auth` and `oci_config_profile` set in step 3.
+  Free resources exist only in your home region.
 - A **domain on Cloudflare** (free plan) and an **API token** with the
   [permissions listed here](../providers/cloudflare/README.md#api-token).
 - An **SSH key pair**. `freelunch deploy` connects with it.
@@ -48,7 +50,9 @@ alias freelunch='docker run --rm -it -v "$PWD:/project" \
 ```
 
 In `~/.oci/config`, write `key_file=~/.oci/<key>.pem` with a `~` so the path also works inside
-the container. On Linux, files the container writes into your project are owned by root.
+the container. A session profile needs the same for `key_file` and `security_token_file`,
+which `oci session authenticate` writes as absolute paths. On Linux, files the container
+writes into your project are owned by root.
 
 ## 2. Create the project folder
 
@@ -75,16 +79,16 @@ on your machine (remote state is on the roadmap).
 cp .freelunch/oci/terraform.tfvars.example .freelunch/oci/terraform.tfvars
 ```
 
-Fill in `region` (your home region), `tenancy_ocid` and `ssh_public_keys`, and close every
-port except SSH, since traffic arrives through the tunnel:
+Fill in `region` (your home region), `tenancy_ocid` and `ssh_public_keys`. With a session
+token instead of an API key, also uncomment `oci_auth` and `oci_config_profile`.
+
+The rest is already set for the tunnel: `ingress_tcp_ports = []` leaves only SSH open, and
+`instances` has no `apps`, since cloud-init only runs on first boot and `freelunch deploy`
+handles apps from here on. If your IP is stable, narrow SSH to it:
 
 ```hcl
-ingress_tcp_ports = []
-ssh_source_cidrs  = ["203.0.113.7/32"]   # your IP, if it is stable
+ssh_source_cidrs = ["203.0.113.7/32"]
 ```
-
-Leave `apps` out of `instances`: cloud-init only runs on first boot, and `freelunch deploy`
-handles apps from here on.
 
 ```bash
 freelunch apply oci
