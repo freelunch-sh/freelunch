@@ -109,6 +109,18 @@ test_init_writes_the_project_folder() {
   grep -q 'compose = "../docker-compose.yml"' "$p/.freelunch/apps.tfvars"
 }
 
+# Host stacks start from their project example: only SSH open, no apps in cloud-init.
+test_init_sets_up_hosts_for_the_tunnel() {
+  local p="$WORK/init-hosts" s
+  mkdir -p "$p" && (cd "$p" && "$CLI" init oci gcp aws azure cloudflare)
+  for s in oci gcp aws azure; do
+    grep -qx 'ingress_tcp_ports = \[\]' "$p/.freelunch/$s/terraform.tfvars.example"
+    fails grep -q '^ *apps *=' "$p/.freelunch/$s/terraform.tfvars.example"
+  done
+  # The walkthrough's finished example is what init writes.
+  cmp "$p/.freelunch/oci/terraform.tfvars.example" "$ROOT/examples/backend-app/.freelunch/oci/terraform.tfvars.example"
+}
+
 test_init_never_overwrites() {
   local p="$WORK/init-again"
   mkdir -p "$p" && (cd "$p" && "$CLI" init oci)

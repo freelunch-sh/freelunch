@@ -39,6 +39,9 @@ Use [`providers/oci`](../providers/oci/) as the reference.
       env vars or config files, never in tfvars committed to git) and a
       `terraform.tfvars.example`
 - [ ] Host providers: the stack outputs `hosts` following the [host contract](architecture.md#host-contract)
+- [ ] Host providers: a `stack/project.tfvars.example`, which `freelunch init` copies into
+      projects instead of `terraform.tfvars.example`: no open ports (the tunnel serves the
+      apps) and no `apps` in cloud-init (`freelunch deploy` runs them)
 - [ ] Glue providers: the stack takes `inventory_state_path` and checks its hosts against the
       inventory, following the [glue contract](architecture.md#glue-contract)
 - [ ] Offline tests (`tests/*.tftest.hcl`) using `mock_provider`: the default layout plans,

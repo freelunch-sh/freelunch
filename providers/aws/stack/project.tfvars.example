@@ -1,0 +1,26 @@
+# Copy to terraform.tfvars and fill in (it is git-ignored).
+# Full reference: providers/aws/stack/terraform.tfvars.example in freelunch.
+
+region = "us-east-1"
+# aws_profile = "freelunch"        # or export AWS_PROFILE
+
+ssh_public_keys = [
+  "ssh-ed25519 AAAA... you@laptop",
+]
+
+# freelunch deploy connects over SSH. Narrow this to your own IP (x.x.x.x/32) if you can.
+ssh_source_cidrs = ["0.0.0.0/0"]
+
+# The app is reached through the Cloudflare Tunnel, so no other port is open.
+# Without the cloudflare stack, list the ports your app publishes, e.g. [80, 443].
+ingress_tcp_ports = []
+
+# One x86 host: t3.micro (2 vCPUs, 1 GB), 20 GB gp3. It draws down the Free plan credit,
+# about $13/month, and the plan ends 6 months after sign-up. Apps come from freelunch
+# deploy, not from cloud-init, so nothing is listed here.
+instances = {
+  main = {
+    instance_type = "t3.micro"
+    swap_size_gb  = 2
+  }
+}

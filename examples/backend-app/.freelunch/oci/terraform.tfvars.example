@@ -4,6 +4,10 @@
 region       = "eu-frankfurt-1"                  # your HOME region (Console > Tenancy details)
 tenancy_ocid = "ocid1.tenancy.oc1..aaaaaaaa..."  # grep tenancy ~/.oci/config
 
+# Signing in with a session token (`oci session authenticate`) instead of an API key:
+# oci_auth           = "SecurityToken"
+# oci_config_profile = "DEFAULT"   # the profile the session was saved under
+
 ssh_public_keys = [
   "ssh-ed25519 AAAA... you@laptop",
 ]
@@ -12,6 +16,7 @@ ssh_public_keys = [
 ssh_source_cidrs = ["0.0.0.0/0"]
 
 # The app is reached through the Cloudflare Tunnel, so no other port is open.
+# Without the cloudflare stack, list the ports your app publishes, e.g. [80, 443].
 ingress_tcp_ports = []
 
 # One Arm host with the whole Always Free allowance. Apps come from freelunch deploy,
