@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: hcp-vault-secrets
+display_name: "HCP Vault Secrets"
+category: secrets
+status: excluded
+layer: service
+terraform_provider: "hashicorp/hcp"
+iac: official
+free_tier_type: none
+free_tier: "End of sale 2025-06-30, end of life 2026-07-01; applications deleted"
+card_required: "unknown"
+url: "https://developer.hashicorp.com/hcp/docs/vault-secrets/end-of-sale-announcement"
+last_verified: "2026-10-19"
+notes: "Excluded: discontinued. HashiCorp points to Vault Community Edition or HCP Vault Dedicated (paid)."
+sources:
+  - "support.hashicorp.com HCP Vault Secrets End Of Life (checked 2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

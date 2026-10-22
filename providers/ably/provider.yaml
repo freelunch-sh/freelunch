@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: ably
+display_name: "Ably"
+category: messaging
+status: planned
+layer: service
+terraform_provider: "ably/ably"
+iac: partner
+free_tier_type: always-free
+free_tier: "6M messages/month, 200 concurrent connections, 200 concurrent channels, 500 messages/s; realtime pub/sub over WebSockets"
+card_required: "no"
+url: "https://ably.com/docs/pricing/free"
+last_verified: "2026-10-19"
+notes: null
+sources:
+  - "ably.com/docs/pricing/free (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

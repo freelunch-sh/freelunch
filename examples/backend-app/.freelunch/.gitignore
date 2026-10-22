@@ -1,0 +1,9 @@
+# Written by freelunch init: local config, state and secrets stay out of git.
+*/terraform.tfvars
+*/terraform.tfstate
+*/terraform.tfstate.*
+*/.terraform/
+.env
+*.env
+inventory.json
+known_hosts

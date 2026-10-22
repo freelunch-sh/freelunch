@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: statuscake
+display_name: "StatusCake"
+category: observability
+status: planned
+layer: service
+terraform_provider: "StatusCakeDev/statuscake"
+iac: stale
+free_tier_type: always-free
+free_tier: "10 uptime monitors at 5-min intervals, 1 page speed, 1 domain and 1 SSL monitor"
+card_required: "unknown"
+url: "https://www.statuscake.com/pricing/"
+last_verified: "2026-10-19"
+notes: "The Terraform provider's last release was 2.2.2 in October 2023."
+sources:
+  - "statuscake.com/pricing (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

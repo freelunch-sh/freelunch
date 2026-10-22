@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: aiven
+display_name: "Aiven"
+category: databases
+status: planned
+layer: service
+terraform_provider: "aiven/aiven"
+iac: partner
+free_tier_type: always-free
+free_tier: "Free PostgreSQL, MySQL and Valkey: single node, 1 CPU, 1 GB RAM, 1 GB storage (PostgreSQL/MySQL)"
+card_required: "no"
+url: "https://aiven.io/pricing"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/terraform-providers/aiven-terraform-provider-aiven"

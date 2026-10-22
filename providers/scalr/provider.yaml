@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: scalr
+display_name: "Scalr"
+category: iac-ci
+status: planned
+layer: service
+terraform_provider: "scalr/scalr"
+iac: community
+free_tier_type: always-free
+free_tier: "All features; 50 runs/month free"
+card_required: "no"
+url: "https://scalr.com/pricing"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

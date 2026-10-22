@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: spacelift
+display_name: "Spacelift"
+category: iac-ci
+status: planned
+layer: service
+terraform_provider: "spacelift-io/spacelift"
+iac: community
+free_tier_type: always-free
+free_tier: "Free plan: public worker pools up to 200 minutes/month"
+card_required: "no"
+url: "https://spacelift.io/pricing"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

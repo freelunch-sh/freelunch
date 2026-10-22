@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: github
+display_name: "GitHub"
+category: iac-ci
+status: planned
+layer: service
+terraform_provider: "integrations/github"
+iac: partner
+free_tier_type: always-free
+free_tier: "Pages (1 GB site, 100 GB/month soft bandwidth, public repos on Free), Actions minutes, GHCR for public images"
+card_required: "no"
+url: "https://github.com/pricing"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

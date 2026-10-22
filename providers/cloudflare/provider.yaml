@@ -1,0 +1,24 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: cloudflare
+display_name: "Cloudflare"
+category: edge
+status: ready
+layer: glue
+terraform_provider: "cloudflare/cloudflare"
+iac: partner
+free_tier_type: always-free
+free_tier: "DNS for unlimited domains, CDN/SSL/WAF basics, Tunnel, Zero Trust (50 users), Workers 100k requests/day, Pages (unlimited sites and bandwidth), R2 10 GB with no egress fees, D1 5 GB, KV, Queues"
+card_required: "no"
+url: "https://www.cloudflare.com/plans/"
+last_verified: "2026-10-18"
+notes: "Glue for the hybrid inventory: a Tunnel per host, proxied DNS records and optional Access login, with cloudflared started by freelunch deploy. Provider v5 renamed many resources compared with v4."
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/cloudflare"
+  - "repos/oci-kubernetes/dorukgezici-k3s-oci-always-free/cloudflare"
+  - "repos/multi-cloud/guillermo-musumeci-terraform-multicloud-website-cloudflare-dns"
+  - "repos/multi-cloud/bodecloud-CloudBooter/cloud/Cloudflare"
+  - "repos/terraform-providers/cloudflare-terraform-provider-cloudflare"

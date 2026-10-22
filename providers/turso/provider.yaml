@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: turso
+display_name: "Turso"
+category: databases
+status: planned
+layer: service
+terraform_provider: "celest-dev/turso"
+iac: stale
+free_tier_type: always-free
+free_tier: "9 GB total storage, up to 500 databases, 1B row reads/month"
+card_required: "no"
+url: "https://turso.tech/pricing"
+last_verified: "2026-10-18"
+notes: "Community Terraform provider has had no release since 2024."
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

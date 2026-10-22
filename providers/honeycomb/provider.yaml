@@ -1,0 +1,17 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: honeycomb
+display_name: "Honeycomb"
+category: observability
+status: planned
+layer: service
+terraform_provider: "honeycombio/honeycombio"
+iac: partner
+free_tier_type: always-free
+free_tier: "Free plan with a monthly event allowance"
+card_required: "no"
+url: "https://www.honeycomb.io/pricing"
+last_verified: "2026-10-18"
+notes: "Limits not verified during research."
+sources:
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

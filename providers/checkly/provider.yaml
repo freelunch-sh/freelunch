@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: checkly
+display_name: "Checkly"
+category: observability
+status: planned
+layer: service
+terraform_provider: "checkly/checkly"
+iac: partner
+free_tier_type: always-free
+free_tier: "1 user, 10k API/network + 1.5k browser check runs/month"
+card_required: "no"
+url: "https://www.checklyhq.com/pricing/"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

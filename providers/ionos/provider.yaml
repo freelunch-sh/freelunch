@@ -1,0 +1,17 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: ionos
+display_name: "IONOS Cloud"
+category: vps
+status: planned
+layer: host
+terraform_provider: "ionos-cloud/ionoscloud"
+iac: partner
+free_tier_type: trial
+free_tier: "Time-limited trial for new accounts"
+card_required: "yes"
+url: "https://cloud.ionos.com/pricing"
+last_verified: "2026-10-18"
+notes: "Trial terms not verified during research. Check before relying on it."
+sources:
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

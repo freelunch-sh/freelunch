@@ -1,0 +1,40 @@
+# Checklist sections, in display order. Every provider.yaml `category` must match a key here.
+- key: hyperscalers
+  title: Hyperscalers
+  description: "Large public clouds. Only OCI and GCP give always-free VMs; Azure gives new accounts 12 months of small VMs, and AWS a 6-month credit."
+- key: vps
+  title: VPS & cloud credits
+  description: "Developer clouds with trial credits or low-cost VMs: secondary hosts while credits last, and paid fallbacks."
+- key: gpu
+  title: GPU compute
+  description: "GPU VMs and clusters. Almost none are free; access comes through startup or research programs or per-second billing. Catalogued so GPU capacity can join a hybrid setup the same way as CPU hosts."
+- key: containers
+  title: Containers & PaaS
+  description: "Run a container without managing a VM. Free tiers usually sleep when idle."
+- key: edge
+  title: Static, edge & serverless
+  description: "Static sites, edge functions and CDN in front of the hosts."
+- key: databases
+  title: Managed databases
+  description: "Keep state off free VMs, which can be reclaimed: managed Postgres, MySQL, Redis, document and analytics databases."
+- key: storage
+  title: Object storage
+  description: "S3-compatible buckets for backups and assets. Cloudflare R2 is listed under Cloudflare."
+- key: networking
+  title: Networking & tunnels
+  description: "Private mesh networks and tunnels that join hosts across clouds into one network."
+- key: dns
+  title: DNS
+  description: "Free DNS hosting with an API. Cloudflare and Hetzner DNS are covered by their own providers."
+- key: observability
+  title: Observability
+  description: "Metrics, logs, uptime and alerting for every host and service."
+- key: secrets
+  title: Secrets
+  description: "Secret stores that keep credentials out of cloud-init and state."
+- key: messaging
+  title: Messaging & queues
+  description: "Managed brokers and queues. Upstash QStash is listed under Upstash."
+- key: iac-ci
+  title: IaC state, CI & registries
+  description: "Remote state, pipelines and container registries for running freelunch itself."

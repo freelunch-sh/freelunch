@@ -1,0 +1,39 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+# The `limits` block is also enforced by providers/azure/modules/* through preconditions.
+name: azure
+display_name: "Microsoft Azure"
+category: hyperscalers
+status: ready
+layer: host
+terraform_provider: "hashicorp/azurerm"
+iac: official
+free_tier_type: trial
+free_tier: "$200 credit for 30 days; 12 months: 750 h each of B1s, B2pts v2 (Arm) and B2ats v2 (AMD) VMs, 2 × 64 GB P6 SSD disks; always free: App Service F1 (10 apps), Functions 1M requests, Container Apps 180k vCPU-s + 2M requests, Cosmos DB 25 GB"
+card_required: "yes"
+url: "https://azure.microsoft.com/free/"
+last_verified: "2026-10-19"
+notes: "Sign-up needs a card, a phone number and a $1 authorisation hold. Upgrade to pay-as-you-go within 30 days to keep the 12-month services; after 12 months everything still running is billed. Standard public IPv4 addresses are billed (about $3.65/month); Basic SKU IPs, which had a free allowance, were retired on 2025-09-30."
+sources:
+  - "azure.microsoft.com/pricing/purchase-options/azure-account (checked 2026-10-19)"
+  - "learn.microsoft.com/azure/cost-management-billing/manage/create-free-services (2026-03-03)"
+  - "learn.microsoft.com/azure/cost-management-billing/manage/avoid-charges-free-account (2026-03-03)"
+  - "Azure free services list: Managed Disks 2 × 64 GB (P6) SSD (checked 2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire:
+  - "repos/azure"
+  - "repos/multi-cloud/gruberdev-tf-free"
+
+limits:
+  compute:
+    free_sizes:             # 750 hours/month of each size, for 12 months; value is the CPU architecture
+      Standard_B1s: amd64       # 1 vCPU, 1 GiB
+      Standard_B2pts_v2: arm64  # 2 vCPUs, 1 GiB (Ampere Altra)
+      Standard_B2ats_v2: amd64  # 2 vCPUs, 1 GiB (AMD EPYC)
+    max_instances_per_size: 1
+  storage:
+    max_os_disks: 2         # 2 × P6 Premium SSD
+    disk_type: Premium_LRS
+    p6_min_gb: 33           # 32 GiB and below bills as P4
+    p6_max_gb: 64
+  network:
+    public_ipv4_free: false # Standard static IPv4 is billed at about $0.005/h

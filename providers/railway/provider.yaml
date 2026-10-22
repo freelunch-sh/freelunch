@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: railway
+display_name: "Railway"
+category: containers
+status: planned
+layer: service
+terraform_provider: "terraform-community-providers/railway"
+iac: community
+free_tier_type: monthly-credit
+free_tier: "$5 one-time trial credit (30 days), then Free plan: $1/month credit, 1 project, 3 services"
+card_required: "no"
+url: "https://railway.com/pricing"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/terraform-providers/terraform-community-providers-terraform-provider-railway"

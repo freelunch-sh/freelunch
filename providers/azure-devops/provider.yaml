@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: azure-devops
+display_name: "Azure DevOps"
+category: iac-ci
+status: planned
+layer: service
+terraform_provider: "microsoft/azuredevops"
+iac: partner
+free_tier_type: always-free
+free_tier: "5 Basic users; 1 Microsoft-hosted parallel job with 1,800 minutes/month; 1 self-hosted parallel job with unlimited minutes"
+card_required: "unknown"
+url: "https://azure.microsoft.com/pricing/details/devops/"
+last_verified: "2026-10-19"
+notes: "New organisations may have to request the free Microsoft-hosted parallel job grant before pipelines run. Free minutes reset on the first day of each month."
+sources:
+  - "azure.microsoft.com/pricing/details/devops (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

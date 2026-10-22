@@ -1,0 +1,51 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# The presence of terraform.tfvars is what makes `bin/freelunch apply all` include Azure.
+
+subscription_id = "00000000-0000-0000-0000-000000000000"   # az account show --query id -o tsv
+location        = "eastus"
+
+ssh_public_keys = [
+  "ssh-ed25519 AAAA... you@laptop",
+]
+
+# Lock SSH down to your IP, or set [] and use Tailscale only.
+ssh_source_cidrs = ["0.0.0.0/0"]
+
+ingress_tcp_ports = [80, 443]
+
+# The VMs and their 64 GB P6 disks are free for 12 months, but Standard public IPv4
+# addresses are billed (about $3.65/month each); the $200 credit covers them for the first
+# 30 days. New subnets have no default outbound access, so a VM without one can't reach
+# the internet. The plan fails until you choose:
+# acknowledge_public_ipv4_charge = true
+
+# --- Layouts that fit the 12-month free services (750 h per size, 2 × P6 disks) ---
+
+# A) One AMD host: B2ats v2 (2 vCPUs, 1 GiB), 64 GB Premium SSD (default)
+instances = {
+  main = {
+    size         = "Standard_B2ats_v2"
+    swap_size_gb = 2 # 1 GiB RAM is tight for Docker
+
+    apps = {
+      whoami = {
+        compose = <<-YAML
+          services:
+            whoami:
+              image: traefik/whoami
+              ports: ["80:80"]
+              restart: unless-stopped
+        YAML
+      }
+    }
+  }
+}
+
+# B) Two hosts, one AMD and one Arm (each size has its own 750 hours)
+# instances = {
+#   amd = { size = "Standard_B2ats_v2" }
+#   arm = { size = "Standard_B2pts_v2" }
+# }
+
+# Optional: join every host to your tailnet on first boot.
+# tailscale_auth_key = "tskey-auth-..."

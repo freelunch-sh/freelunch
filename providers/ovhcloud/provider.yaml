@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: ovhcloud
+display_name: "OVHcloud"
+category: vps
+status: planned
+layer: host
+terraform_provider: "ovh/ovh"
+iac: partner
+free_tier_type: startup-credits
+free_tier: "No always-free compute; Startup Program (up to EUR 100K for EU scale-ups)"
+card_required: "yes"
+url: "https://www.ovhcloud.com/en/startup-program/"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/cloudcredits.io (2025-10)"
+  - "thundercompute.com/blog/free-cloud-gpu-credits (2026-10-01)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

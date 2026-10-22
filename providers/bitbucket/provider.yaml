@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: bitbucket
+display_name: "Bitbucket Cloud"
+category: iac-ci
+status: planned
+layer: service
+terraform_provider: "DrFaust92/bitbucket"
+iac: community
+free_tier_type: always-free
+free_tier: "Free for 5 users: unlimited private repos, 50 Pipelines build minutes/month, 1 GB LFS, 1 GB storage per repository"
+card_required: "no"
+url: "https://www.atlassian.com/software/bitbucket/pricing"
+last_verified: "2026-10-19"
+notes: "Build minutes and storage are shared across the workspace."
+sources:
+  - "atlassian.com/software/bitbucket/pricing (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

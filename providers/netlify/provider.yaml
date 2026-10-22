@@ -1,0 +1,20 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: netlify
+display_name: "Netlify"
+category: edge
+status: planned
+layer: service
+terraform_provider: "netlify/netlify"
+iac: partner
+free_tier_type: always-free
+free_tier: "300 credits/month (hard limit; credit-based since Sep 2025)"
+card_required: "no"
+url: "https://www.netlify.com/pricing/"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/terraform-providers/netlify-terraform-provider-netlify"

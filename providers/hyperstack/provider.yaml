@@ -1,0 +1,17 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: hyperstack
+display_name: "Hyperstack"
+category: gpu
+status: planned
+layer: host
+terraform_provider: "NexGenCloud/hyperstack"
+iac: community
+free_tier_type: none
+free_tier: "No free tier found during research"
+card_required: "yes"
+url: "https://www.hyperstack.cloud/gpu-pricing"
+last_verified: "2026-10-18"
+notes: "Terraform provider is still tagged alpha."
+sources:
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

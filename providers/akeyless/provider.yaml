@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: akeyless
+display_name: "Akeyless"
+category: secrets
+status: planned
+layer: service
+terraform_provider: "akeyless-community/akeyless"
+iac: community
+free_tier_type: always-free
+free_tier: "5 clients, 500 static secrets, 5 dynamic and 5 rotated secrets, 1 gateway"
+card_required: "unknown"
+url: "https://www.akeyless.io/pricing/"
+last_verified: "2026-10-19"
+notes: "The pricing page doesn't say whether the free plan is permanent."
+sources:
+  - "akeyless.io/pricing (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

@@ -1,0 +1,32 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+# The `limits` block is also enforced by providers/aws/modules/* through preconditions.
+name: aws
+display_name: "Amazon Web Services"
+category: hyperscalers
+status: ready
+layer: host
+terraform_provider: "hashicorp/aws"
+iac: official
+free_tier_type: trial
+free_tier: "New accounts (since 2025-07-15): up to $200 credit on the Free plan, which ends after 6 months; always-free Lambda 1M requests/month, DynamoDB 25 GB, CloudFront 1 TB egress"
+card_required: "yes"
+url: "https://aws.amazon.com/free/"
+last_verified: "2026-10-19"
+notes: "Free plan: $100 sign-up credit plus up to $100 from activities; EC2 is limited to t3.micro, t3.small, t4g.micro, t4g.small, c7i-flex.large and m7i-flex.large, and everything (including the $0.005/h public IPv4) draws down the credit. The account is suspended when the plan ends unless upgraded. The legacy 12-month tier (t2/t3.micro) only covered accounts created before 2025-07-15, so it has expired for every account."
+sources:
+  - "docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-free-tier-usage.html (checked 2026-10-19)"
+  - "aws.amazon.com/free/free-tier-faqs (checked 2026-10-19)"
+  - "inspire/repos/aws/rogeriomm-aws-lab/README.md"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire:
+  - "repos/aws"
+  - "repos/multi-cloud/gruberdev-tf-free"
+
+limits:
+  compute:
+    # `aws ec2 describe-instance-types --filters Name=free-tier-eligible,Values=true`
+    free_plan_instance_types: [t3.micro, t3.small, t4g.micro, t4g.small, c7i-flex.large, m7i-flex.large]
+    cpu_credits: standard     # t3/t4g default to "unlimited", which bills sustained bursts
+  storage:
+    volume_types: [gp3, gp2]
+    min_root_volume_gb: 8     # Ubuntu AMI size

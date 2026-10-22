@@ -1,0 +1,17 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: elephantsql
+display_name: "ElephantSQL"
+category: databases
+status: excluded
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: none
+free_tier: "Shut down on 2025-01-27 (previously a free 20 MB Postgres)"
+card_required: "unknown"
+url: "https://www.elephantsql.com"
+last_verified: "2026-10-19"
+notes: "Excluded: service closed. 84codes kept CloudAMQP, which is catalogued separately."
+sources:
+  - "stackhero.io ElephantSQL shutdown guide (checked 2026-10-19)"
+inspire: []

@@ -1,0 +1,17 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: fauna
+display_name: "Fauna"
+category: databases
+status: excluded
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: none
+free_tier: "Shut down on 2025-05-30; accounts and data deleted"
+card_required: "unknown"
+url: "https://docs.fauna.com/fauna/current/eol-faq"
+last_verified: "2026-10-19"
+notes: "Excluded: service closed."
+sources:
+  - "docs.fauna.com/fauna/current/eol-faq (checked 2026-10-19)"
+inspire: []

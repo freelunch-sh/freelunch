@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export CLOUDFLARE_API_TOKEN (or put it in .freelunch/.env).
+# Apply a host stack first: routes must point at hosts in the inventory.
+
+zone = "example.com"   # a domain already added to your Cloudflare account
+
+# Public hostname -> host and local port. Host names are <provider>-<instance>
+# (run `freelunch inventory` to list them). The app should publish its port on
+# 127.0.0.1 only, e.g. ports: ["127.0.0.1:8080:8080"], because cloudflared reaches
+# it from the host and nothing else needs to.
+routes = {
+  "api.example.com" = { host = "oci-main", port = 8080 }
+
+  # Private app behind Cloudflare Access (email one-time PIN login):
+  # "admin.example.com" = { host = "oci-main", port = 9000, access = { emails = ["you@example.com"] } }
+}

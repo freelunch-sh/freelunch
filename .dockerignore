@@ -1,0 +1,19 @@
+# Keep the runner image to the code: no history, research corpus, private notes,
+# state, credentials or local tool folders.
+.git
+.github
+.claude
+.DS_Store
+inspire
+private
+.freelunch
+**/.terraform
+**/.terraform.lock.hcl
+**/*.tfstate
+**/*.tfstate.*
+**/terraform.tfvars
+**/.env
+**/.freelunch/*.env
+**/*.tfplan
+**/inventory.json
+**/known_hosts

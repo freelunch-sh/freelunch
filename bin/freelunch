@@ -1,0 +1,646 @@
+#!/usr/bin/env bash
+# freelunch: provision free-tier infrastructure per provider, combine it into a hybrid
+# inventory, and deploy Compose apps to the hosts.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROVIDERS_DIR="$ROOT/providers"
+README="$ROOT/README.md"
+TF="${FREELUNCH_TF:-$(command -v tofu || command -v terraform || true)}"
+SSH="${FREELUNCH_SSH:-ssh}"
+INIT_STACKS=(oci cloudflare)
+
+PROJECT=""      # the project's .freelunch folder; empty in home mode (config and state live in this checkout)
+TMP=""          # scratch folder removed on exit (deploy keeps tunnel tokens there)
+SSH_OPTS=()
+trap '[[ -z "$TMP" ]] || rm -rf "$TMP"' EXIT
+
+die() { echo "freelunch: $*" >&2; exit 1; }
+log() { echo "==> $*" >&2; }
+rel() { echo "${1#"$PWD"/}"; }
+
+usage() {
+  cat <<'EOF'
+Usage: freelunch <command> [args] [-- extra tofu/terraform args]
+
+Project:
+  init [stack...]         Create .freelunch/ in the current directory (default stacks: oci cloudflare)
+  deploy [target...]      Copy Compose apps and their env to the hosts over SSH, start them and
+                          wait until they are healthy. Targets: all (default), a provider (oci)
+                          or a host (oci-main). --dry-run prints the remote script instead.
+
+Infrastructure:
+  list                    Show every provider with status, layer and deployment state
+  plan    <p...|all>      Plan provider stacks
+  apply   <p...|all>      Apply provider stacks (hosts, then services), refresh hybrid, then glue
+  destroy <p...|all>      Destroy provider stacks in reverse layer order, then refresh hybrid
+  hybrid                  Re-aggregate deployed host stacks into the hybrid inventory
+  inventory               Write inventory.json (all hosts across providers)
+
+Development:
+  catalog                 Regenerate the README provider checklist and stub provider READMEs
+  test [folder...]        Run the test suites (offline, mocked providers), or those under the given
+                          folders, e.g. test providers/cloudflare deploy tests
+  fmt [-check]            Format all HCL, or only check it
+
+In a repository with a .freelunch/ folder (looked up from the current directory, or set
+FREELUNCH_PROJECT), terraform.tfvars, state, inventory.json and .env live in that folder.
+Inside the freelunch checkout, each stack keeps them in providers/<name>/stack/ as before.
+
+`all` means: providers with status `ready` that have a terraform.tfvars.
+FREELUNCH_AUTO_APPROVE=1 skips apply/destroy prompts. FREELUNCH_TF picks tofu or terraform.
+FREELUNCH_SSH_KEY sets the key deploy uses, FREELUNCH_SSH replaces the ssh command, and
+FREELUNCH_DEPLOY_TIMEOUT (seconds, default 180) limits the wait for healthy containers.
+EOF
+}
+
+need_tf() { [[ -n "$TF" ]] || die "neither tofu nor terraform found in PATH (or use the runner image, see README)"; }
+
+meta() { # meta <provider> <field>
+  sed -n "s/^$2: *\"\{0,1\}\([^\"#]*\)\"\{0,1\}.*/\1/p" "$PROVIDERS_DIR/$1/provider.yaml" | head -1 | sed 's/ *$//'
+}
+
+all_providers() {
+  local d
+  for d in "$PROVIDERS_DIR"/*/; do
+    d="$(basename "$d")"
+    [[ "$d" == _* ]] && continue
+    [[ -f "$PROVIDERS_DIR/$d/provider.yaml" ]] && echo "$d"
+  done
+}
+
+# --- Project mode ---------------------------------------------------------------------
+
+# Walk up from the current directory to the nearest .freelunch/ folder, but never past the
+# freelunch checkout: inside it (or a submodule copy of it) the CLI stays in home mode.
+find_project() {
+  local d
+  if [[ -n "${FREELUNCH_PROJECT:-}" ]]; then
+    d="${FREELUNCH_PROJECT%/}"
+    [[ "$(basename "$d")" == ".freelunch" ]] || d="$d/.freelunch"
+    if [[ -d "$d" ]]; then PROJECT="$(cd "$d" && pwd)"; fi
+    return 0
+  fi
+  d="$PWD"
+  while [[ "$d" != "/" && "$d" != "$ROOT" ]]; do
+    if [[ -d "$d/.freelunch" ]]; then PROJECT="$d/.freelunch"; return 0; fi
+    d="$(dirname "$d")"
+  done
+}
+
+# Export KEY=VALUE lines from a dotenv file without running it as shell code. Variables that
+# are already set win, so the shell and CI can override the file.
+load_env_file() {
+  local line key value
+  [[ -f "$1" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
+    line="${line#export }"
+    key="${line%%=*}"
+    value="${line#*=}"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    if [[ ${#value} -ge 2 && ( "$value" == \"*\" || "$value" == \'*\' ) ]]; then value="${value:1:${#value}-2}"; fi
+    [[ -n "${!key+x}" ]] || export "$key=$value"
+  done < "$1"
+}
+
+state_root()   { if [[ -n "$PROJECT" ]]; then echo "$PROJECT"; else echo "$ROOT"; fi; }
+stack_dir()    { echo "$PROVIDERS_DIR/$1/stack"; }
+config_dir()   { if [[ -n "$PROJECT" ]]; then echo "$PROJECT/$1"; else stack_dir "$1"; fi; }
+hybrid_state() { if [[ -n "$PROJECT" ]]; then echo "$PROJECT/hybrid/terraform.tfstate"; else echo "$ROOT/hybrid/terraform.tfstate"; fi; }
+
+is_configured() { [[ -f "$(config_dir "$1")/terraform.tfvars" ]]; }
+is_deployed() {
+  local state; state="$(config_dir "$1")/terraform.tfstate"
+  [[ -s "$state" ]] && grep -q '"outputs": {' "$state" && ! grep -q '"outputs": {}' "$state"
+}
+
+# tofu/terraform would still load a terraform.tfvars sitting next to the code, on top of the
+# project's own, so refuse to mix the two.
+check_checkout_tfvars() {
+  [[ -n "$PROJECT" && -f "$1/terraform.tfvars" ]] || return 0
+  die "${1#"$ROOT"/}/terraform.tfvars in the freelunch checkout would be loaded on top of $(rel "$PROJECT"). Move it into the project, or run from the checkout."
+}
+
+# Arguments that point a stack run at the project's tfvars and state.
+project_args() { # project_args <provider>
+  [[ -n "$PROJECT" ]] || return 0
+  echo "-var-file=$PROJECT/$1/terraform.tfvars"
+  echo "-state=$PROJECT/$1/terraform.tfstate"
+  # Glue stacks read the hybrid inventory (docs/architecture.md#glue-contract).
+  if [[ "$(meta "$1" layer)" == "glue" ]]; then echo "-var=inventory_state_path=$(hybrid_state)"; fi
+}
+
+# --- tofu/terraform -------------------------------------------------------------------
+
+tf_in() { # tf_in <dir> <args...>
+  local dir="$1"; shift
+  "$TF" -chdir="$dir" "$@"
+}
+
+# tf_for <name> <dir> <args...>: like tf_in, but in project mode the .terraform/ folder
+# (providers, modules) of <name> lives in the project, not in the freelunch code.
+tf_for() {
+  local name="$1" dir="$2"; shift 2
+  if [[ -n "$PROJECT" ]]; then TF_DATA_DIR="$PROJECT/$name/.terraform" tf_in "$dir" "$@"; else tf_in "$dir" "$@"; fi
+}
+
+init_dir() { tf_in "$1" init -input=false -upgrade=false >/dev/null; }
+
+resolve() { # resolve <names...> -> validated provider list
+  local p
+  if [[ "${1:-}" == "all" ]]; then
+    for p in $(all_providers); do
+      if [[ "$(meta "$p" status)" == "ready" ]] && is_configured "$p"; then echo "$p"; fi
+    done
+    return 0
+  fi
+  [[ $# -gt 0 ]] || die "name at least one provider, or 'all'"
+  for p in "$@"; do
+    [[ -f "$PROVIDERS_DIR/$p/provider.yaml" ]] || die "unknown provider '$p' (see: freelunch list)"
+    [[ -d "$(stack_dir "$p")" ]] || die "provider '$p' has no stack yet (status: $(meta "$p" status))"
+    echo "$p"
+  done
+}
+
+run_stack() { # run_stack <action> <provider> [extra args]
+  local action="$1" p="$2"; shift 2
+  local dir args=() a
+  dir="$(stack_dir "$p")"
+  is_configured "$p" || die "$p: missing $(rel "$(config_dir "$p")")/terraform.tfvars (copy terraform.tfvars.example)"
+  check_checkout_tfvars "$dir"
+  log "$action $p${PROJECT:+ ($(rel "$PROJECT")/$p)}"
+  tf_for "$p" "$dir" init -input=false -upgrade=false >/dev/null
+  while IFS= read -r a; do args+=("$a"); done < <(project_args "$p")
+  [[ "${FREELUNCH_AUTO_APPROVE:-0}" == "1" && "$action" != "plan" ]] && args+=(-auto-approve)
+  tf_for "$p" "$dir" "$action" -input=false ${args[@]+"${args[@]}"} "$@"
+}
+
+deployed_hosts_json() {
+  local p first=1
+  printf '['
+  for p in $(all_providers); do
+    if [[ "$(meta "$p" layer)" != "host" || ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
+    [[ $first -eq 1 ]] || printf ','
+    printf '"%s"' "$p"; first=0
+  done
+  printf ']'
+}
+
+cmd_hybrid() {
+  need_tf
+  local hosts state=() vars=()
+  hosts="$(deployed_hosts_json)"
+  check_checkout_tfvars "$ROOT/hybrid"
+  if [[ -n "$PROJECT" ]]; then state=(-state="$(hybrid_state)"); vars=(-var "state_dir=$PROJECT"); fi
+  log "hybrid: aggregating $hosts"
+  tf_for hybrid "$ROOT/hybrid" init -input=false -upgrade=false >/dev/null
+  tf_for hybrid "$ROOT/hybrid" apply -input=false -auto-approve ${state[@]+"${state[@]}"} ${vars[@]+"${vars[@]}"} -var "host_providers=$hosts" >/dev/null
+  tf_for hybrid "$ROOT/hybrid" output ${state[@]+"${state[@]}"} hosts_by_provider
+}
+
+cmd_inventory() {
+  need_tf
+  local out state=()
+  out="$(state_root)/inventory.json"
+  [[ -z "$PROJECT" ]] || state=(-state="$(hybrid_state)")
+  [[ -s "$(hybrid_state)" ]] || cmd_hybrid >/dev/null
+  tf_for hybrid "$ROOT/hybrid" output ${state[@]+"${state[@]}"} -json hosts > "$out"
+  log "wrote $(rel "$out") ($(jq length "$out" 2>/dev/null || echo '?') hosts)"
+}
+
+cmd_lifecycle() { # plan|apply|destroy
+  need_tf
+  local action="$1"; shift
+  local names=() extra=() seen_dashes=0 a
+  for a in "$@"; do
+    if [[ $seen_dashes -eq 1 ]]; then extra+=("$a"); elif [[ "$a" == "--" ]]; then seen_dashes=1; else names+=("$a"); fi
+  done
+  local resolved providers=()
+  resolved="$(resolve ${names[@]+"${names[@]}"})" || exit 1
+  while IFS= read -r a; do [[ -n "$a" ]] && providers+=("$a"); done <<< "$resolved"
+  [[ ${#providers[@]} -gt 0 ]] || die "nothing to do: no ready provider has a terraform.tfvars"
+
+  local hosts=() services=() glue=()
+  for a in "${providers[@]}"; do
+    case "$(meta "$a" layer)" in
+      host)    hosts+=("$a") ;;
+      service) services+=("$a") ;;
+      glue)    glue+=("$a") ;;
+    esac
+  done
+
+  case "$action" in
+    plan)
+      for a in ${hosts[@]+"${hosts[@]}"} ${services[@]+"${services[@]}"} ${glue[@]+"${glue[@]}"}; do run_stack plan "$a" ${extra[@]+"${extra[@]}"}; done ;;
+    apply)
+      for a in ${hosts[@]+"${hosts[@]}"} ${services[@]+"${services[@]}"}; do run_stack apply "$a" ${extra[@]+"${extra[@]}"}; done
+      [[ ${#hosts[@]} -gt 0 ]] && cmd_hybrid
+      for a in ${glue[@]+"${glue[@]}"}; do run_stack apply "$a" ${extra[@]+"${extra[@]}"}; done ;;
+    destroy)
+      for a in ${glue[@]+"${glue[@]}"} ${services[@]+"${services[@]}"} ${hosts[@]+"${hosts[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
+      [[ ${#hosts[@]} -gt 0 ]] && cmd_hybrid ;;
+  esac
+}
+
+cmd_list() {
+  printf "%-20s %-14s %-9s %-8s %-10s %s\n" PROVIDER CATEGORY STATUS LAYER IAC DEPLOYED
+  local p state
+  for p in $(all_providers); do
+    state="-"
+    if [[ -d "$(stack_dir "$p")" ]]; then
+      if is_deployed "$p"; then state="yes"; elif is_configured "$p"; then state="configured"; else state="no"; fi
+    fi
+    printf "%-20s %-14s %-9s %-8s %-10s %s\n" "$p" "$(meta "$p" category)" "$(meta "$p" status)" "$(meta "$p" layer)" "$(meta "$p" iac)" "$state"
+  done
+}
+
+# --- init -----------------------------------------------------------------------------
+
+write_new() { # write_new <file>: write stdin to <file> unless it already exists
+  if [[ -e "$1" ]]; then cat >/dev/null; log "kept $(rel "$1")"; else cat > "$1"; log "wrote $(rel "$1")"; fi
+}
+
+ready_stacks() {
+  local p
+  for p in $(all_providers); do [[ -d "$(stack_dir "$p")" ]] && printf '%s ' "$p"; done
+  return 0
+}
+
+cmd_init() {
+  local base cfg s stacks=()
+  base="${FREELUNCH_PROJECT:-$PWD}"; base="${base%/}"
+  [[ "$(basename "$base")" != ".freelunch" ]] || base="$(dirname "$base")"
+  [[ -d "$base" ]] || die "no such directory: $base"
+  base="$(cd "$base" && pwd)"
+  cfg="$base/.freelunch"
+  if [[ -z "${FREELUNCH_PROJECT:-}" && ! -d "$cfg" && ( "$base" == "$ROOT" || "$base" == "$ROOT"/* ) ]]; then
+    die "run init in your own project, not inside the freelunch checkout (or set FREELUNCH_PROJECT)"
+  fi
+  [[ -z "$PROJECT" || "$PROJECT" == "$cfg" ]] || die "already inside a freelunch project: $PROJECT"
+
+  if [[ $# -gt 0 ]]; then stacks=("$@"); else stacks=("${INIT_STACKS[@]}"); fi
+  for s in "${stacks[@]}"; do
+    [[ -f "$(stack_dir "$s")/terraform.tfvars.example" ]] || die "no stack named '$s' (stacks: $(ready_stacks))"
+  done
+
+  mkdir -p "$cfg"
+  write_new "$cfg/.gitignore" <<'EOF'
+# Written by freelunch init: local config, state and secrets stay out of git.
+*/terraform.tfvars
+*/terraform.tfstate
+*/terraform.tfstate.*
+*/.terraform/
+.env
+*.env
+inventory.json
+known_hosts
+EOF
+
+  for s in "${stacks[@]}"; do
+    mkdir -p "$cfg/$s"
+    if [[ -e "$cfg/$s/terraform.tfvars.example" ]]; then
+      log "kept $(rel "$cfg/$s/terraform.tfvars.example")"
+    else
+      cp "$(stack_dir "$s")/terraform.tfvars.example" "$cfg/$s/terraform.tfvars.example"
+      log "wrote $(rel "$cfg/$s/terraform.tfvars.example")"
+    fi
+  done
+
+  local app host="" compose="compose.yaml" f
+  app="$(basename "$base" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9_-]/-/g' -e 's/^[^a-z0-9]*//')"
+  [[ -n "$app" && "$app" != "cloudflared" ]] || app="app"
+  for s in "${stacks[@]}"; do
+    if [[ -z "$host" && "$(meta "$s" layer)" == "host" ]]; then host="$s-main"; fi
+  done
+  for f in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
+    if [[ -f "$base/$f" ]]; then compose="$f"; break; fi
+  done
+
+  write_new "$cfg/apps.tfvars" <<EOF
+# Apps that \`freelunch deploy\` runs on your hosts. Paths are relative to this folder.
+# Host names are <provider>-<instance>; \`freelunch inventory\` lists them.
+
+apps = {
+  $app = {
+    host    = "${host:-oci-main}"
+    compose = "../$compose"
+
+    # Secrets for the app. deploy copies the file to the host as .env next to the
+    # compose file; use env_file: .env in the compose service to pass them in.
+    # Keep it in this folder: *.env files are git-ignored.
+    # env_file = "$app.env"
+  }
+}
+
+# Log in to private registries before pulling. The password is read from the named
+# environment variable (or from .freelunch/.env), never from this file.
+# registries = {
+#   "ghcr.io" = { username = "your-github-user", password_env = "GHCR_TOKEN" }
+# }
+
+# Reach a host at another address, e.g. its Tailscale name instead of the public IP.
+# hosts = {
+#   ${host:-oci-main} = { address = "freelunch-${host:-oci-main}" }
+# }
+EOF
+
+  write_new "$cfg/.env.example" <<'EOF'
+# Credentials for the freelunch CLI. Copy to .env (git-ignored); variables already set in
+# your shell win over this file.
+
+# Cloudflare API token for the cloudflare stack (permissions: providers/cloudflare/README.md)
+CLOUDFLARE_API_TOKEN=
+
+# Read-only registry token, when apps.tfvars lists registries
+# GHCR_TOKEN=
+
+# SSH key for deploy, if it is not your default key or in ssh-agent
+# FREELUNCH_SSH_KEY=~/.ssh/id_ed25519
+EOF
+
+  [[ -f "$base/$compose" ]] || log "there is no $compose yet; apps.tfvars expects one"
+  local applies=""
+  for s in "${stacks[@]}"; do applies="${applies:+$applies, then }freelunch apply $s"; done
+  cat >&2 <<EOF
+
+Next steps:
+  1. In .freelunch/<stack>/, copy terraform.tfvars.example to terraform.tfvars and fill it in
+  2. cp .freelunch/.env.example .freelunch/.env and set the credentials
+  3. $applies
+  4. freelunch deploy
+EOF
+}
+
+# --- deploy ---------------------------------------------------------------------------
+
+shq() { local s="${1//\'/\'\\\'\'}"; printf "'%s'" "$s"; } # quote for the remote shell
+
+b64() { base64 | tr -d '\n'; echo; }
+
+# deploy_plan: resolve apps.tfvars, the inventory and the tunnels with deploy/ into
+# $TMP/targets.json, registries.json and tunnel_tokens.json.
+deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
+  local apps_file="$1" tunnel_state="$2" args o
+  args=(-state="$TMP/deploy.tfstate" -var "config_dir=$(state_root)" -var "inventory_state_path=$(hybrid_state)")
+  if [[ -f "$apps_file" ]]; then args+=(-var-file="$apps_file"); fi
+  if [[ -n "$tunnel_state" ]]; then args+=(-var "tunnel_state_path=$tunnel_state"); fi
+  check_checkout_tfvars "$ROOT/deploy"
+  TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" init -input=false >/dev/null
+  TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" apply -input=false -auto-approve "${args[@]}" >/dev/null
+  for o in targets registries tunnel_tokens; do
+    TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" output -state="$TMP/deploy.tfstate" -json "$o" > "$TMP/$o.json"
+  done
+}
+
+# remote_script <host> <redact>: the script deploy pipes to `sudo bash -s` on a host.
+# Files travel as base64 heredocs; with redact=1 (dry run) contents and secrets are left out.
+remote_script() {
+  local host="$1" redact="$2" name compose env_file server username var token
+  local targets="$TMP/targets.json"
+
+  cat <<EOF
+# Everything runs inside main(), so bash reads the whole script before running
+# anything and no command can swallow the rest of it from stdin.
+main() {
+set -euo pipefail
+apps=/opt/freelunch/apps
+timeout=${FREELUNCH_DEPLOY_TIMEOUT:-180}
+EOF
+  cat <<'EOF'
+
+# put <file> <mode>: base64 on stdin becomes <file>, replaced in one step
+put() {
+  install -d -m 0750 "$(dirname "$1")"
+  base64 -d > "$1.new"
+  chmod "$2" "$1.new"
+  mv "$1.new" "$1"
+}
+
+# up <app>: pull and start the app, then wait until every container is running, and
+# healthy when it has a healthcheck
+up() {
+  echo "--> $1"
+  cd "$apps/$1"
+  docker compose pull --quiet
+  if ! docker compose up -d --remove-orphans --wait --wait-timeout "$timeout"; then
+    echo "!! $1 is not healthy after ${timeout}s" >&2
+    docker compose ps -a >&2 || true
+    docker compose logs --no-color --tail 50 >&2 || true
+    exit 1
+  fi
+}
+
+# A new host may still be in its first boot; wait for cloud-init (Docker is installed there).
+if command -v cloud-init >/dev/null 2>&1; then timeout 900 cloud-init status --wait >/dev/null 2>&1 || true; fi
+docker compose version >/dev/null 2>&1 || { echo "!! docker compose is not installed on this host" >&2; exit 1; }
+install -d -m 0750 "$apps"
+EOF
+
+  while IFS=$'\t' read -r server username var; do
+    [[ -n "$server" ]] || continue
+    if [[ "$redact" == 1 ]]; then token="<\$$var>"; else token="$(printf '%s' "${!var}" | b64)"; fi
+    echo "printf '%s' $(shq "$token") | base64 -d | docker login $(shq "$server") -u $(shq "$username") --password-stdin >/dev/null"
+  done < <(jq -r 'to_entries[] | [.key, .value.username, .value.password_env] | @tsv' "$TMP/registries.json")
+
+  while IFS=$'\t' read -r name compose env_file; do
+    [[ -n "$name" ]] || continue
+    echo "put \"\$apps/$name/compose.yaml\" 0640 <<'FREELUNCH_EOF'"
+    if [[ "$redact" == 1 ]]; then echo "<$compose>"; else b64 < "$compose"; fi
+    echo "FREELUNCH_EOF"
+    if [[ -n "$env_file" ]]; then
+      echo "put \"\$apps/$name/.env\" 0600 <<'FREELUNCH_EOF'"
+      if [[ "$redact" == 1 ]]; then echo "<$env_file, redacted>"; else b64 < "$env_file"; fi
+      echo "FREELUNCH_EOF"
+    fi
+    echo "up $name"
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // "")] | @tsv' "$targets")
+
+  if [[ "$(jq -r --arg h "$host" '.[$h].tunnel' "$targets")" == "true" ]]; then
+    echo "put \"\$apps/cloudflared/compose.yaml\" 0640 <<'FREELUNCH_EOF'"
+    if [[ "$redact" == 1 ]]; then echo "<providers/cloudflare/apps/cloudflared/compose.yaml>"; else b64 < "$PROVIDERS_DIR/cloudflare/apps/cloudflared/compose.yaml"; fi
+    echo "FREELUNCH_EOF"
+    echo "put \"\$apps/cloudflared/.env\" 0600 <<'FREELUNCH_EOF'"
+    if [[ "$redact" == 1 ]]; then echo "<TUNNEL_TOKEN, redacted>"; else printf 'TUNNEL_TOKEN=%s\n' "$(jq -r --arg h "$host" '.[$h]' "$TMP/tunnel_tokens.json")" | b64; fi
+    echo "FREELUNCH_EOF"
+    echo "up cloudflared"
+  fi
+
+  cat <<'EOF'
+echo "--> removing unused images"
+docker image prune -af | tail -n 1
+}
+main
+EOF
+}
+
+# A new host takes a minute or two before it accepts SSH. Wrong keys fail right away.
+wait_for_ssh() { # wait_for_ssh <user@address>
+  local i out
+  for i in $(seq 1 30); do
+    if out="$("$SSH" "${SSH_OPTS[@]}" "$1" true 2>&1)"; then return 0; fi
+    case "$out" in
+      *"Permission denied"*|*"Host key verification failed"*|*"REMOTE HOST IDENTIFICATION HAS CHANGED"*) die "$1: $out" ;;
+    esac
+    [[ $i -gt 1 ]] || log "waiting for SSH on $1"
+    sleep 10
+  done
+  die "cannot reach $1 over SSH: $out"
+}
+
+deploy_host() { # deploy_host <host> <dry run 0|1>
+  local host="$1" dry_run="$2" address user url
+  address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
+  user="$(jq -r --arg h "$host" '.[$h].user' "$TMP/targets.json")"
+  [[ -n "$address" ]] || die "$host has no address to deploy to"
+
+  if [[ "$dry_run" == 1 ]]; then
+    log "$host: would run this on $user@$address (dry run)"
+    remote_script "$host" 1
+    return 0
+  fi
+
+  log "$host: deploying to $user@$address"
+  wait_for_ssh "$user@$address"
+  # Run as root: apps live in /opt/freelunch/apps, which cloud-init created as root.
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  if ! remote_script "$host" 0 | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi'; then
+    die "$host: deploy failed (see the output above)"
+  fi
+  while IFS= read -r url; do log "$host: $url"; done < <(jq -r --arg h "$host" '.[$h].urls[]' "$TMP/targets.json")
+  log "$host: done"
+}
+
+cmd_deploy() {
+  need_tf
+  command -v jq >/dev/null || die "jq is required for 'deploy'"
+  local dry_run=0 filters=() a
+  for a in "$@"; do
+    case "$a" in
+      --dry-run) dry_run=1 ;;
+      -*)        die "deploy: unknown option $a" ;;
+      all)       ;;
+      *)         filters+=("$a") ;;
+    esac
+  done
+
+  local apps_file tunnel_state=""
+  apps_file="$(state_root)/apps.tfvars"
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  [[ -f "$apps_file" || -n "$tunnel_state" ]] || die "nothing to deploy: no $(rel "$apps_file") (freelunch init writes one) and no cloudflare stack"
+
+  cmd_hybrid >/dev/null
+  TMP="$(mktemp -d)"
+  deploy_plan "$apps_file" "$tunnel_state"
+
+  local known f hosts=() h var
+  known="$(jq -r 'keys | join(", ")' "$TMP/targets.json")"
+  [[ -n "$known" ]] || die "nothing to deploy: apps.tfvars has no apps and no host has a tunnel"
+  for f in ${filters[@]+"${filters[@]}"}; do
+    jq -e --arg f "$f" 'to_entries | any(.key == $f or .value.provider == $f)' "$TMP/targets.json" >/dev/null \
+      || die "deploy: '$f' is not a host or provider with apps or a tunnel (have: $known)"
+  done
+  while IFS= read -r h; do hosts+=("$h"); done < <(
+    jq -r 'to_entries[] | select(.key as $k | .value.provider as $p | ($ARGS.positional | length == 0) or ($ARGS.positional | any(. == $k or . == $p))) | .key' \
+      --args ${filters[@]+"${filters[@]}"} < "$TMP/targets.json"
+  )
+
+  for var in $(jq -r '.[].password_env' "$TMP/registries.json"); do
+    [[ -n "${!var:-}" ]] || die "deploy: \$$var is not set (registries in apps.tfvars); export it or add it to $(rel "$(state_root)")/.env"
+  done
+
+  SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15
+    -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$(state_root)/known_hosts")
+  if [[ -n "${FREELUNCH_SSH_KEY:-}" ]]; then SSH_OPTS+=(-i "${FREELUNCH_SSH_KEY/#\~/$HOME}" -o IdentitiesOnly=yes); fi
+
+  for h in "${hosts[@]}"; do deploy_host "$h" "$dry_run"; done
+}
+
+# --- development ----------------------------------------------------------------------
+
+cmd_catalog() {
+  need_tf
+  command -v jq >/dev/null || die "jq is required for 'catalog'"
+  local dir="$ROOT/catalog" tmp; tmp="$(mktemp -d)"
+  init_dir "$dir"
+  tf_in "$dir" apply -input=false -auto-approve -state="$tmp/catalog.tfstate" >/dev/null
+  tf_in "$dir" output -state="$tmp/catalog.tfstate" -raw checklist > "$tmp/checklist.md"
+  tf_in "$dir" output -state="$tmp/catalog.tfstate" -json stub_readmes > "$tmp/stubs.json"
+
+  grep -q '<!-- BEGIN PROVIDER CHECKLIST -->' "$README" || die "README.md is missing the <!-- BEGIN PROVIDER CHECKLIST --> marker"
+  awk -v gen="$tmp/checklist.md" '
+    /<!-- BEGIN PROVIDER CHECKLIST -->/ { print; while ((getline line < gen) > 0) print line; skip = 1; next }
+    /<!-- END PROVIDER CHECKLIST -->/   { skip = 0 }
+    !skip { print }
+  ' "$README" > "$tmp/README.md"
+  cp "$tmp/README.md" "$README"
+  log "updated README.md checklist"
+
+  local p target written=0
+  for p in $(jq -r 'keys[]' "$tmp/stubs.json"); do
+    target="$PROVIDERS_DIR/$p/README.md"
+    # shellcheck disable=SC2016 # the backticks are part of the marker text
+    if [[ ! -f "$target" ]] || head -1 "$target" | grep -q 'Generated by `bin/freelunch catalog`'; then
+      jq -r --arg p "$p" '.[$p]' "$tmp/stubs.json" > "$target"
+      written=$((written + 1))
+    fi
+  done
+  log "wrote $written generated provider READMEs (hand-written READMEs untouched)"
+  tf_in "$dir" output -state="$tmp/catalog.tfstate" summary >&2
+  rm -rf "$tmp"
+}
+
+cmd_test() { # cmd_test [folder...]: folders are relative to the checkout; `tests` means tests/cli.sh
+  need_tf
+  local dir failed=0 roots=() cli=1 a
+  if [[ $# -gt 0 ]]; then
+    cli=0
+    for a in "$@"; do
+      a="${a%/}"
+      if [[ "$a" == "tests" ]]; then cli=1; continue; fi
+      [[ -d "$ROOT/$a" ]] || die "test: no folder $a in the freelunch checkout"
+      roots+=("$ROOT/$a")
+    done
+  else
+    roots=("$ROOT/shared" "$ROOT/providers" "$ROOT/hybrid" "$ROOT/catalog" "$ROOT/deploy")
+  fi
+  if [[ ${#roots[@]} -gt 0 ]]; then
+    while IFS= read -r dir; do
+      log "test ${dir#"$ROOT"/}"
+      init_dir "$dir"
+      tf_in "$dir" test || failed=1
+    done < <(find "${roots[@]}" -type d -name tests -not -path '*/.terraform/*' -not -path '*/fixtures/*' -exec dirname {} \; | sort)
+  fi
+  if [[ $cli -eq 1 ]]; then
+    log "test tests/cli.sh"
+    "$ROOT/tests/cli.sh" || failed=1
+  fi
+  [[ $failed -eq 0 ]] || die "some test suites failed"
+}
+
+cmd_fmt() { need_tf; "$TF" fmt -recursive "$@" "$ROOT/shared" "$ROOT/providers" "$ROOT/hybrid" "$ROOT/catalog" "$ROOT/deploy" "$ROOT/examples"; }
+
+main() {
+  local cmd="${1:-help}"; shift || true
+  find_project
+  if [[ -n "${FREELUNCH_PROJECT:-}" && -z "$PROJECT" && "$cmd" != "init" ]]; then
+    die "FREELUNCH_PROJECT=$FREELUNCH_PROJECT has no .freelunch folder (run freelunch init there)"
+  fi
+  load_env_file "$(state_root)/.env"
+  case "$cmd" in
+    init)                 cmd_init "$@" ;;
+    deploy)               cmd_deploy "$@" ;;
+    list)                 cmd_list ;;
+    plan|apply|destroy)   cmd_lifecycle "$cmd" "$@" ;;
+    hybrid)               cmd_hybrid ;;
+    inventory)            cmd_inventory ;;
+    catalog)              cmd_catalog ;;
+    test)                 cmd_test "$@" ;;
+    fmt)                  cmd_fmt "$@" ;;
+    help|-h|--help)       usage ;;
+    *)                    usage; exit 1 ;;
+  esac
+}
+
+main "$@"

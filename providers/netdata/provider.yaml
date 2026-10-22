@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: netdata
+display_name: "Netdata Cloud"
+category: observability
+status: planned
+layer: service
+terraform_provider: "netdata/netdata"
+iac: community
+free_tier_type: always-free
+free_tier: "Community plan: 5 active connected nodes, 1 custom dashboard per room; personal, non-commercial use only"
+card_required: "unknown"
+url: "https://www.netdata.cloud/pricing/"
+last_verified: "2026-10-19"
+notes: "The open-source Netdata agent runs on each host; containers on a monitored host don't count as nodes. The unlimited-nodes Community plan was retired in 2024."
+sources:
+  - "netdata.cloud/pricing (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

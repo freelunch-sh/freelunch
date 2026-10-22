@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: couchbase-capella
+display_name: "Couchbase Capella"
+category: databases
+status: planned
+layer: service
+terraform_provider: "couchbasecloud/couchbase-capella"
+iac: partner
+free_tier_type: always-free
+free_tier: "Forever-free 1-node cluster with 8 GB storage"
+card_required: "unknown"
+url: "https://www.couchbase.com/pricing/"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

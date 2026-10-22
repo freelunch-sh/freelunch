@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: fly-io
+display_name: "Fly.io"
+category: containers
+status: excluded
+layer: host
+terraform_provider: "fly-apps/fly"
+iac: stale
+free_tier_type: none
+free_tier: "No free allowance since 2024-10-07; trial of 2 machine-hours or 7 days"
+card_required: "yes"
+url: "https://fly.io/docs/about/pricing/"
+last_verified: "2026-10-18"
+notes: "Excluded: no free tier, and the Terraform provider was archived in 2023."
+sources:
+  - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

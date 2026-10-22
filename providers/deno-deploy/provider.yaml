@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: deno-deploy
+display_name: "Deno Deploy"
+category: edge
+status: planned
+layer: service
+terraform_provider: "denoland/deno"
+iac: stale
+free_tier_type: always-free
+free_tier: "100k requests/day and 100 GiB transfer/month"
+card_required: "no"
+url: "https://deno.com/deploy/pricing"
+last_verified: "2026-10-18"
+notes: "Terraform provider has had no release since 2023."
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: fastly
+display_name: "Fastly"
+category: edge
+status: planned
+layer: service
+terraform_provider: "fastly/fastly"
+iac: partner
+free_tier_type: always-free
+free_tier: "Monthly: CDN 100 GB per region + 1M requests, Compute 10M requests + 100M vCPU-ms, 5 GB object storage, 1 GB KV store, 5 TLS domains"
+card_required: "unknown"
+url: "https://www.fastly.com/pricing"
+last_verified: "2026-10-19"
+notes: "CDN bandwidth is metered per region. Check what happens on overage before adding a card."
+sources:
+  - "fastly.com/pricing (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

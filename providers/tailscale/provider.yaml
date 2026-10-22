@@ -1,0 +1,20 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: tailscale
+display_name: "Tailscale"
+category: networking
+status: planned
+layer: glue
+terraform_provider: "tailscale/tailscale"
+iac: community
+free_tier_type: always-free
+free_tier: "Personal plan: 3 users, 100 devices"
+card_required: "no"
+url: "https://tailscale.com/pricing"
+last_verified: "2026-10-18"
+notes: "Hosts can already join a tailnet on first boot (tailscale_auth_key in the shared bootstrap). This stack will manage ACLs and auth keys."
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/terraform-providers/tailscale-terraform-provider-tailscale"
+  - "repos/oci-kubernetes/dorukgezici-k3s-oci-always-free/tailscale"

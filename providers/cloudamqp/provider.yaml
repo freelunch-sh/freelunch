@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: cloudamqp
+display_name: "CloudAMQP"
+category: messaging
+status: planned
+layer: service
+terraform_provider: "cloudamqp/cloudamqp"
+iac: community
+free_tier_type: always-free
+free_tier: "Little Lemur RabbitMQ: 1M messages/month, 20 connections, 100 queues"
+card_required: "no"
+url: "https://www.cloudamqp.com/plans.html"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

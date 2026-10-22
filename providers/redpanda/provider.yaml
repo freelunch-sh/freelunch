@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: redpanda
+display_name: "Redpanda Cloud"
+category: messaging
+status: planned
+layer: service
+terraform_provider: "redpanda-data/redpanda"
+iac: community
+free_tier_type: trial
+free_tier: "Serverless: $100 credit for the first 30 days, no card; then pay-as-you-go; Kafka API compatible"
+card_required: "no"
+url: "https://www.redpanda.com/pricing"
+last_verified: "2026-10-19"
+notes: "Clusters suspend when the credit or the 30 days run out. Data is deleted 7 days later unless a card is added."
+sources:
+  - "docs.redpanda.com/redpanda-cloud/get-started/cloud-overview (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

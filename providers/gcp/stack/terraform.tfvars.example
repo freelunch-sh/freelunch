@@ -1,0 +1,42 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# The presence of terraform.tfvars is what makes `bin/freelunch apply all` include GCP.
+
+project_id = "my-project-123456"     # gcloud projects list
+region     = "us-central1"           # us-west1, us-central1 or us-east1 (free e2-micro regions)
+
+ssh_public_keys = [
+  "ssh-ed25519 AAAA... you@laptop",
+]
+
+# Lock SSH down to your IP, or set [] and use Tailscale only.
+# Add "35.235.240.0/20" to allow `gcloud compute ssh --tunnel-through-iap`.
+ssh_source_cidrs = ["0.0.0.0/0"]
+
+ingress_tcp_ports = [80, 443]
+
+# The VM and its 30 GB standard disk are free, but Google bills the external IPv4 address
+# ($0.005/h, about $3.65/month); the $300 trial credit covers it while it lasts. Without it
+# the VM has no internet access (Cloud NAT is billed too). The plan fails until you choose:
+# acknowledge_public_ipv4_charge = true
+
+# --- The free layout: one e2-micro (2 shared vCPUs, 1 GB RAM) with a 30 GB pd-standard disk ---
+instances = {
+  main = {
+    swap_size_gb = 2 # 1 GB RAM is tight for Docker
+
+    apps = {
+      whoami = {
+        compose = <<-YAML
+          services:
+            whoami:
+              image: traefik/whoami
+              ports: ["80:80"]
+              restart: unless-stopped
+        YAML
+      }
+    }
+  }
+}
+
+# Optional: join the host to your tailnet on first boot.
+# tailscale_auth_key = "tskey-auth-..."

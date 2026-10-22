@@ -1,0 +1,15 @@
+name: alpha
+display_name: "Alpha Cloud"
+category: vps
+status: ready
+layer: host
+terraform_provider: "alpha/alpha"
+iac: partner
+free_tier_type: always-free
+free_tier: "1 tiny VM"
+card_required: "no"
+url: "https://alpha.example/pricing"
+last_verified: "2026-10-18"
+notes: null
+sources: []
+inspire: []

@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: timescale
+display_name: "Tiger Data (Timescale)"
+category: databases
+status: planned
+layer: service
+terraform_provider: "timescale/timescale"
+iac: partner
+free_tier_type: trial
+free_tier: "Free trial for new accounts"
+card_required: "unknown"
+url: "https://www.tigerdata.com/pricing"
+last_verified: "2026-10-18"
+notes: "Trial terms not verified during research."
+sources:
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/terraform-providers/timescale-terraform-provider-timescale"

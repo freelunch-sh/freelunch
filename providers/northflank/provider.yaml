@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: northflank
+display_name: "Northflank"
+category: containers
+status: planned
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "2 services, 2 cron jobs and 1 database"
+card_required: "unknown"
+url: "https://northflank.com/pricing"
+last_verified: "2026-10-18"
+notes: "No Terraform provider; Northflank has its own API and templates."
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

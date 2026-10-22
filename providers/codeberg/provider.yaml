@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: codeberg
+display_name: "Codeberg"
+category: iac-ci
+status: planned
+layer: service
+terraform_provider: "svalabs/forgejo"
+iac: community
+free_tier_type: always-free
+free_tier: "Free Forgejo hosting for free/libre-licensed projects: Git repos, Forgejo Actions runners, package and container registry"
+card_required: "no"
+url: "https://docs.codeberg.org/getting-started/faq/"
+last_verified: "2026-10-19"
+notes: "Only for projects under a free/libre licence; private repos are limited to what FLOSS projects need. Run by Codeberg e.V., a non-profit funded by donations."
+sources:
+  - "docs.codeberg.org/getting-started/faq (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

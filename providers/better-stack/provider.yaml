@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: better-stack
+display_name: "Better Stack"
+category: observability
+status: planned
+layer: service
+terraform_provider: "BetterStackHQ/better-uptime"
+iac: partner
+free_tier_type: always-free
+free_tier: "10 monitors with 3-min checks, status page; logs via the BetterStackHQ/logtail provider"
+card_required: "no"
+url: "https://betterstack.com/pricing"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

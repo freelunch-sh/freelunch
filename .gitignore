@@ -1,0 +1,32 @@
+# Research corpus (cloned third-party repos and listings)
+inspire/
+
+# Terraform / OpenTofu
+**/.terraform/
+*.tfstate
+*.tfstate.*
+!**/tests/fixtures/**/*.tfstate
+*.tfvars
+!*.tfvars.example
+!**/.freelunch/apps.tfvars
+crash.log
+crash.*.log
+*.tfplan
+
+# Lock files differ between OpenTofu (registry.opentofu.org) and Terraform (registry.terraform.io)
+.terraform.lock.hcl
+
+# Local outputs and secrets
+inventory.json
+known_hosts
+.env
+
+# A project folder at the root of the checkout (examples/ keep theirs)
+/.freelunch/
+
+# Private plans and notes (never published)
+private/
+
+# Local machine and tool settings
+.DS_Store
+.claude/settings.local.json

@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: backblaze-b2
+display_name: "Backblaze B2"
+category: storage
+status: planned
+layer: service
+terraform_provider: "Backblaze/b2"
+iac: partner
+free_tier_type: always-free
+free_tier: "10 GB S3-compatible storage"
+card_required: "no"
+url: "https://www.backblaze.com/cloud-storage/pricing"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/terraform-providers/Backblaze-terraform-provider-b2"

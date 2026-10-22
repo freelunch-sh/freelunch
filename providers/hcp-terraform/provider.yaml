@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: hcp-terraform
+display_name: "HCP Terraform"
+category: iac-ci
+status: planned
+layer: service
+terraform_provider: "hashicorp/tfe"
+iac: official
+free_tier_type: always-free
+free_tier: "Free tier capped at 500 managed resources (legacy free plan ended 2026-03-31)"
+card_required: "unknown"
+url: "https://www.hashicorp.com/products/terraform/pricing"
+last_verified: "2026-10-18"
+notes: "Remote-state option. Sources disagree on the current free offer, so verify it first."
+sources:
+  - "scalr.com/learning-center/hcp-terraform-free-tier-is-being-discontinued-what-you-need-to-know"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

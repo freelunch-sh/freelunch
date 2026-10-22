@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: synadia-cloud
+display_name: "Synadia Cloud (NATS)"
+category: messaging
+status: planned
+layer: service
+terraform_provider: "nats-io/jetstream"
+iac: community
+free_tier_type: always-free
+free_tier: "Personal plan: 10 connections, 100 subscriptions, 10 GB data transfer and 5 GB JetStream storage, 2 accounts, 1 MB max message"
+card_required: "no"
+url: "https://www.synadia.com/pricing"
+last_verified: "2026-10-19"
+notes: "nats-io/jetstream manages streams, consumers and KV buckets on any NATS server, including Synadia Cloud. Accounts and users are managed in the Synadia console."
+sources:
+  - "synadia.com/pricing (2026-10-19)"
+  - "synadia.com/blog/synadia-cloud-increased-limits (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: render
+display_name: "Render"
+category: containers
+status: planned
+layer: service
+terraform_provider: "render-oss/render"
+iac: partner
+free_tier_type: always-free
+free_tier: "Free web services: 750 instance-hours/month, 512 MB / 0.1 CPU, spin down after 15 min idle; free Postgres expires after 30 days; 5 GB/month bandwidth"
+card_required: "no"
+url: "https://render.com/pricing"
+last_verified: "2026-10-18"
+notes: "Hobby bandwidth was cut from 100 GB to 5 GB/month in Apr 2026."
+sources:
+  - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/terraform-providers/render-oss-terraform-provider-render"

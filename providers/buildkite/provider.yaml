@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: buildkite
+display_name: "Buildkite"
+category: iac-ci
+status: planned
+layer: service
+terraform_provider: "buildkite/buildkite"
+iac: partner
+free_tier_type: always-free
+free_tier: "Free plan: 5 users, 10 concurrent jobs, 2,000 hosted Linux vCPU-minutes/month, 30-day build retention, 250k test executions/month"
+card_required: "no"
+url: "https://buildkite.com/pricing/"
+last_verified: "2026-10-19"
+notes: "Self-hosted agents can run on free VMs from the hybrid inventory."
+sources:
+  - "buildkite.com/pricing (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

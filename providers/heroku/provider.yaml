@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: heroku
+display_name: "Heroku"
+category: containers
+status: excluded
+layer: service
+terraform_provider: "heroku/heroku"
+iac: partner
+free_tier_type: none
+free_tier: "No free tier since 2022-11-28; Eco dynos from $5/month"
+card_required: "yes"
+url: "https://www.heroku.com/pricing"
+last_verified: "2026-10-18"
+notes: "Excluded: no free tier."
+sources:
+  - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/terraform-providers/heroku-terraform-provider-heroku"

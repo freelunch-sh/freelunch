@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: openobserve
+display_name: "OpenObserve Cloud"
+category: observability
+status: excluded
+layer: service
+terraform_provider: "openobserve/openobserve"
+iac: community
+free_tier_type: none
+free_tier: "Cloud free tier discontinued in June 2025; 14-day trial, then pay-as-you-go"
+card_required: "no"
+url: "https://openobserve.ai/pricing"
+last_verified: "2026-10-19"
+notes: "Excluded: no free cloud tier. The self-hosted Enterprise edition is free up to 50 GB/day and can run on a freelunch host."
+sources:
+  - "openobserve.ai/blog/june-25-pricing-policy-updates (checked 2026-10-19)"
+  - "openobserve.ai/docs/enterprise-setup/license-and-pricing (checked 2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

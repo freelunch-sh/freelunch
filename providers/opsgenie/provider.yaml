@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: opsgenie
+display_name: "Opsgenie"
+category: observability
+status: excluded
+layer: service
+terraform_provider: "opsgenie/opsgenie"
+iac: community
+free_tier_type: none
+free_tier: "End of sale 2025-06-04 (no new sign-ups); shut off on 2027-04-05"
+card_required: "unknown"
+url: "https://www.atlassian.com/licensing/opsgenie"
+last_verified: "2026-10-19"
+notes: "Excluded: being retired. Atlassian moves customers to Jira Service Management or Compass."
+sources:
+  - "atlassian.com/licensing/opsgenie (checked 2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

@@ -1,0 +1,17 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: datastax-astra
+display_name: "DataStax Astra DB"
+category: databases
+status: planned
+layer: service
+terraform_provider: "datastax/astra"
+iac: partner
+free_tier_type: always-free
+free_tier: "Free serverless tier"
+card_required: "unknown"
+url: "https://www.datastax.com/pricing"
+last_verified: "2026-10-18"
+notes: "Limits not verified during research."
+sources:
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

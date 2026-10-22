@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: zeabur
+display_name: "Zeabur"
+category: containers
+status: planned
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "$0 plan with auto-sleep"
+card_required: "no"
+url: "https://zeabur.com/pricing"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

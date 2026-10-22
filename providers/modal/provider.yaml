@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: modal
+display_name: "Modal"
+category: gpu
+status: planned
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: monthly-credit
+free_tier: "$30/month compute credit on the Starter plan (CPU and GPU, serverless containers); no card required"
+card_required: "no"
+url: "https://modal.com/pricing"
+last_verified: "2026-10-18"
+notes: "Infrastructure is defined in Modal's Python SDK; there is no Terraform provider."
+sources:
+  - "spheron.network/blog/free-gpu-cloud-credits-2026 (2026-08)"
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

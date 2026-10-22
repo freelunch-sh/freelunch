@@ -1,0 +1,17 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: redis-cloud
+display_name: "Redis Cloud"
+category: databases
+status: planned
+layer: service
+terraform_provider: "RedisLabs/rediscloud"
+iac: partner
+free_tier_type: always-free
+free_tier: "Free 30 MB database"
+card_required: "no"
+url: "https://redis.io/pricing/"
+last_verified: "2026-10-18"
+notes: "Limit not re-verified during research."
+sources:
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

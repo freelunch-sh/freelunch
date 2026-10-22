@@ -1,0 +1,46 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# The presence of terraform.tfvars is what makes `bin/freelunch apply all` include AWS.
+
+region = "us-east-1"
+# aws_profile = "freelunch"        # or export AWS_PROFILE
+
+ssh_public_keys = [
+  "ssh-ed25519 AAAA... you@laptop",
+]
+
+# Lock SSH down to your IP, or set [] and use Tailscale only.
+ssh_source_cidrs = ["0.0.0.0/0"]
+
+ingress_tcp_ports = [80, 443]
+
+# --- Free plan layouts. Everything draws down the credit ($100 at sign-up, up to $200),
+# --- and the plan ends 6 months after sign-up. Rough us-east-1 prices per month:
+# --- t3.micro $7.60, t4g.micro $6.10, t4g.small $12.30, public IPv4 $3.65, gp3 $0.08/GB.
+
+# A) One x86 host: t3.micro (2 vCPUs, 1 GB), 20 GB gp3. About $13/month of credit (default)
+instances = {
+  main = {
+    instance_type = "t3.micro"
+    swap_size_gb  = 2
+
+    apps = {
+      whoami = {
+        compose = <<-YAML
+          services:
+            whoami:
+              image: traefik/whoami
+              ports: ["80:80"]
+              restart: unless-stopped
+        YAML
+      }
+    }
+  }
+}
+
+# B) One Arm host with more memory: t4g.small (2 vCPUs, 2 GB). About $18/month of credit
+# instances = {
+#   main = { instance_type = "t4g.small", swap_size_gb = 0 }
+# }
+
+# Optional: join every host to your tailnet on first boot.
+# tailscale_auth_key = "tskey-auth-..."

@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: tidb-cloud
+display_name: "TiDB Cloud"
+category: databases
+status: planned
+layer: service
+terraform_provider: "tidbcloud/tidbcloud"
+iac: partner
+free_tier_type: always-free
+free_tier: "5 free Starter clusters per organisation, each with 5 GiB row storage, 5 GiB columnar storage and 50M request units/month; MySQL-compatible"
+card_required: "no"
+url: "https://www.pingcap.com/tidb-cloud-pricing/"
+last_verified: "2026-10-19"
+notes: "A cluster that uses up its monthly quota refuses new connections until the month resets or a spending limit is set. A sixth cluster needs a card and a spending limit."
+sources:
+  - "docs.pingcap.com/tidbcloud/select-cluster-tier (2026-10-19)"
+  - "pingcap.com/tidb-cloud-pricing (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

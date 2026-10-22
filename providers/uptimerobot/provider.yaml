@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: uptimerobot
+display_name: "UptimeRobot"
+category: observability
+status: planned
+layer: service
+terraform_provider: "louy/uptimerobot"
+iac: stale
+free_tier_type: always-free
+free_tier: "50 monitors with 5-min interval"
+card_required: "no"
+url: "https://uptimerobot.com/pricing/"
+last_verified: "2026-10-18"
+notes: "Community Terraform provider has had no release since 2020."
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

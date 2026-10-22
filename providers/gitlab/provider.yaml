@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: gitlab
+display_name: "GitLab"
+category: iac-ci
+status: planned
+layer: service
+terraform_provider: "gitlabhq/gitlab"
+iac: partner
+free_tier_type: always-free
+free_tier: "Unlimited repos with up to 5 collaborators; CI/CD minutes, Pages, Container Registry"
+card_required: "no"
+url: "https://about.gitlab.com/pricing/"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

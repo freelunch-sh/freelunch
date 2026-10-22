@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: koyeb
+display_name: "Koyeb"
+category: containers
+status: planned
+layer: service
+terraform_provider: "koyeb/koyeb"
+iac: partner
+free_tier_type: always-free
+free_tier: "1 free web service per organisation (512 MB, 0.1 vCPU, Frankfurt or Washington), scales to zero after 1 h idle; free Postgres with 5 compute-hours/month"
+card_required: "yes"
+url: "https://www.koyeb.com/pricing"
+last_verified: "2026-10-18"
+notes: "The card-free Hobby plan was removed in Feb 2026; sign-up places a $29 card authorisation hold. No workers or volumes on the free tier."
+sources:
+  - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/terraform-providers/koyeb-terraform-provider-koyeb"

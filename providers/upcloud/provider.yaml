@@ -1,0 +1,17 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: upcloud
+display_name: "UpCloud"
+category: vps
+status: planned
+layer: host
+terraform_provider: "UpCloudLtd/upcloud"
+iac: partner
+free_tier_type: trial
+free_tier: "Time-limited free trial for new accounts"
+card_required: "yes"
+url: "https://upcloud.com/pricing/"
+last_verified: "2026-10-18"
+notes: "Trial terms not verified during research. Check before relying on it."
+sources:
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

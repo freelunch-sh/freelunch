@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: firezone
+display_name: "Firezone"
+category: networking
+status: planned
+layer: glue
+terraform_provider: "firezone/firezone"
+iac: community
+free_tier_type: always-free
+free_tier: "Starter: up to 6 users, 1 admin, 10 service accounts, 10 sites, unlimited clients; WireGuard-based zero-trust access"
+card_required: "unknown"
+url: "https://www.firezone.dev/pricing"
+last_verified: "2026-10-19"
+notes: "REST API access (needed by Terraform) is requested in the admin portal under Settings > API Clients; confirm it is enabled for Starter before relying on the provider."
+sources:
+  - "firezone.dev/pricing (2026-10-19)"
+  - "firezone.dev/blog/rest-api-ga (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

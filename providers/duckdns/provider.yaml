@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: duckdns
+display_name: "Duck DNS"
+category: dns
+status: planned
+layer: glue
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "Free dynamic DNS, up to 5 subdomains"
+card_required: "no"
+url: "https://www.duckdns.org/"
+last_verified: "2026-10-18"
+notes: "No Terraform provider; update records over its HTTP API."
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

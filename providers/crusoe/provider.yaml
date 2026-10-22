@@ -1,0 +1,17 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: crusoe
+display_name: "Crusoe Cloud"
+category: gpu
+status: planned
+layer: host
+terraform_provider: "crusoecloud/crusoe"
+iac: community
+free_tier_type: none
+free_tier: "No free tier; no egress fees"
+card_required: "yes"
+url: "https://crusoe.ai/cloud/"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

@@ -1,0 +1,37 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+# The `limits` block is also enforced by providers/gcp/modules/* through preconditions.
+name: gcp
+display_name: "Google Cloud"
+category: hyperscalers
+status: ready
+layer: host
+terraform_provider: "hashicorp/google"
+iac: official
+free_tier_type: always-free
+free_tier: "1 e2-micro VM (us-west1, us-central1 or us-east1) with 30 GB standard disk, 5 GB Cloud Storage, Cloud Run 2M requests + 180k vCPU-s/month; $300 trial credit for 90 days"
+card_required: "yes"
+url: "https://cloud.google.com/free"
+last_verified: "2026-10-19"
+notes: "Billing account required; anything above the allowance is billed. The e2-micro allowance is hours per billing account, so a second VM is billed. The VM's external IPv4 address is billed (about $3.65/month) and is not part of the free tier. e2-micro has 1 GB RAM, so enable swap."
+sources:
+  - "docs.cloud.google.com/free/docs/free-cloud-features (last updated 2026-10-13, checked 2026-10-19)"
+  - "cloud.google.com/vpc/pricing-announce-external-ips ($0.005/h per in-use IPv4 since 2024-02-01, checked 2026-10-19)"
+  - "cloud.google.com/blog: 200 GB free Standard Tier internet egress per region per month (since 2023-10-01)"
+  - "inspire/repos/multi-cloud/bodecloud-CloudBooter/cloud/GCP/docs/FREE_TIER_LIMITS.md (2026-07)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire:
+  - "repos/gcp"
+  - "repos/multi-cloud/gruberdev-tf-free"
+  - "repos/multi-cloud/bodecloud-CloudBooter"
+
+limits:
+  compute:
+    machine_type: e2-micro
+    max_instances: 1        # one instance-month of e2-micro per billing account, pooled across projects
+    regions: [us-west1, us-central1, us-east1]
+  storage:
+    disk_type: pd-standard  # pd-balanced (the console default) is billed
+    max_disk_gb: 30         # GB-months of standard persistent disk
+    min_boot_disk_gb: 10    # Ubuntu image size
+  network:
+    public_ipv4_free: false # in-use external IPv4 is billed at $0.005/h

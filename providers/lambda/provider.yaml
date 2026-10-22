@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: lambda
+display_name: "Lambda"
+category: gpu
+status: planned
+layer: host
+terraform_provider: "elct9620/lambdalabs"
+iac: community
+free_tier_type: startup-credits
+free_tier: "No free tier; research grants up to $5K"
+card_required: "yes"
+url: "https://lambda.ai/pricing"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "spheron.network/blog/free-gpu-cloud-credits-2026 (2026-08)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

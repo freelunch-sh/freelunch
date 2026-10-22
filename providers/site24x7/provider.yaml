@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: site24x7
+display_name: "Site24x7"
+category: observability
+status: planned
+layer: service
+terraform_provider: "site24x7/site24x7"
+iac: partner
+free_tier_type: always-free
+free_tier: "Free forever plan: uptime monitoring for up to 50 resources with email alerts; 30-day full trial without a card"
+card_required: "no"
+url: "https://www.site24x7.com/site24x7-pricing.html"
+last_verified: "2026-10-19"
+notes: "Paid plans fall back to the free plan when they lapse. Older pages quote 5 monitors; the pricing page says 50."
+sources:
+  - "site24x7.com/site24x7-pricing.html (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

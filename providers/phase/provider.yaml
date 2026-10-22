@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: phase
+display_name: "Phase"
+category: secrets
+status: planned
+layer: service
+terraform_provider: "phasehq/phase"
+iac: stale
+free_tier_type: always-free
+free_tier: "5 users or service accounts, 3 apps, 3 environments; open source and self-hostable"
+card_required: "unknown"
+url: "https://www.phase.dev/pricing"
+last_verified: "2026-10-19"
+notes: "The Terraform provider's last release was 0.2.0 in April 2025."
+sources:
+  - "phase.dev/pricing (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

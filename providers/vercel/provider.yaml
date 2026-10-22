@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: vercel
+display_name: "Vercel"
+category: edge
+status: planned
+layer: service
+terraform_provider: "vercel/vercel"
+iac: partner
+free_tier_type: always-free
+free_tier: "Hobby (non-commercial only): 100 GB transfer, 1M edge requests, 1M function invocations; only the 3 latest production deployments kept"
+card_required: "no"
+url: "https://vercel.com/pricing"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/terraform-providers/vercel-terraform-provider-vercel"

@@ -1,0 +1,16 @@
+name: beta
+display_name: "Beta DB"
+category: databases
+status: planned
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: trial
+free_tier: "Trial credit"
+card_required: "unknown"
+url: "https://beta.example/pricing"
+last_verified: "2026-10-18"
+notes: "Some gotcha"
+sources:
+  - "beta.example (2026-10-18)"
+inspire: []

@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: appwrite
+display_name: "Appwrite Cloud"
+category: containers
+status: planned
+layer: service
+terraform_provider: "appwrite/appwrite"
+iac: partner
+free_tier_type: always-free
+free_tier: "Unlimited projects with no pausing; per project: 1 database, 3 buckets, 5 functions"
+card_required: "no"
+url: "https://appwrite.io/pricing"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: storj
+display_name: "Storj"
+category: storage
+status: excluded
+layer: service
+terraform_provider: "storj/storj"
+iac: stale
+free_tier_type: none
+free_tier: "Free tier replaced by a 30-day trial on 2025-07-01; $5/month minimum after the trial"
+card_required: "no"
+url: "https://www.storj.io/pricing"
+last_verified: "2026-10-19"
+notes: "Excluded: no free allowance after the trial. The Terraform provider has one release (0.0.1, 2022)."
+sources:
+  - "storj.io/pricing (2026-10-19)"
+  - "agentdeals.dev/vendor/storj (checked 2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

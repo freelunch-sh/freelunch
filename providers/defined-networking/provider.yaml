@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: defined-networking
+display_name: "Defined Networking (Managed Nebula)"
+category: networking
+status: planned
+layer: glue
+terraform_provider: "sendsmaily/definednet"
+iac: community
+free_tier_type: always-free
+free_tier: "Managed Nebula mesh: up to 100 hosts, managed lighthouse, SSO and 2 routes; then $1/host/month"
+card_required: "no"
+url: "https://www.defined.net/pricing/"
+last_verified: "2026-10-19"
+notes: "Nebula itself is open source, so you can export host configs and run your own CA. The Terraform provider is third-party; check that API keys are available on the free plan."
+sources:
+  - "defined.net/pricing (2026-10-19)"
+  - "docs.defined.net/guides/automating-host-creation (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

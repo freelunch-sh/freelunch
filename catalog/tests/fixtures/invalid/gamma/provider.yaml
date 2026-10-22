@@ -1,0 +1,13 @@
+# Invalid on purpose: wrong name, unknown category, bad enum, and iac/terraform_provider mismatch.
+name: not-gamma
+display_name: "Gamma"
+category: spaceships
+status: maybe
+layer: host
+terraform_provider: null
+iac: partner
+free_tier_type: always-free
+free_tier: "Nothing"
+card_required: "no"
+url: "https://gamma.example"
+last_verified: "2026-10-18"

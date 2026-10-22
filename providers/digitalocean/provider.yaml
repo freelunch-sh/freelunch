@@ -1,0 +1,20 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: digitalocean
+display_name: "DigitalOcean"
+category: vps
+status: planned
+layer: host
+terraform_provider: "digitalocean/digitalocean"
+iac: partner
+free_tier_type: trial
+free_tier: "$200 credit for 60 days for new users; App Platform: 3 static sites free; open-source credits program"
+card_required: "yes"
+url: "https://www.digitalocean.com/pricing"
+last_verified: "2026-10-18"
+notes: "No free container tier on App Platform; the cheapest container is $5/month."
+sources:
+  - "inspire/listing/cloudcredits.io (2025-10)"
+  - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/terraform-providers/digitalocean-terraform-provider-digitalocean"

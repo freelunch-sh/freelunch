@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: desec
+display_name: "deSEC"
+category: dns
+status: planned
+layer: glue
+terraform_provider: "Valodim/desec"
+iac: community
+free_tier_type: always-free
+free_tier: "Free DNS hosting with API and DNSSEC"
+card_required: "no"
+url: "https://desec.io/"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

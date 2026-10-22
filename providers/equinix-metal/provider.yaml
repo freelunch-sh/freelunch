@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: equinix-metal
+display_name: "Equinix Metal"
+category: vps
+status: excluded
+layer: host
+terraform_provider: "equinix/equinix"
+iac: partner
+free_tier_type: none
+free_tier: "Bare-metal service sunset on 2026-06-30; resources removed on 2026-07-01"
+card_required: "yes"
+url: "https://deploy.equinix.com/blog/sunsetting-equinix-metal"
+last_verified: "2026-10-19"
+notes: "Excluded: discontinued. The equinix/equinix provider still covers Equinix Fabric and Network Edge, but not Metal."
+sources:
+  - "docs.equinix.com/releases/end-of-life/eol-products-services (checked 2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: hetzner
+display_name: "Hetzner Cloud"
+category: vps
+status: planned
+layer: host
+terraform_provider: "hetznercloud/hcloud"
+iac: partner
+free_tier_type: none
+free_tier: "No free compute; low-cost Arm and x86 VMs; free DNS zones (managed by the same provider via hcloud_zone)"
+card_required: "yes"
+url: "https://www.hetzner.com/cloud/"
+last_verified: "2026-10-18"
+notes: "Recommended paid fallback when OCI has no A1 capacity. DNS hosting is free."
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/terraform-providers/hetznercloud-terraform-provider-hcloud"

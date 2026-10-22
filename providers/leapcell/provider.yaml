@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: leapcell
+display_name: "Leapcell"
+category: containers
+status: planned
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "Hobby plan: 20 projects, 100k serverless invocations/month, 3 GB-hours compute, 2 GB transfer"
+card_required: "no"
+url: "https://leapcell.io/pricing"
+last_verified: "2026-10-18"
+notes: "Figures come from third-party trackers (May 2026). Verify on the pricing page."
+sources:
+  - "agentdeals.dev/vendor/leapcell"
+  - "freetier.co/directory/products/leapcell"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

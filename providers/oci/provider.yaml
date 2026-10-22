@@ -1,0 +1,40 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+# The `limits` block is also enforced by providers/oci/modules/* through preconditions.
+name: oci
+display_name: "Oracle Cloud (OCI)"
+category: hyperscalers
+status: ready
+layer: host
+terraform_provider: "oracle/oci"
+iac: partner
+free_tier_type: always-free
+free_tier: "2 Arm A1 OCPUs + 12 GB RAM, 2 AMD micro VMs, 200 GB block storage, 10 TB egress/month, 2 VCNs, 1 flexible load balancer, 20 GB object storage; home region only"
+card_required: "yes"
+url: "https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm"
+last_verified: "2026-10-18"
+notes: "A1 allowance halved from 4 OCPU / 24 GB on 2026-06-15. A1 creation often fails with 'Out of host capacity'. Idle instances (<20% CPU/network/memory at p95 over 7 days) can be reclaimed."
+sources:
+  - "Oracle Always Free docs"
+  - "inspire/repos/oci-vm/filippolmt-terraform-oci-free-tier/docs/adr/0002-always-free-cap-reduction.md"
+  - "inspire/repos/multi-cloud/bodecloud-CloudBooter/cloud/OCI/docs/FREE_TIER_LIMITS.md (2026-07-24)"
+inspire:
+  - "repos/oci-vm"
+  - "repos/oci-kubernetes"
+  - "repos/oci-capacity"
+  - "repos/oci-reference"
+
+limits:
+  compute:
+    a1_flex:
+      shape: VM.Standard.A1.Flex
+      max_ocpus: 2          # halved from 4 on 2026-06-15
+      max_memory_gb: 12     # halved from 24 on 2026-06-15
+    e2_micro:
+      shape: VM.Standard.E2.1.Micro
+      max_instances: 2
+  storage:
+    max_block_storage_gb: 200   # boot volumes + block volumes, combined
+    min_boot_volume_gb: 50
+  network:
+    max_vcns: 2
+  home_region_only: true

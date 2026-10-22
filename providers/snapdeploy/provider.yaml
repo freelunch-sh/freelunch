@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: snapdeploy
+display_name: "SnapDeploy"
+category: containers
+status: planned
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "4 containers, 100 container-hours/month, 512 MB / 0.25 vCPU; sleeps after 15 min idle"
+card_required: "no"
+url: "https://snapdeploy.dev/pricing"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

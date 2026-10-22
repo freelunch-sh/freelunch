@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: bunny-net
+display_name: "bunny.net"
+category: edge
+status: planned
+layer: service
+terraform_provider: "BunnyWay/bunnynet"
+iac: community
+free_tier_type: trial
+free_tier: "14-day trial with $20 credit (no card), plus $30 when billing details are added; then pay-as-you-go CDN from $0.01/GB in Europe and North America"
+card_required: "no"
+url: "https://bunny.net/pricing/"
+last_verified: "2026-10-19"
+notes: "Low-cost paid CDN, storage and DNS once the trial ends. Unused trial credit is removed when the trial ends."
+sources:
+  - "bunny.net/docs/quickstart (2026-10-19)"
+  - "bunny.net/pricing (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

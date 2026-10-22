@@ -1,0 +1,17 @@
+# Started on a host by `freelunch deploy` when the cloudflare stack has a tunnel for it.
+# deploy writes TUNNEL_TOKEN into .env next to this file. Host networking lets the
+# tunnel reach apps that publish their ports on 127.0.0.1.
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.0
+    command: tunnel --no-autoupdate --metrics 127.0.0.1:20241 run
+    env_file: .env
+    network_mode: host
+    restart: unless-stopped
+    healthcheck:
+      # Healthy once the tunnel has a connection to Cloudflare's edge.
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:20241", "ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s

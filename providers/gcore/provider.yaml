@@ -1,0 +1,20 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: gcore
+display_name: "Gcore"
+category: dns
+status: planned
+layer: glue
+terraform_provider: "G-Core/gcore"
+iac: partner
+free_tier_type: always-free
+free_tier: "Free managed DNS: unlimited zones and queries, anycast across 210+ PoPs, 1 dynamic (GeoDNS/failover) record set per zone; CDN and edge cloud are pay-as-you-go"
+card_required: "no"
+url: "https://gcore.com/pricing/edge-network"
+last_verified: "2026-10-19"
+notes: "Health checks on the free DNS plan run every 120 s. The same provider manages Gcore CDN and edge VMs, which are billed."
+sources:
+  - "gcore.com/pricing/edge-network (2026-10-19)"
+  - "gcore.com/dns (2026-10-19)"
+  - "agentdeals.dev/vendor/gcore-dns (verified June 2026, checked 2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

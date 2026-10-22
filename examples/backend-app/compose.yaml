@@ -1,0 +1,19 @@
+# The app freelunch deploys. Replace the image with your backend's (public, or private
+# on GHCR or Docker Hub; see ../../docs/deploy-a-container.md).
+services:
+  api:
+    image: traefik/whoami:v1.12.0
+    ports:
+      # Only cloudflared, on the same host, needs to reach the app, so the port is
+      # published on 127.0.0.1 and nothing is open to the internet.
+      - "127.0.0.1:8080:80"
+    restart: unless-stopped
+
+    # A real backend usually also has these:
+    # env_file: .env               # written by freelunch deploy from .freelunch/api.env
+    # volumes:
+    #   - ./data:/data             # ends up in /opt/freelunch/apps/api/data on the host
+    # healthcheck:                 # deploy waits until it passes
+    #   test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/health"]
+    #   interval: 10s
+    #   retries: 6

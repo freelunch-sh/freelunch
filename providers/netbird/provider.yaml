@@ -1,0 +1,17 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: netbird
+display_name: "NetBird"
+category: networking
+status: planned
+layer: glue
+terraform_provider: "netbirdio/netbird"
+iac: community
+free_tier_type: always-free
+free_tier: "Free cloud plan for small teams"
+card_required: "no"
+url: "https://netbird.io/pricing"
+last_verified: "2026-10-18"
+notes: "Limits not verified during research."
+sources:
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

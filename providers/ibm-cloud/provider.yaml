@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: ibm-cloud
+display_name: "IBM Cloud"
+category: hyperscalers
+status: planned
+layer: service
+terraform_provider: "IBM-Cloud/ibm"
+iac: official
+free_tier_type: always-free
+free_tier: "Lite plans: Cloudant 1 GB, Db2 100 MB, API Connect 50k calls/month, Log Analysis 500 MB/day"
+card_required: "unknown"
+url: "https://www.ibm.com/cloud/free/"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

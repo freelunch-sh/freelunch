@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: neon
+display_name: "Neon"
+category: databases
+status: planned
+layer: service
+terraform_provider: "kislerdm/neon"
+iac: community
+free_tier_type: always-free
+free_tier: "0.5 GB storage per project, up to 100 projects, 100 CU-hours/project/month, scales to zero after 5 min"
+card_required: "no"
+url: "https://neon.com/pricing"
+last_verified: "2026-10-18"
+notes: "An official neondatabase/neon provider exists in source but is not yet published to the Terraform Registry."
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/terraform-providers/neondatabase-terraform-provider-neon"

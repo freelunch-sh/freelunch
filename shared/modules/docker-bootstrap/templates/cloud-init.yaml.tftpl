@@ -1,0 +1,51 @@
+#cloud-config
+# Rendered by freelunch shared/modules/docker-bootstrap. Runs once, on first boot.
+package_update: true
+package_upgrade: ${package_upgrade}
+timezone: ${timezone}
+%{ if length(ssh_authorized_keys) > 0 ~}
+
+ssh_authorized_keys:
+%{ for key in ssh_authorized_keys ~}
+  - ${jsonencode(key)}
+%{ endfor ~}
+%{ endif ~}
+
+packages:
+  - docker.io
+  - docker-compose-v2
+%{ for pkg in extra_packages ~}
+  - ${pkg}
+%{ endfor ~}
+%{ if swap_size_bytes > 0 ~}
+
+swap:
+  filename: /swapfile
+  size: ${swap_size_bytes}
+  maxsize: ${swap_size_bytes}
+%{ endif ~}
+%{ if length(app_files) > 0 ~}
+
+write_files:
+%{ for f in app_files ~}
+  - path: ${f.path}
+    encoding: b64
+    permissions: "${f.permissions}"
+    content: ${f.content}
+%{ endfor ~}
+%{ endif ~}
+
+runcmd:
+  - systemctl enable --now docker
+  - usermod -aG docker ${admin_user}
+%{ for cmd in extra_runcmd ~}
+  - ${jsonencode(cmd)}
+%{ endfor ~}
+%{ if tailscale_auth_key != null ~}
+  - curl -fsSL https://tailscale.com/install.sh | sh
+  - ${jsonencode("tailscale up --auth-key=${tailscale_auth_key}${tailscale_hostname != null ? " --hostname=${tailscale_hostname}" : ""}")}
+%{ endif ~}
+%{ for name in app_names ~}
+  - ${jsonencode("cd /opt/freelunch/apps/${name} && docker compose up -d")}
+%{ endfor ~}
+  - mkdir -p /var/lib/freelunch && date -u +%FT%TZ > /var/lib/freelunch/bootstrap-done

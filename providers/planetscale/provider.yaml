@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: planetscale
+display_name: "PlanetScale"
+category: databases
+status: excluded
+layer: service
+terraform_provider: "planetscale/planetscale"
+iac: community
+free_tier_type: none
+free_tier: "No free tier since the Hobby plan was removed in 2024"
+card_required: "yes"
+url: "https://planetscale.com/pricing"
+last_verified: "2026-10-18"
+notes: "Excluded: no free tier."
+sources:
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire:
+  - "repos/terraform-providers/planetscale-terraform-provider-planetscale"

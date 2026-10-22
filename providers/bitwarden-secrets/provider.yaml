@@ -1,0 +1,17 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: bitwarden-secrets
+display_name: "Bitwarden Secrets Manager"
+category: secrets
+status: planned
+layer: service
+terraform_provider: "bitwarden/bitwarden-secrets"
+iac: community
+free_tier_type: always-free
+free_tier: "Free plan for individuals"
+card_required: "no"
+url: "https://bitwarden.com/products/secrets-manager/"
+last_verified: "2026-10-18"
+notes: "Limits not verified during research."
+sources:
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

@@ -1,0 +1,23 @@
+# Copy this folder to providers/<name>/ and fill in every field.
+# Schema (validated by `bin/freelunch catalog`):
+name: example                     # must equal the folder name
+display_name: "Example Cloud"
+category: vps                     # a key from catalog/categories.yaml
+status: planned                   # ready | planned | excluded
+layer: host                       # host (Docker hosts) | service (managed service) | glue (consumes hybrid inventory)
+terraform_provider: "example/example"   # registry address, or null when none exists
+iac: partner                      # official | partner | community | stale | none (must be none when terraform_provider is null)
+free_tier_type: always-free       # always-free | monthly-credit | trial | startup-credits | none
+free_tier: "One-line summary of what is free, with numbers"
+card_required: "unknown"          # "yes" | "no" | "unknown"
+url: "https://example.com/pricing"
+last_verified: "YYYY-MM-DD"
+notes: null                       # gotchas: sleeping, expiry, card holds, regional limits...
+sources:                          # where the free-tier facts came from, with dates
+  - "example.com/pricing (YYYY-MM-DD)"
+inspire: []                       # related paths under inspire/
+
+# Host providers: free-tier limits enforced by the modules' preconditions.
+# limits:
+#   compute: {}
+#   storage: {}

@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: motherduck
+display_name: "MotherDuck"
+category: databases
+status: planned
+layer: service
+terraform_provider: "motherduckdb/motherduck"
+iac: community
+free_tier_type: always-free
+free_tier: "Lite plan: 10 GB storage, 10 Pulse compute-hours/month, 3 users and 2 service accounts; serverless DuckDB for analytics"
+card_required: "no"
+url: "https://motherduck.com/pricing/"
+last_verified: "2026-10-19"
+notes: "Queries stop when a free limit is exceeded: over the storage cap blocks queries on MotherDuck storage, over the compute cap blocks queries until the month resets."
+sources:
+  - "motherduck.com/pricing (2026-10-19)"
+  - "motherduck.com/fees-addendum (February 2026, checked 2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

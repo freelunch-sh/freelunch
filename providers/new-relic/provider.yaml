@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: new-relic
+display_name: "New Relic"
+category: observability
+status: planned
+layer: service
+terraform_provider: "newrelic/newrelic"
+iac: partner
+free_tier_type: always-free
+free_tier: "100 GB/month data ingest, 1 full platform user"
+card_required: "no"
+url: "https://newrelic.com/pricing"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

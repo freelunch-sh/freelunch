@@ -1,0 +1,17 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: pagerduty
+display_name: "PagerDuty"
+category: observability
+status: planned
+layer: service
+terraform_provider: "PagerDuty/pagerduty"
+iac: partner
+free_tier_type: always-free
+free_tier: "Free plan for small teams"
+card_required: "no"
+url: "https://www.pagerduty.com/pricing/"
+last_verified: "2026-10-18"
+notes: "Limits not verified during research."
+sources:
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

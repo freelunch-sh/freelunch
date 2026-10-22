@@ -1,0 +1,55 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# The presence of terraform.tfvars is what makes `bin/freelunch apply all` include OCI.
+
+region       = "eu-frankfurt-1"                        # your HOME region (Console > Tenancy details)
+tenancy_ocid = "ocid1.tenancy.oc1..aaaaaaaa..."        # grep tenancy ~/.oci/config
+
+ssh_public_keys = [
+  "ssh-ed25519 AAAA... you@laptop",
+]
+
+# Lock SSH down to your IP, or set [] and use Tailscale only.
+ssh_source_cidrs = ["0.0.0.0/0"]
+
+# Behind a Cloudflare Tunnel no port needs to be open: ingress_tcp_ports = []
+ingress_tcp_ports = [80, 443]
+
+# --- Layouts that fit Always Free (2 A1 OCPUs / 12 GB, 2 micros, 200 GB storage) ---
+
+# A) One Arm host with everything (default)
+instances = {
+  main = {
+    shape          = "VM.Standard.A1.Flex"
+    ocpus          = 2
+    memory_in_gbs  = 12
+    boot_volume_gb = 100
+
+    apps = {
+      whoami = {
+        compose = <<-YAML
+          services:
+            whoami:
+              image: traefik/whoami
+              ports: ["80:80"]
+              restart: unless-stopped
+        YAML
+      }
+    }
+  }
+}
+
+# B) Arm host + two AMD micros (e.g. for monitoring, a VPN exit node, a reverse proxy)
+# instances = {
+#   main   = { shape = "VM.Standard.A1.Flex", ocpus = 2, memory_in_gbs = 12, boot_volume_gb = 100 }
+#   edge-1 = { shape = "VM.Standard.E2.1.Micro", boot_volume_gb = 50, swap_size_gb = 2 }
+#   edge-2 = { shape = "VM.Standard.E2.1.Micro", boot_volume_gb = 50, swap_size_gb = 2 }
+# }
+
+# C) Two small Arm hosts (1 OCPU / 6 GB each), e.g. for a two-node cluster
+# instances = {
+#   node-1 = { ocpus = 1, memory_in_gbs = 6, boot_volume_gb = 100 }
+#   node-2 = { ocpus = 1, memory_in_gbs = 6, boot_volume_gb = 100 }
+# }
+
+# Optional: join every host to your tailnet on first boot.
+# tailscale_auth_key = "tskey-auth-..."

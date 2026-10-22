@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: linode
+display_name: "Akamai Cloud (Linode)"
+category: vps
+status: planned
+layer: host
+terraform_provider: "linode/linode"
+iac: partner
+free_tier_type: trial
+free_tier: "$100 trial credit for new customers; Rise startup program"
+card_required: "yes"
+url: "https://www.linode.com/pricing/"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/cloudcredits.io (2025-10)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

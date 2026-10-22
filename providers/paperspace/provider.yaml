@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: paperspace
+display_name: "Paperspace (DigitalOcean)"
+category: gpu
+status: planned
+layer: host
+terraform_provider: "paperspace/paperspace"
+iac: stale
+free_tier_type: always-free
+free_tier: "Gradient free plan: public projects, 5 GB storage, basic instances"
+card_required: "yes"
+url: "https://www.paperspace.com/pricing"
+last_verified: "2026-10-18"
+notes: "Terraform provider has had no release since 2023."
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "thundercompute.com/blog/free-cloud-gpu-credits (2026-10-01)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

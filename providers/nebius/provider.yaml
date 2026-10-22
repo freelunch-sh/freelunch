@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: nebius
+display_name: "Nebius AI Cloud"
+category: gpu
+status: planned
+layer: host
+terraform_provider: "nebius/nebius"
+iac: community
+free_tier_type: startup-credits
+free_tier: "No free tier; Nebius AI Lift up to $150K credits for NVIDIA Inception members"
+card_required: "yes"
+url: "https://nebius.com/prices"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "spheron.network/blog/free-gpu-cloud-credits-2026 (2026-08)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

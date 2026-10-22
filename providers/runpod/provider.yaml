@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: runpod
+display_name: "RunPod"
+category: gpu
+status: planned
+layer: host
+terraform_provider: "runpod/runpod"
+iac: community
+free_tier_type: startup-credits
+free_tier: "No self-serve free credit; startup tier up to $1,000 by application; per-second GPU billing"
+card_required: "yes"
+url: "https://www.runpod.io/pricing"
+last_verified: "2026-10-18"
+notes: "runpod/runpod is at v2.0.0-rc; decentralized-infrastructure/runpod is an older community provider."
+sources:
+  - "spheron.network/blog/free-gpu-cloud-credits-2026 (2026-08)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

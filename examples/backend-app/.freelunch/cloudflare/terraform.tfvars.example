@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars and fill in (it is git-ignored).
+# Needs CLOUDFLARE_API_TOKEN in .freelunch/.env (permissions: providers/cloudflare/README.md).
+
+zone = "example.com"   # a domain already on your Cloudflare account
+
+# https://api.example.com -> port 8080 on the OCI host, where compose.yaml publishes the app.
+routes = {
+  "api.example.com" = { host = "oci-main", port = 8080 }
+}

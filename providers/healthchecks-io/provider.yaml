@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: healthchecks-io
+display_name: "Healthchecks.io"
+category: observability
+status: planned
+layer: service
+terraform_provider: "kristofferahl/healthchecksio"
+iac: community
+free_tier_type: always-free
+free_tier: "20 cron/heartbeat checks"
+card_required: "no"
+url: "https://healthchecks.io/pricing/"
+last_verified: "2026-10-18"
+notes: null
+sources:
+  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "registry.terraform.io (checked 2026-10-18)"
+inspire: []

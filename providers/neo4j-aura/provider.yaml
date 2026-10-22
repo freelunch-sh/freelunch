@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: neo4j-aura
+display_name: "Neo4j AuraDB"
+category: databases
+status: planned
+layer: service
+terraform_provider: "neo4j-labs/neo4jaura"
+iac: community
+free_tier_type: always-free
+free_tier: "AuraDB Free: 200k nodes, 400k relationships, 1 GB storage; managed graph database"
+card_required: "no"
+url: "https://neo4j.com/pricing/"
+last_verified: "2026-10-19"
+notes: "Free instances auto-pause when inactive and have no backups. The Terraform provider is a Neo4j Labs project (unsupported); check that the Aura API can manage Free instances."
+sources:
+  - "neo4j.com/docs/aura/quotas-and-limits (2026-10-19)"
+  - "neo4j.com/pricing (2026-10-19)"
+  - "registry.terraform.io (checked 2026-10-19)"
+inspire: []

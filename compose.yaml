@@ -1,0 +1,25 @@
+# Runner for working on this checkout: docker compose run --rm freelunch <command> [provider...]
+# It mounts the checkout over the code baked into the image, so local edits apply. To use
+# freelunch from another project, run the published image instead (see README).
+services:
+  freelunch:
+    build: .
+    image: freelunch:local
+    working_dir: /opt/freelunch
+    stdin_open: true
+    tty: true
+    env_file:
+      - path: .env          # provider credentials as env vars (git-ignored), e.g. ARM_CLIENT_ID/ARM_CLIENT_SECRET/ARM_TENANT_ID for Azure
+        required: false
+    environment:
+      FREELUNCH_AUTO_APPROVE: ${FREELUNCH_AUTO_APPROVE:-0}
+      TF_PLUGIN_CACHE_DIR: /root/.terraform.d/plugin-cache
+    volumes:
+      - .:/opt/freelunch
+      - ${HOME}/.oci:/root/.oci:ro    # OCI API key config; use key_file=~/.oci/... paths
+      - ${HOME}/.aws:/root/.aws:ro    # AWS profiles and credentials
+      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro   # GCP application default credentials
+      - plugin-cache:/root/.terraform.d/plugin-cache
+
+volumes:
+  plugin-cache:
