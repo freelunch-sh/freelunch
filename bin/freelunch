@@ -189,11 +189,14 @@ resolve() { # resolve <names...> -> validated provider list
 }
 
 prepare_stack() { # prepare_stack <action> <provider>: check the config, then init the stack
-  local p="$2" dir
+  local p="$2" dir profile=""
   dir="$(stack_dir "$p")"
   is_configured "$p" || die "$p: missing $(rel "$(config_dir "$p")")/terraform.tfvars (copy terraform.tfvars.example)"
   check_checkout_tfvars "$dir"
   log "$1 $p${PROJECT:+ ($(rel "$PROJECT")/$p)}"
+  # An expired session would fail every OCI call and leave a half plan between the errors.
+  if [[ "$p" == "oci" ]]; then profile="$(oci_session_profile "$(config_dir oci)/terraform.tfvars")"; fi
+  [[ -z "$profile" ]] || check_oci_session "$profile"
   lock_in "$p" "$dir"
   tf_for "$p" "$dir" init -input=false -upgrade=false >/dev/null
   lock_out "$p" "$dir"
@@ -206,6 +209,51 @@ run_stack() { # run_stack <action> <provider> [extra args]
   while IFS= read -r a; do args+=("$a"); done < <(project_args "$p")
   [[ "${FREELUNCH_AUTO_APPROVE:-0}" == "1" && "$action" != "plan" ]] && args+=(-auto-approve)
   tf_for "$p" "$(stack_dir "$p")" "$action" -input=false ${args[@]+"${args[@]}"} "$@"
+}
+
+# --- OCI sign-in ----------------------------------------------------------------------
+
+tfvar() { # tfvar <file> <name>: a string variable set on one line of a tfvars file
+  sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -1
+}
+
+# The profile to check before an oci run when the stack signs in with a session token,
+# which expires an hour after its last refresh. Nothing for an API key.
+oci_session_profile() { # oci_session_profile <tfvars>
+  local auth profile
+  auth="$(tfvar "$1" oci_auth)"
+  auth="$(printf '%s' "${auth:-${TF_VAR_oci_auth:-}}" | tr '[:upper:]' '[:lower:]')"
+  [[ "$auth" == "securitytoken" ]] || return 0
+  profile="$(tfvar "$1" oci_config_profile)"
+  echo "${profile:-${TF_VAR_oci_config_profile:-DEFAULT}}"
+}
+
+# oci_token_expiry <profile>: when the profile's session token expires (seconds since the
+# epoch), read from the token itself. Empty when there is no token to read.
+oci_token_expiry() {
+  local file
+  file="$(awk -v p="[$1]" '$0 == p { s = 1; next } /^\[/ { s = 0 } s && /^security_token_file[ \t]*=/ { sub(/^[^=]*=[ \t]*/, ""); print; exit }' "$HOME/.oci/config" 2>/dev/null)"
+  file="${file/#\~/$HOME}"
+  [[ -n "$file" && -f "$file" ]] || return 0
+  jq -Rr 'split(".")[1] | gsub("-"; "+") | gsub("_"; "/") | @base64d | fromjson | .exp // empty' < "$file" 2>/dev/null || true
+}
+
+# check_oci_session <profile> [why]: refresh the session, or stop with the command that
+# signs in again. A refresh works only while the session is valid, and for 24 hours after
+# signing in at most. Without the OCI CLI, the token's own expiry is checked instead.
+check_oci_session() {
+  local out exp
+  if command -v oci >/dev/null; then
+    out="$(oci session refresh --profile "$1" 2>&1)" && return 0
+    if [[ "$out" != *"no longer valid"* ]]; then
+      echo "$out" >&2
+      die "oci: can't refresh the session of profile $1 (see above)"
+    fi
+  else
+    exp="$(oci_token_expiry "$1")"
+    if [[ ! "$exp" =~ ^[0-9]+$ || "$exp" -gt "$(date +%s)" ]]; then return 0; fi
+  fi
+  die "oci: ${2:-session expired}. Sign in again: oci session authenticate --profile-name $1"
 }
 
 # --- waiting for capacity -------------------------------------------------------------
@@ -232,28 +280,6 @@ retry_reason() {
 
 destroys_nothing() { # destroys_nothing <provider> <saved plan>
   tf_for "$1" "$(stack_dir "$1")" show -json "$2" | jq -e 'any(.resource_changes[]?.change.actions[]; . == "delete") | not' >/dev/null
-}
-
-tfvar() { # tfvar <file> <name>: a string variable set on one line of a tfvars file
-  sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -1
-}
-
-# The profile to refresh before each attempt when the oci stack signs in with a session
-# token, which expires an hour after its last refresh. Nothing for an API key.
-oci_session_profile() { # oci_session_profile <tfvars>
-  local auth profile
-  auth="$(tfvar "$1" oci_auth)"
-  auth="$(printf '%s' "${auth:-${TF_VAR_oci_auth:-}}" | tr '[:upper:]' '[:lower:]')"
-  [[ "$auth" == "securitytoken" ]] || return 0
-  profile="$(tfvar "$1" oci_config_profile)"
-  echo "${profile:-${TF_VAR_oci_config_profile:-DEFAULT}}"
-}
-
-refresh_oci_session() { # refresh_oci_session <profile>
-  local out
-  out="$(oci session refresh --profile "$1" 2>&1)" && return 0
-  echo "$out" >&2
-  die "oci: can't refresh the session of profile $1. A session ends 24 hours after you sign in, or an hour after its last refresh. Sign in again with oci session authenticate --profile-name $1, then run this again"
 }
 
 apply_until_capacity() { # apply_until_capacity <provider> [extra args]
@@ -287,7 +313,10 @@ apply_until_capacity() { # apply_until_capacity <provider> [extra args]
 
   delay="$interval"
   while :; do
-    [[ -z "$profile" ]] || refresh_oci_session "$profile"
+    # prepare_stack checked the session before the first attempt.
+    if [[ -n "$profile" && $attempt -gt 1 ]]; then
+      check_oci_session "$profile" "the session expired after $((attempt - 1)) attempt(s). A session lasts 24 hours at most, so for a longer wait use an API key (oci setup bootstrap)"
+    fi
     if [[ $attempt -eq 1 ]]; then
       if tf_for "$p" "$dir" apply -input=false ${args[@]+"${args[@]}"} ${approve[@]+"${approve[@]}"} "$@" 2>&1 | keep "$out"; then break; fi
     # A retry shows only the summary of its plan, unless the plan fails or is refused.
@@ -541,6 +570,15 @@ Next steps:
   3. $applies
   4. freelunch deploy
 EOF
+  # API key profiles have a user= line; session profiles don't, and a session ends within a day.
+  if [[ " ${stacks[*]} " == *" oci "* ]] && ! grep -qs '^user[[:space:]]*=' "$HOME/.oci/config"; then
+    cat >&2 <<'EOF'
+
+There is no OCI API key in ~/.oci/config yet. oci setup bootstrap --profile-name freelunch
+signs you in through the browser and creates one that doesn't expire; then set
+oci_config_profile = "freelunch" in .freelunch/oci/terraform.tfvars.
+EOF
+  fi
 }
 
 # --- deploy ---------------------------------------------------------------------------

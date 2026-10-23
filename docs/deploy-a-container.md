@@ -13,9 +13,10 @@ or as a Docker image.
 ## What you need
 
 - An **OCI account**, with an [API signing key](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/apisigningkey.htm)
-  in `~/.oci/config`, or a [session token](../providers/oci/README.md#prerequisites) from
-  `oci session authenticate`, which needs `oci_auth` and `oci_config_profile` set in step 3.
-  Free resources exist only in your home region.
+  in `~/.oci/config`. With the OCI CLI, `oci setup bootstrap --profile-name freelunch`
+  signs you in through the browser and creates one. A
+  [session token](../providers/oci/README.md#prerequisites) from `oci session authenticate`
+  works too, for 24 hours at a time. Free resources exist only in your home region.
 - A **domain on Cloudflare** (free plan) and an **API token** with the
   [permissions listed here](../providers/cloudflare/README.md#api-token). The domain can be
   a free name: see [Free domains](free-domains.md).
@@ -84,8 +85,10 @@ a download that doesn't match.
 cp .freelunch/oci/terraform.tfvars.example .freelunch/oci/terraform.tfvars
 ```
 
-Fill in `region` (your home region), `tenancy_ocid` and `ssh_public_keys`. With a session
-token instead of an API key, also uncomment `oci_auth` and `oci_config_profile`.
+Fill in `region` (your home region), `tenancy_ocid` and `ssh_public_keys`. For a profile
+other than `DEFAULT` in `~/.oci/config`, uncomment `oci_config_profile`, and for a session
+token also `oci_auth`. With a session, freelunch refreshes it before each run and stops
+with the command to sign in again once it has expired.
 
 The rest is already set for the tunnel: `ingress_tcp_ports = []` leaves only SSH open, and
 `instances` has no `apps`, since cloud-init only runs on first boot and `freelunch deploy`
@@ -311,7 +314,8 @@ as `freelunch-oci-main`. The machine you deploy from has to be on the same tailn
 | Symptom | Look at |
 |---|---|
 | `500-InternalError, Out of host capacity` | OCI has no free Arm capacity right now. `freelunch apply oci --wait-for-capacity` keeps trying |
-| `401-NotAuthenticated` from OCI | With a session token, the session has expired: sign in again with `oci session authenticate --profile-name <oci_config_profile>` (a refresh only works while it is still valid). With an API key, check `user`, `fingerprint` and `key_file` in `~/.oci/config` |
+| `session expired. Sign in again: ...` | Run the command it prints, then the one that stopped. A session lasts 24 hours at most; an API key doesn't expire (`oci setup bootstrap`) |
+| `401-NotAuthenticated` from OCI | With an API key, check `user`, `fingerprint` and `key_file` in the profile in `~/.oci/config`, and that `oci_config_profile` names it |
 | `deploy` waits for SSH and gives up | The VM's public IP in `freelunch inventory`, `ssh_source_cidrs`, and your key (`FREELUNCH_SSH_KEY`) |
 | `Permission denied (publickey)` | The key in `ssh_public_keys` must match the one `deploy` uses |
 | `REMOTE HOST IDENTIFICATION HAS CHANGED` | If you recreated the VM with the same IP, remove its line from `.freelunch/known_hosts`. If you didn't, stop: something else answers at that address |

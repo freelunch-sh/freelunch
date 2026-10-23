@@ -4,9 +4,12 @@
 region       = "eu-frankfurt-1"                        # your HOME region (Console > Tenancy details)
 tenancy_ocid = "ocid1.tenancy.oc1..aaaaaaaa..."        # grep tenancy ~/.oci/config
 
-# Signing in with a session token (`oci session authenticate`) instead of an API key:
-# oci_auth           = "SecurityToken"
-# oci_config_profile = "DEFAULT"   # the profile the session was saved under
+# Credentials come from the DEFAULT profile in ~/.oci/config. To use another one, such as
+# the API key that `oci setup bootstrap --profile-name freelunch` creates:
+# oci_config_profile = "freelunch"
+# A session from `oci session authenticate` lasts 24 hours at most. For one, set its
+# profile above and add:
+# oci_auth = "SecurityToken"
 
 ssh_public_keys = [
   "ssh-ed25519 AAAA... you@laptop",

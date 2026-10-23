@@ -86,7 +86,7 @@ The full walkthrough, with private images, secrets and persistent data, is
 
 To try a provider without a project of your own, run the stacks from the checkout.
 Prerequisites: an OCI account, an [API signing key](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/apisigningkey.htm)
-in `~/.oci/config`, and either Docker or OpenTofu/Terraform.
+in `~/.oci/config` (`oci setup bootstrap` creates one), and either Docker or OpenTofu/Terraform.
 
 ```bash
 cp providers/oci/stack/terraform.tfvars.example providers/oci/stack/terraform.tfvars

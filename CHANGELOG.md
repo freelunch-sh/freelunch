@@ -35,6 +35,11 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
   `oci session refresh` before each attempt and stops with the sign-in command once the
   session's 24 hours are up. `FREELUNCH_CAPACITY_INTERVAL` and `FREELUNCH_CAPACITY_TIMEOUT`
   tune it.
+- **OCI sign-in check.** Every plan, apply and destroy of the oci stack refreshes a session
+  token first (without the OCI CLI, it reads the expiry from the token), and an expired
+  session stops the run with the command to sign in again, instead of a half plan between
+  `401-NotAuthenticated` errors. When `~/.oci/config` has no API key, `freelunch init`
+  points to `oci setup bootstrap`, which creates one that doesn't expire.
 - **Free domains.** A new catalog category with DigitalPlat FreeDomain (recommended), EU.org
   and pp.ua, whose free names (`myapp.dpdns.org`, `myapp.eu.org`, `myapp.pp.ua`) work as the
   cloudflare stack's zone. Freenom and is-a.dev are listed under Excluded with the reason.
