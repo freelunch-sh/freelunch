@@ -38,10 +38,14 @@ update that file; the modules read it at plan time.
 
 1. **An OCI account.** Sign-up needs a credit card for verification. Pick the **home region**
    carefully: you can't change it, and free resources only exist there.
-2. **An API signing key.** Run `oci setup config`, or create one under
-   *Console → My profile → API keys*. You end up with `~/.oci/config` and a private key.
-   With the Docker runner, use `key_file=~/.oci/<key>.pem` (a `~` path) in `~/.oci/config`
-   so it also resolves inside the container.
+2. **An API signing key.** The quickest way is the
+   [OCI CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm):
+   `oci setup bootstrap --profile-name freelunch` signs you in through the browser, creates
+   a key, adds it to your user and writes the `freelunch` profile to `~/.oci/config`. Then
+   set `oci_config_profile = "freelunch"` in the stack's tfvars. `oci setup config`, or
+   *Console → My profile → API keys*, work too. With the Docker runner, use
+   `key_file=~/.oci/<key>.pem` (a `~` path) in `~/.oci/config` so it also resolves inside
+   the container.
 3. **OpenTofu ≥ 1.6, Terraform ≥ 1.6, or Docker** (see the root README).
 
 `oci_config_profile` picks the profile in `~/.oci/config` (default `DEFAULT`). A session
@@ -49,9 +53,19 @@ token works instead of an API key: run `oci session authenticate`, then set
 `oci_auth = "SecurityToken"` and `oci_config_profile` to the profile the session was saved
 under. A session expires after an hour. `oci session refresh --profile <name>` gives it
 another hour, but only while it is still valid, and for 24 hours after you signed in at
-most. Then sign in again; until you do, every plan and apply fails with
-`401-NotAuthenticated`. With the Docker runner, change the absolute `key_file` and
-`security_token_file` paths the session wrote into `~` paths as well.
+most.
+
+freelunch refreshes the session before every plan, apply and destroy of this stack. Once
+it can't be refreshed any more, the run stops before it plans anything, with one line:
+
+```
+freelunch: oci: session expired. Sign in again: oci session authenticate --profile-name <name>
+```
+
+Without the OCI CLI (in the runner image, for example), freelunch reads the expiry from the
+token instead, so it still stops before planning, but it can't extend the session. With the
+Docker runner, change the absolute `key_file` and `security_token_file` paths the session
+wrote into `~` paths as well.
 
 ## Usage
 
@@ -144,10 +158,10 @@ This is for getting one account its free host, not for collecting hosts across a
 [OCI CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm). That
 keeps the session going for its 24 hours, measured from when you signed in. When a refresh
 fails, the retries stop and print the command to sign in again
-(`oci session authenticate --profile-name <name>`); run `apply` again after it. A session
-that has already expired can't be refreshed, so sign in again before you start. For a
-longer wait, use an API key, which doesn't expire. The runner image has no OCI CLI, so
-there it takes an API key.
+(`oci session authenticate --profile-name <name>`); run `apply` again after it. For a
+longer wait, use an API key, which doesn't expire (`oci setup bootstrap`, see
+[Prerequisites](#prerequisites)). The runner image has no OCI CLI, so there it takes an
+API key.
 
 ## What gets created
 
