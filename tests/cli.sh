@@ -279,7 +279,7 @@ test_init_writes_the_project_folder() {
 
 # Host stacks start from their project example: only SSH open, no apps in cloud-init.
 test_init_sets_up_hosts_for_the_tunnel() {
-  local p="$WORK/init-hosts" s
+  local p="$WORK/init-hosts/backend-app" s
   mkdir -p "$p" && (cd "$p" && "$CLI" init oci gcp aws azure cloudflare)
   for s in oci gcp aws azure; do
     grep -qx 'ingress_tcp_ports = \[\]' "$p/.freelunch/$s/terraform.tfvars.example"
@@ -302,6 +302,40 @@ test_init_points_to_an_oci_api_key() {
   rm -rf "$p/home/.oci" "$p/project/.freelunch"
   out="$(cd "$p/project" && HOME="$p/home" "$CLI" init cloudflare 2>&1)"
   lacks "$out" "oci setup bootstrap"
+}
+
+# One name for the project, set once: every stack's resources start with it.
+test_init_names_the_project() {
+  local p="$WORK/init-name" s out
+  mkdir -p "$p/Money_Spider.v2" "$p/other"
+  out="$(cd "$p/Money_Spider.v2" && "$CLI" init oci gcp aws azure cloudflare 2>&1)"
+  contains "$out" "project name: money-spider-v2"
+  for s in oci gcp aws azure cloudflare; do
+    equals "$(grep -c '^name_prefix' "$p/Money_Spider.v2/.freelunch/$s/terraform.tfvars.example")" 1
+    grep -qx 'name_prefix = "money-spider-v2"' "$p/Money_Spider.v2/.freelunch/$s/terraform.tfvars.example"
+  done
+  grep -q 'address = "money-spider-v2-oci-main"' "$p/Money_Spider.v2/.freelunch/apps.tfvars"
+  (cd "$p/other" && "$CLI" init --name moneyspider cloudflare)
+  grep -qx 'name_prefix = "moneyspider"' "$p/other/.freelunch/cloudflare/terraform.tfvars.example"
+  rm -rf "$p/other/.freelunch"
+  (cd "$p/other" && "$CLI" init --name=moneyspider oci)
+  grep -qx 'name_prefix = "moneyspider"' "$p/other/.freelunch/oci/terraform.tfvars.example"
+  # Names every provider takes, and a fallback for a folder name that gives none.
+  rm -rf "$p/other/.freelunch"
+  fails in_dir "$p/other" "$CLI" init --name Money_Spider
+  fails in_dir "$p/other" "$CLI" init --name m
+  fails in_dir "$p/other" "$CLI" init --name moneyspider-
+  fails in_dir "$p/other" "$CLI" init --name a-name-longer-than-21-characters
+  fails in_dir "$p/other" "$CLI" init --name
+  absent "$p/other/.freelunch"
+  equals "$(project_name_of "1-x")" "freelunch"
+  equals "$(project_name_of "A very long project folder name")" "a-very-long-project-f"
+}
+
+# project_name_of <folder name>: the name init gives a project in that folder
+project_name_of() {
+  mkdir -p "$WORK/names/$1" && (cd "$WORK/names/$1" && "$CLI" init cloudflare >/dev/null 2>&1)
+  sed -n 's/^name_prefix = "\(.*\)"$/\1/p' "$WORK/names/$1/.freelunch/cloudflare/terraform.tfvars.example"
 }
 
 test_init_never_overwrites() {

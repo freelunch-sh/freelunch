@@ -61,8 +61,13 @@ writes into your project are owned by root.
 
 ```bash
 cd your-project
-freelunch init           # same as: freelunch init oci cloudflare
+freelunch init --name myapp   # same as: freelunch init --name myapp oci cloudflare
 ```
+
+Everything the stacks create is named after the project: the VM `myapp-main`, its network,
+the tunnel `myapp-oci-main`, service tokens and the Tailscale host. Without `--name`, init
+takes the folder's name. It ends up as `name_prefix` in each stack's tfvars, so two projects
+on the same accounts don't clash.
 
 ```
 .freelunch/
@@ -313,16 +318,16 @@ tailnet. Set it up before the first `apply`, because cloud-init only runs once.
    ssh_source_cidrs   = []
    ```
 
-3. In `apps.tfvars`, give `deploy` the host's tailnet name:
+3. In `apps.tfvars`, give `deploy` the host's tailnet name, `<name_prefix>-oci-main`:
 
    ```hcl
    hosts = {
-     oci-main = { address = "freelunch-oci-main" }
+     oci-main = { address = "myapp-oci-main" }
    }
    ```
 
 On first boot the host installs Tailscale from Tailscale's signed apt repository and joins
-as `freelunch-oci-main`. The machine you deploy from has to be on the same tailnet.
+as `myapp-oci-main`. The machine you deploy from has to be on the same tailnet.
 
 ## Troubleshooting
 
