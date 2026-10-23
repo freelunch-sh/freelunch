@@ -8,8 +8,16 @@ ssh_public_keys = [
   "ssh-ed25519 AAAA... you@laptop",
 ]
 
-# freelunch deploy connects over SSH. Narrow this to your own IP (x.x.x.x/32) if you can.
+# freelunch deploy connects over SSH, with keys only. Port 22 is open to anyone by default,
+# which includes every SSH scanner. Narrow it to your own IP if it's stable, e.g.
+# ["203.0.113.7/32"], or close it with [] and deploy over Tailscale instead (below).
 ssh_source_cidrs = ["0.0.0.0/0"]
+
+# Join the host to your tailnet on first boot, then give apps.tfvars its tailnet name
+# under hosts. Use a one-off key: user data stays readable on the host, but a used
+# one-off key is worthless. Not ephemeral: Tailscale removes those nodes after half an
+# hour offline.
+# tailscale_auth_key = "tskey-auth-..."
 
 # The app is reached through the Cloudflare Tunnel, so no other port is open.
 # Without the cloudflare stack, list the ports your app publishes, e.g. [80, 443].

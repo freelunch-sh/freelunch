@@ -45,6 +45,17 @@ variable "package_upgrade" {
   default     = true
 }
 
+variable "reboot_time" {
+  description = "Ubuntu installs security updates every day. When one needs a reboot (a new kernel, for example), the host reboots at this time of day (HH:MM, in timezone). null leaves reboots to you."
+  type        = string
+  default     = "04:00"
+
+  validation {
+    condition     = var.reboot_time == null || can(regex("^([01][0-9]|2[0-3]):[0-5][0-9]$", var.reboot_time))
+    error_message = "reboot_time must be a time of day like 04:00, or null."
+  }
+}
+
 variable "ssh_authorized_keys" {
   description = "SSH public keys cloud-init adds to the default user. For providers whose native key mechanism takes a single key (AWS key pairs)."
   type        = list(string)

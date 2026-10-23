@@ -24,16 +24,41 @@ swap:
   size: ${swap_size_bytes}
   maxsize: ${swap_size_bytes}
 %{ endif ~}
-%{ if length(app_files) > 0 ~}
 
 write_files:
+  # Keys only, no root login. sshd reads this before the image's own sshd_config.d files.
+  - path: /etc/ssh/sshd_config.d/10-freelunch.conf
+    permissions: "0644"
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin no
+  # Rotate container logs so a noisy app can't fill the disk. Written before Docker is
+  # installed, so dockerd starts with it.
+  - path: /etc/docker/daemon.json
+    permissions: "0644"
+    content: |
+      {"log-driver": "json-file", "log-opts": {"max-size": "10m", "max-file": "3"}}
+%{ if reboot_time != null ~}
+  # Security updates already install every day; reboot at ${reboot_time} when one needs it.
+  - path: /etc/apt/apt.conf.d/52freelunch-reboot
+    permissions: "0644"
+    content: |
+      Unattended-Upgrade::Automatic-Reboot "true";
+      Unattended-Upgrade::Automatic-Reboot-Time "${reboot_time}";
+%{ endif ~}
+%{ if tailscale_auth_key != null ~}
+  - path: /usr/share/keyrings/tailscale-archive-keyring.asc
+    permissions: "0644"
+    encoding: b64
+    content: ${base64encode(tailscale_apt_key)}
+%{ endif ~}
 %{ for f in app_files ~}
   - path: ${f.path}
     encoding: b64
     permissions: "${f.permissions}"
     content: ${f.content}
 %{ endfor ~}
-%{ endif ~}
 
 runcmd:
   - systemctl enable --now docker
@@ -42,7 +67,10 @@ runcmd:
   - ${jsonencode(cmd)}
 %{ endfor ~}
 %{ if tailscale_auth_key != null ~}
-  - curl -fsSL https://tailscale.com/install.sh | sh
+  # Tailscale from its signed apt repository. Retried, because apt's daily jobs can hold
+  # the lock during the first minutes of a new host.
+  - ${jsonencode("echo \"deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.asc] https://pkgs.tailscale.com/stable/ubuntu $(. /etc/os-release && echo \"$VERSION_CODENAME\") main\" > /etc/apt/sources.list.d/tailscale.list")}
+  - ${jsonencode("for i in 1 2 3 4 5; do apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q tailscale && break; sleep 30; done")}
   - ${jsonencode("tailscale up --auth-key=${tailscale_auth_key}${tailscale_hostname != null ? " --hostname=${tailscale_hostname}" : ""}")}
 %{ endif ~}
 %{ for name in app_names ~}
