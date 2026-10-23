@@ -1,6 +1,10 @@
 # Copy to terraform.tfvars and fill in (it is git-ignored).
 # Full reference: providers/oci/stack/terraform.tfvars.example in freelunch.
 
+# The names of everything this stack creates start with the project name. freelunch
+# init wrote the same one into each stack.
+name_prefix = "backend-app"
+
 region       = "eu-frankfurt-1"                  # your HOME region (Console > Tenancy details)
 tenancy_ocid = "ocid1.tenancy.oc1..aaaaaaaa..."  # grep tenancy ~/.oci/config
 

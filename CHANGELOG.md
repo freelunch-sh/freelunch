@@ -12,6 +12,9 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
 
 - **Project mode.** `freelunch init` creates a `.freelunch/` folder in any repository, with a
   `terraform.tfvars.example` per stack, `apps.tfvars`, `.env.example` and a `.gitignore`.
+  Each example sets `name_prefix` to the project's name (`--name`, or the folder's), so VMs,
+  networks, tunnels and service tokens are named after the project and two projects on the
+  same accounts don't clash.
   Host stacks get their `project.tfvars.example`, with only SSH open and no apps in
   cloud-init, since the tunnel serves the apps and `deploy` runs them. In that folder's
   tree every command reads tfvars and writes state, `inventory.json` and provider plugins

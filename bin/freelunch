@@ -31,7 +31,10 @@ usage() {
 Usage: freelunch <command> [args] [-- extra tofu/terraform args]
 
 Project:
-  init [stack...]         Create .freelunch/ in the current directory (default stacks: oci cloudflare)
+  init [--name <name>] [stack...]
+                          Create .freelunch/ in the current directory (default stacks: oci
+                          cloudflare). Resources are named after the project: --name, or the
+                          folder's name
   deploy [target...]      Copy Compose apps and their env to the hosts over SSH, start them and
                           wait until they are healthy. Targets: all (default), a provider (oci)
                           or a host (oci-main). --dry-run prints the remote script instead.
@@ -794,8 +797,43 @@ ready_stacks() {
   return 0
 }
 
+# project_name <folder name>: a name every provider takes for its resources, e.g.
+# "Shop API" is shop-api. OCI's network module is the strictest: 2 to 21 characters.
+project_name() {
+  local n
+  n="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9-]/-/g' -e 's/^[^a-z]*//' | cut -c1-21 | sed 's/-*$//')"
+  if [[ ${#n} -ge 2 ]]; then echo "$n"; else echo freelunch; fi
+}
+
+# with_name <name> <tfvars example> <stack dir>: the example with name_prefix set after its
+# header, for stacks that have that variable
+with_name() {
+  if ! grep -qs 'variable "name_prefix"' "$3"/*.tf; then cat "$2"; return 0; fi
+  awk -v name="$1" '
+    { print }
+    !done && $0 == "" {
+      print "# The names of everything this stack creates start with the project name. freelunch"
+      print "# init wrote the same one into each stack."
+      print "name_prefix = \"" name "\""
+      print ""
+      done = 1
+    }' "$2"
+}
+
 cmd_init() {
-  local base cfg s src stacks=()
+  local base cfg s src name="" stacks=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)   [[ $# -gt 1 ]] || die "init: --name takes a name"; name="$2"; shift ;;
+      --name=*) name="${1#--name=}" ;;
+      -*)       die "init: unknown option $1" ;;
+      *)        stacks+=("$1") ;;
+    esac
+    shift
+  done
+  if [[ -n "$name" && ! "$name" =~ ^[a-z][a-z0-9-]{0,19}[a-z0-9]$ ]]; then
+    die "init: a project name has 2 to 21 lowercase letters, digits and hyphens, and starts with a letter (not '$name')"
+  fi
   base="${FREELUNCH_PROJECT:-$PWD}"; base="${base%/}"
   [[ "$(basename "$base")" != ".freelunch" ]] || base="$(dirname "$base")"
   [[ -d "$base" ]] || die "no such directory: $base"
@@ -806,7 +844,8 @@ cmd_init() {
   fi
   [[ -z "$PROJECT" || "$PROJECT" == "$cfg" ]] || die "already inside a freelunch project: $PROJECT"
 
-  if [[ $# -gt 0 ]]; then stacks=("$@"); else stacks=("${INIT_STACKS[@]}"); fi
+  [[ ${#stacks[@]} -gt 0 ]] || stacks=("${INIT_STACKS[@]}")
+  [[ -n "$name" ]] || name="$(project_name "$(basename "$base")")"
   for s in "${stacks[@]}"; do
     [[ -f "$(stack_dir "$s")/terraform.tfvars.example" ]] || die "no stack named '$s' (stacks: $(ready_stacks))"
   done
@@ -834,7 +873,7 @@ EOF
     mkdir -p "$cfg/$s"
     src="$(stack_dir "$s")/project.tfvars.example"
     [[ -f "$src" ]] || src="$(stack_dir "$s")/terraform.tfvars.example"
-    write_new "$cfg/$s/terraform.tfvars.example" < "$src"
+    with_name "$name" "$src" "$(stack_dir "$s")" | write_new "$cfg/$s/terraform.tfvars.example"
   done
 
   local app host="" compose="compose.yaml" f
@@ -871,7 +910,7 @@ apps = {
 
 # Reach a host at another address, e.g. its Tailscale name instead of the public IP.
 # hosts = {
-#   ${host:-oci-main} = { address = "freelunch-${host:-oci-main}" }
+#   ${host:-oci-main} = { address = "$name-${host:-oci-main}" }
 # }
 EOF
 
@@ -889,6 +928,7 @@ CLOUDFLARE_API_TOKEN=
 # FREELUNCH_SSH_KEY=~/.ssh/id_ed25519
 EOF
 
+  log "project name: $name (name_prefix in each stack's tfvars)"
   [[ -f "$base/$compose" ]] || log "there is no $compose yet; apps.tfvars expects one"
   local applies=""
   for s in "${stacks[@]}"; do applies="${applies:+$applies, then }freelunch apply $s"; done

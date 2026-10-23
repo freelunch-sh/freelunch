@@ -119,7 +119,7 @@ routes = {
 }
 ```
 
-`apply` creates the token `freelunch-backend` and a Service Auth policy for the hostname.
+`apply` creates the token `<name_prefix>-backend` and a Service Auth policy for the hostname.
 Read the credentials from the state:
 
 ```bash
@@ -151,7 +151,7 @@ freelunch apply cloudflare -- -replace='module.tunnel.cloudflare_zero_trust_acce
 | `zone` | (required) | Domain on Cloudflare |
 | `routes` | (required) | See above |
 | `account_id` | the zone's account | Account that owns the tunnels |
-| `name_prefix` | `freelunch` | Tunnels are named `<prefix>-<host>`, service tokens `<prefix>-<name>` |
+| `name_prefix` | `freelunch` | Tunnels are named `<prefix>-<host>`, service tokens `<prefix>-<name>`. `freelunch init` sets it to the project's name |
 | `service_token_duration` | `8760h` | How long a service token is valid (`forever` for no expiry) |
 | `inventory_state_path` | `hybrid/terraform.tfstate` | Set by `bin/freelunch` in project mode |
 
