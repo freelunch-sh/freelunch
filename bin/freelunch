@@ -39,8 +39,13 @@ Project:
                           wait until they are healthy. Targets: all (default), a provider (oci)
                           or a host (oci-main). --dry-run prints the remote script instead.
   domain suggest <name...>
-                          Free names like yours (myapp.dpdns.org, myapp.pp.ua, myapp.eu.org, ...)
-                          and whether they are taken, with similar ones where they are
+                          Whether the name you typed is registered, then free names like it
+                          (myapp.dpdns.org, myapp.pp.ua, myapp.eu.org, ...) and whether they are
+                          taken, with similar ones where they are
+  domain add <name>       Put the name on Cloudflare's free plan and print the nameservers to
+                          give its provider (needs CLOUDFLARE_API_TOKEN)
+  domain status <name>    Whether the nameservers are Cloudflare's and the zone is active, so
+                          apply cloudflare can use it; fails until both are
 
 Infrastructure:
   list                    Show every provider with status, layer and deployment state
@@ -1159,6 +1164,8 @@ cmd_deploy() {
 # public resolver answers that over HTTPS, so curl and jq are enough. Only the provider can
 # say for sure, since a name can be registered without being in DNS yet.
 DOH_URL="https://cloudflare-dns.com/dns-query"
+RDAP_BOOTSTRAP="https://data.iana.org/rdap/dns.json"
+CF_API="https://api.cloudflare.com/client/v4"
 
 domain_providers() { # catalogued free domain providers, the recommended one first, excluded ones left out
   local p
@@ -1182,13 +1189,49 @@ name_state() { # name_state <name>: free, taken, or unknown when the lookup fail
   esac
 }
 
-cmd_domain() {
-  local labels=() similar=() name label i p s v state title re='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
-  [[ "${1:-}" == "suggest" ]] || die "domain: the command is freelunch domain suggest <name...>"
-  shift
+# rdap_state <name>: registered or available, from the RDAP server of the name's extension
+# (IANA keeps the list), or unknown when it has none or doesn't answer
+rdap_state() {
+  local base code
+  base="$(curl -s --max-time 10 "$RDAP_BOOTSTRAP" | jq -r --arg t "${1##*.}" 'first(.services[] | select(any(.[0][]; . == $t)) | .[1][0]) // empty' 2>/dev/null)" || base=""
+  [[ -n "$base" ]] || { echo unknown; return 0; }
+  code="$(curl -s -L --max-time 10 -o /dev/null -w '%{http_code}' "${base%/}/domain/$1")" || code=""
+  case "$code" in
+    200) echo registered ;;
+    404) echo available ;;
+    *)   echo unknown ;;
+  esac
+}
+
+# typed_state <name>: the name as typed, a paid domain: whether it is registered
+typed_state() {
+  local ext=".${1#*.}"
+  case "$(rdap_state "$1")" in
+    registered) echo "$1: registered" ;;
+    available)  echo "$1: not registered, but $ext names cost money at a registrar. The names below are free" ;;
+    *)
+      case "$(name_state "$1")" in
+        taken) echo "$1: registered (it is in DNS)" ;;
+        free)  echo "$1: not in DNS, so probably not registered, but $ext names cost money. The names below are free" ;;
+        *)     echo "$1: unknown (the lookup failed)" ;;
+      esac ;;
+  esac
+}
+
+# free_provider <name>: the catalogued free domain provider of the name's suffix
+free_provider() {
+  local p s
+  for p in $(domain_providers); do
+    for s in $(suffixes "$p"); do
+      if [[ "$1" == *".$s" ]]; then echo "$p"; return 0; fi
+    done
+  done
+  return 1
+}
+
+domain_suggest() { # domain_suggest <name...>
+  local labels=() similar=() typed=() name label i p s v state title re='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
   [[ $# -gt 0 ]] || die "domain suggest: name what you want, e.g. freelunch domain suggest myapp.com"
-  command -v curl >/dev/null || die "curl is required for 'domain suggest'"
-  command -v jq >/dev/null || die "jq is required for 'domain suggest'"
 
   # The first label is the name you want (myapp in myapp.com). Where it is taken, the first
   # free one of a few similar names stands in.
@@ -1199,8 +1242,13 @@ cmd_domain() {
     labels+=("$label")
     if [[ "$name" == *.* ]]; then v="$label-${name##*.} "; else v=""; fi
     similar+=("${v}get$label ${label}hq try$label")
+    if [[ "$name" == *.* ]] && ! free_provider "$name" >/dev/null; then typed+=("$name"); fi
   done
   [[ "$(name_state example.com)" == "taken" ]] || die "domain suggest: can't reach Cloudflare's DNS-over-HTTPS resolver ($DOH_URL)"
+
+  # The paid names you typed first, so you know whether yours is still there.
+  for name in ${typed[@]+"${typed[@]}"}; do typed_state "$name"; done
+  [[ ${#typed[@]} -eq 0 ]] || echo
 
   for p in $(domain_providers); do
     title="$(meta "$p" display_name)"
@@ -1219,7 +1267,120 @@ cmd_domain() {
     printf '  register at %s\n\n' "$(meta "$p" url)"
   done
   log "free: nothing in DNS uses the name yet, but the provider has the final say"
-  log "put the one you pick on Cloudflare and use it as the cloudflare stack's zone: docs/free-domains.md"
+  log "once you have one: freelunch domain add <name> puts it on Cloudflare (docs/free-domains.md)"
+}
+
+# cf_api <method> <path> [JSON body]: the Cloudflare API's answer
+cf_api() {
+  local out args=()
+  [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || die "domain: CLOUDFLARE_API_TOKEN is not set (export it, or put it in .freelunch/.env)"
+  [[ $# -lt 3 ]] || args=(--data "$3")
+  out="$(curl -sS --max-time 30 -X "$1" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" ${args[@]+"${args[@]}"} "$CF_API$2")" \
+    || die "domain: can't reach the Cloudflare API"
+  printf '%s\n' "$out"
+}
+
+cf_errors() { jq -r '[.errors[]? | "\(.message) (\(.code))"] | join("; ")' <<< "$1" 2>/dev/null; }
+
+# where_to_register <name>: where its nameservers are set
+where_to_register() {
+  local p
+  if p="$(free_provider "$1")"; then echo "$(meta "$p" display_name) ($(meta "$p" url))"; else echo "your registrar"; fi
+}
+
+# domain_add <name>: put the name on Cloudflare's free plan as a zone of its own, and print
+# the two nameservers to give the provider
+domain_add() {
+  local name="$1" account="${CLOUDFLARE_ACCOUNT_ID:-}" out zone
+  if [[ -z "$account" ]]; then
+    out="$(cf_api GET "/accounts?per_page=50")"
+    case "$(jq -r '.result | length' <<< "$out" 2>/dev/null)" in
+      1) account="$(jq -r '.result[0].id' <<< "$out")" ;;
+      0|"") die "domain add: the token sees no Cloudflare account; set CLOUDFLARE_ACCOUNT_ID (on the dashboard's account home page). $(cf_errors "$out")" ;;
+      *)    die "domain add: the token sees several accounts; set CLOUDFLARE_ACCOUNT_ID to one of: $(jq -r '[.result[] | "\(.id) (\(.name))"] | join(", ")' <<< "$out")" ;;
+    esac
+  fi
+  out="$(cf_api POST /zones "$(jq -nc --arg n "$name" --arg a "$account" '{name: $n, account: {id: $a}, type: "full"}')")"
+  if [[ "$(jq -r '.success' <<< "$out" 2>/dev/null)" == "true" ]]; then
+    zone="$(jq -c '.result' <<< "$out")"
+    log "$name is on Cloudflare now, on the free plan"
+  elif jq -e 'any(.errors[]?; .code == 1061)' <<< "$out" >/dev/null 2>&1; then
+    # 1061: the zone is on the account already
+    zone="$(cf_api GET "/zones?name=$name" | jq -c '.result[0] // empty')"
+    [[ -n "$zone" ]] || die "domain add: Cloudflare says $name exists, but not on this account"
+    log "$name is on Cloudflare already"
+  else
+    die "domain add: Cloudflare refused $name: $(cf_errors "$out"). Creating a zone takes a token whose zone resources are all zones of the account, with Zone > DNS > Edit or Zone > Zone > Edit (providers/cloudflare/README.md#api-token)"
+  fi
+  if [[ "$(jq -r '.status' <<< "$zone")" == "active" ]]; then
+    log "$name is active: set zone = \"$name\" in .freelunch/cloudflare/terraform.tfvars"
+    return 0
+  fi
+  echo "Set these nameservers for $name at $(where_to_register "$name"), in place of any others:"
+  jq -r '.name_servers[]' <<< "$zone" | sed 's/^/  /'
+  echo "Then freelunch domain status $name says when Cloudflare has taken over (minutes, up to a day)."
+}
+
+# domain_status <name>: whether the name's nameservers are Cloudflare's and its zone is
+# active, so that apply cloudflare can use it. Fails until both are true.
+domain_status() {
+  local name="$1" out ns="" want="" status="" zone_id="" delegated=0 line
+  out="$(curl -s --max-time 10 -H "accept: application/dns-json" "$DOH_URL?name=$name&type=NS")" || die "domain status: can't reach Cloudflare's DNS-over-HTTPS resolver ($DOH_URL)"
+  ns="$(jq -r '[.Answer[]? | select(.type == 2) | .data | rtrimstr(".") | ascii_downcase] | sort | join(" ")' <<< "$out" 2>/dev/null)"
+  if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+    out="$(cf_api GET "/zones?name=$name")"
+    if [[ "$(jq -r '.result | length' <<< "$out" 2>/dev/null)" == "1" ]]; then
+      status="$(jq -r '.result[0].status' <<< "$out")"
+      zone_id="$(jq -r '.result[0].id' <<< "$out")"
+      want="$(jq -r '.result[0].name_servers | map(ascii_downcase) | sort | join(" ")' <<< "$out")"
+    else
+      status="missing"
+    fi
+  fi
+
+  if [[ -z "$ns" ]]; then
+    line="none yet"
+  elif [[ -n "$want" && "$ns" == "$want" ]] || { [[ -z "$want" ]] && ! tr ' ' '\n' <<< "$ns" | grep -qv '\.ns\.cloudflare\.com$'; }; then
+    line="${ns// /, } (Cloudflare's)"
+    delegated=1
+  else
+    line="${ns// /, }, not Cloudflare's${want:+ for this zone}"
+  fi
+  [[ $delegated -eq 1 || -z "$want" ]] || line="$line. Set ${want// / and } at $(where_to_register "$name")"
+  echo "$name"
+  echo "  nameservers: $line"
+  case "$status" in
+    "")      echo "  Cloudflare: not checked without CLOUDFLARE_API_TOKEN" ;;
+    missing) echo "  Cloudflare: no zone for $name on this account yet (freelunch domain add $name)" ;;
+    active)  echo "  Cloudflare: active" ;;
+    *)       echo "  Cloudflare: $status"
+             # It checks on its own too, but a request helps once the nameservers are right.
+             if [[ $delegated -eq 1 ]] && cf_api PUT "/zones/$zone_id/activation_check" | jq -e '.success' >/dev/null 2>&1; then
+               echo "  asked Cloudflare to check the nameservers again"
+             fi ;;
+  esac
+  if [[ $delegated -eq 1 && ( "$status" == "active" || -z "$status" ) ]]; then
+    log "ready: zone = \"$name\" in .freelunch/cloudflare/terraform.tfvars, then freelunch apply cloudflare"
+    return 0
+  fi
+  log "not ready yet; run this again later (Cloudflare can take up to a day)"
+  return 1
+}
+
+cmd_domain() {
+  local sub="${1:-}" re='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9]$'
+  [[ $# -eq 0 ]] || shift
+  case "$sub" in
+    suggest|add|status) ;;
+    *) die "domain: the commands are domain suggest <name...>, domain add <name> and domain status <name>" ;;
+  esac
+  command -v curl >/dev/null || die "curl is required for 'domain $sub'"
+  command -v jq >/dev/null || die "jq is required for 'domain $sub'"
+  if [[ "$sub" == "suggest" ]]; then domain_suggest "$@"; return; fi
+  [[ $# -eq 1 ]] || die "domain $sub: name one domain, e.g. freelunch domain $sub myapp.dpdns.org"
+  set -- "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ "$1" =~ $re ]] || die "domain $sub: '$1' is not a domain name"
+  "domain_$sub" "$1"
 }
 
 # --- development ----------------------------------------------------------------------

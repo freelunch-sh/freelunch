@@ -124,20 +124,73 @@ echo "post $a [$type] $body" >> "$FAKE_LOG"
 EOF
 chmod +x "$WORK/wait-bin/"*
 
-# A fake DNS-over-HTTPS resolver for `freelunch domain suggest`. Names in FAKE_TAKEN exist
-# (example.com always does), names in FAKE_BROKEN fail to resolve, and the rest don't exist.
-# FAKE_OFFLINE fails every lookup like a dropped connection.
+# A fake internet for `freelunch domain`. Cloudflare's DNS-over-HTTPS resolver: names in
+# FAKE_TAKEN exist (example.com always does), names in FAKE_BROKEN fail to resolve, names in
+# FAKE_DELEGATED have Cloudflare's nameservers, and the rest don't exist. FAKE_OFFLINE fails
+# every lookup like a dropped connection. IANA's RDAP list has .app and .dev, whose RDAP
+# server knows the names in FAKE_REGISTERED. The Cloudflare API has the accounts in
+# FAKE_ACCOUNTS ("id:name ...", default acc1:Me) and the zones in FAKE_ZONES ("name:status
+# ..."), and refuses new zones with FAKE_ZONE_REFUSED.
 mkdir -p "$WORK/doh-bin"
 cat > "$WORK/doh-bin/curl" <<'EOF'
 #!/usr/bin/env bash
-for a; do url="$a"; done
-name="${url#*\?name=}"
-name="${name%%&*}"
-echo "lookup $url" >> "$FAKE_LOG"
-[[ -z "${FAKE_OFFLINE:-}" ]] || exit 7
-if [[ " example.com ${FAKE_TAKEN:-} " == *" $name "* ]]; then echo '{"Status":0}'
-elif [[ " ${FAKE_BROKEN:-} " == *" $name "* ]]; then echo '{"Status":2}'
-else echo '{"Status":3}'; fi
+method=GET data="" write="" token=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -X)      method="$2"; shift ;;
+    --data)  data="$2"; shift ;;
+    -w)      write="$2"; shift ;;
+    -H)      [[ "$2" != "Authorization: Bearer "* ]] || token="${2#Authorization: Bearer }"; shift ;;
+    -o|--max-time) shift ;;
+    -*)      ;;
+    *)       url="$1" ;;
+  esac
+  shift
+done
+zone_status() { local z; for z in ${FAKE_ZONES:-}; do [[ "${z%%:*}" != "$1" ]] || { echo "${z#*:}"; return; }; done; }
+zone() { jq -nc --arg n "$1" --arg s "$2" '{id: ("zone-" + $n), name: $n, status: $s, name_servers: ["bob.ns.cloudflare.com", "ada.ns.cloudflare.com"]}'; }
+case "$url" in
+  https://cloudflare-dns.com/*)
+    name="${url#*\?name=}"
+    name="${name%%&*}"
+    echo "lookup $url" >> "$FAKE_LOG"
+    [[ -z "${FAKE_OFFLINE:-}" ]] || exit 7
+    if [[ " ${FAKE_DELEGATED:-} " == *" $name "* ]]; then
+      jq -nc --arg n "$name." '{Status: 0, Answer: [{name: $n, type: 2, data: "ADA.ns.cloudflare.com."}, {name: $n, type: 2, data: "bob.ns.cloudflare.com."}]}'
+    elif [[ " example.com ${FAKE_TAKEN:-} " == *" $name "* ]]; then echo '{"Status":0,"Answer":[{"type":2,"data":"ns1.example.net."}]}'
+    elif [[ " ${FAKE_BROKEN:-} " == *" $name "* ]]; then echo '{"Status":2}'
+    else echo '{"Status":3}'; fi ;;
+  https://data.iana.org/rdap/dns.json)
+    echo "rdap $url" >> "$FAKE_LOG"
+    echo '{"services": [[["app", "dev"], ["https://rdap.example/"]]]}' ;;
+  https://rdap.example/domain/*)
+    echo "rdap $url" >> "$FAKE_LOG"
+    if [[ " ${FAKE_REGISTERED:-} " == *" ${url##*/} "* ]]; then code=200; else code=404; fi
+    [[ -z "$write" ]] || printf '%s' "$code" ;;
+  https://api.cloudflare.com/client/v4/*)
+    path="${url#https://api.cloudflare.com/client/v4}"
+    echo "api $method $path token=$token${data:+ $data}" >> "$FAKE_LOG"
+    case "$method $path" in
+      "GET /accounts"*)
+        jq -nc '{success: true, result: [$ARGS.positional[] | split(":") | {id: .[0], name: .[1]}]}' --args ${FAKE_ACCOUNTS:-acc1:Me} ;;
+      "POST /zones")
+        name="$(jq -r .name <<< "$data")"
+        if [[ -n "$(zone_status "$name")" ]]; then
+          jq -nc --arg n "$name" '{success: false, errors: [{code: 1061, message: ($n + " already exists")}]}'
+        elif [[ -n "${FAKE_ZONE_REFUSED:-}" ]]; then
+          echo '{"success":false,"errors":[{"code":1116,"message":"Please ensure you are providing the root domain"}]}'
+        else
+          jq -nc --argjson z "$(zone "$name" pending)" '{success: true, result: $z}'
+        fi ;;
+      "GET /zones?name="*)
+        name="${path#*name=}"
+        status="$(zone_status "$name")"
+        if [[ -n "$status" ]]; then jq -nc --argjson z "$(zone "$name" "$status")" '{success: true, result: [$z]}'
+        else echo '{"success":true,"result":[]}'; fi ;;
+      "PUT /zones/"*/activation_check) echo '{"success":true,"result":{}}' ;;
+      *) echo '{"success":false,"errors":[{"code":7003,"message":"No route for that URI"}]}' ;;
+    esac ;;
+esac
 EOF
 chmod +x "$WORK/doh-bin/curl"
 
@@ -179,11 +232,19 @@ deploy_in() {
   (cd "$dir" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" "$CLI" deploy "$@")
 }
 
-# suggest_in <dir> [names...]: run domain suggest against the fake resolver
+# suggest_in <dir> [names...]: run domain suggest against the fake internet
 suggest_in() {
   local dir="$1"; shift
+  domain_in "$dir" suggest "$@"
+}
+
+# domain_in <dir> <args...>: run freelunch domain against the fake internet, with the
+# Cloudflare token and account of TEST_CF_TOKEN and TEST_CF_ACCOUNT, never your own
+domain_in() {
+  local dir="$1"; shift
   mkdir -p "$dir"
-  (cd "$dir" && PATH="$WORK/doh-bin:$PATH" FAKE_LOG="$dir/fake.log" "$CLI" domain suggest "$@")
+  (cd "$dir" && PATH="$WORK/doh-bin:$PATH" FAKE_LOG="$dir/fake.log" \
+    CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN:-}" CLOUDFLARE_ACCOUNT_ID="${TEST_CF_ACCOUNT:-}" "$CLI" domain "$@")
 }
 
 # capacity_project <dir>: a project with an oci tfvars, and a scratch checkout next to it
@@ -905,8 +966,9 @@ test_domain_suggest_checks_every_free_domain_provider() {
     grep -q "^  freelunch\.$s  *free$" <<< "$out"
     grep -q "^  moneyspider\.$s  *free$" <<< "$out"
   done
-  # One block per provider, the recommended one first, each with where to register.
-  headers="$(grep -v -e '^ ' -e '^$' -e '^==>' <<< "$out" | cut -d: -f1)"
+  # One block per provider, the recommended one first, each with where to register. The
+  # names as typed come before them.
+  headers="$(grep -v -e '^ ' -e '^$' -e '^==>' -e '^freelunch\.sh: ' -e '^moneyspider\.app: ' <<< "$out" | cut -d: -f1)"
   equals "$(head -1 <<< "$headers")" "DigitalPlat FreeDomain (recommended)"
   contains "$headers" "EU.org"
   contains "$headers" "pp.ua"
@@ -915,10 +977,29 @@ test_domain_suggest_checks_every_free_domain_provider() {
   # Excluded providers, and suffixes Cloudflare won't take as zones, stay out.
   lacks "$out" "is-a.dev"
   lacks "$out" "qd.je"
-  # Nothing was taken, so no similar names were looked up. All lookups go to Cloudflare's resolver.
+  # Nothing was taken, so no similar names were looked up. DNS lookups go to Cloudflare's resolver.
   lacks "$out" "getmoneyspider"
   equals "$(grep -c '^lookup https://cloudflare-dns.com/dns-query?name=.*&type=NS$' "$d/fake.log")" "$(grep -c '^lookup' "$d/fake.log")"
   contains "$out" "the provider has the final say"
+}
+
+# A paid name as typed comes first: is it registered? RDAP says, or DNS where there is no RDAP.
+test_domain_suggest_reports_the_name_as_typed() {
+  local d="$WORK/suggest-typed" out
+  out="$(FAKE_REGISTERED="moneyspider.app" suggest_in "$d" moneyspider.app freelunch.sh shop 2>&1)"
+  equals "$(sed -n 1,3p <<< "$out")" "$(printf 'moneyspider.app: registered\nfreelunch.sh: not in DNS, so probably not registered, but .sh names cost money. The names below are free\n')"
+  grep -q '^rdap https://data.iana.org/rdap/dns.json$' "$d/fake.log"
+  grep -q '^rdap https://rdap.example/domain/moneyspider.app$' "$d/fake.log"
+  rm "$d/fake.log"
+  out="$(FAKE_TAKEN="freelunch.sh" suggest_in "$d" moneyspider.app freelunch.sh 2>&1)"
+  contains "$out" "moneyspider.app: not registered, but .app names cost money at a registrar. The names below are free"
+  contains "$out" "freelunch.sh: registered (it is in DNS)"
+  # A free name as typed is checked with the others, not twice.
+  rm "$d/fake.log"
+  out="$(suggest_in "$d" moneyspider.dpdns.org 2>&1)"
+  lacks "$out" "moneyspider.dpdns.org:"
+  grep -q '^  moneyspider\.dpdns\.org  *free$' <<< "$out"
+  fails grep -q '^rdap' "$d/fake.log"
 }
 
 test_domain_suggest_offers_similar_names_where_taken() {
@@ -947,6 +1028,69 @@ test_domain_suggest_reports_failed_lookups() {
   if out="$(FAKE_OFFLINE=1 suggest_in "$d" moneyspider 2>&1)"; then echo "suggest should fail offline"; return 1; fi
   contains "$out" "can't reach Cloudflare's DNS-over-HTTPS resolver"
   equals "$(grep -c '^lookup' "$d/fake.log")" 1
+}
+
+# domain add puts the name on Cloudflare and says which nameservers to set at the provider.
+test_domain_add_puts_a_name_on_cloudflare() {
+  local d="$WORK/domain-add" out
+  out="$(TEST_CF_TOKEN=cf-token domain_in "$d" add MoneySpider.dpdns.org 2>&1)"
+  grep -qx 'api GET /accounts?per_page=50 token=cf-token' "$d/fake.log"
+  grep -qxF 'api POST /zones token=cf-token {"name":"moneyspider.dpdns.org","account":{"id":"acc1"},"type":"full"}' "$d/fake.log"
+  contains "$out" "moneyspider.dpdns.org is on Cloudflare now, on the free plan"
+  contains "$out" "$(printf 'Set these nameservers for moneyspider.dpdns.org at DigitalPlat FreeDomain (https://dash.domain.digitalplat.org/), in place of any others:\n  bob.ns.cloudflare.com\n  ada.ns.cloudflare.com')"
+  contains "$out" "freelunch domain status moneyspider.dpdns.org says when"
+  # Once more: the zone is there already, and an active one needs nothing else.
+  out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="moneyspider.dpdns.org:pending" domain_in "$d" add moneyspider.dpdns.org 2>&1)"
+  contains "$out" "moneyspider.dpdns.org is on Cloudflare already"
+  contains "$out" "  ada.ns.cloudflare.com"
+  out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="moneyspider.dpdns.org:active" domain_in "$d" add moneyspider.dpdns.org 2>&1)"
+  contains "$out" 'moneyspider.dpdns.org is active: set zone = "moneyspider.dpdns.org"'
+  lacks "$out" "Set these nameservers"
+  # Any domain works. With several accounts, CLOUDFLARE_ACCOUNT_ID picks one.
+  rm "$d/fake.log"
+  out="$(TEST_CF_TOKEN=cf-token TEST_CF_ACCOUNT=acc2 FAKE_ACCOUNTS="acc1:Me acc2:Work" domain_in "$d" add example.org 2>&1)"
+  contains "$out" "Set these nameservers for example.org at your registrar"
+  grep -qF '"account":{"id":"acc2"}' "$d/fake.log"
+  fails grep -q '^api GET /accounts' "$d/fake.log"
+  if out="$(TEST_CF_TOKEN=cf-token FAKE_ACCOUNTS="acc1:Me acc2:Work" domain_in "$d" add example.org 2>&1)"; then echo "add should have failed"; return 1; fi
+  contains "$out" "set CLOUDFLARE_ACCOUNT_ID to one of: acc1 (Me), acc2 (Work)"
+  if out="$(TEST_CF_TOKEN=cf-token FAKE_ZONE_REFUSED=1 domain_in "$d" add sub.example.org 2>&1)"; then echo "add should have failed"; return 1; fi
+  contains "$out" "Cloudflare refused sub.example.org: Please ensure you are providing the root domain (1116)"
+  contains "$out" "whose zone resources are all zones of the account"
+  # A token and one domain name.
+  if out="$(domain_in "$d" add moneyspider.dpdns.org 2>&1)"; then echo "add should have failed"; return 1; fi
+  contains "$out" "CLOUDFLARE_API_TOKEN is not set"
+  TEST_CF_TOKEN=cf-token fails domain_in "$d" add "my app.dpdns.org"
+  TEST_CF_TOKEN=cf-token fails domain_in "$d" add moneyspider
+  TEST_CF_TOKEN=cf-token fails domain_in "$d" add one.dpdns.org two.dpdns.org
+}
+
+# domain status says when the name is ready for the cloudflare stack, and fails until then.
+test_domain_status_says_when_a_name_is_ready() {
+  local d="$WORK/domain-status" out
+  # Registered, nameservers not set yet.
+  if out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="moneyspider.dpdns.org:pending" domain_in "$d" status moneyspider.dpdns.org 2>&1)"; then echo "status should have failed"; return 1; fi
+  contains "$out" "  nameservers: none yet. Set ada.ns.cloudflare.com and bob.ns.cloudflare.com at DigitalPlat FreeDomain (https://dash.domain.digitalplat.org/)"
+  contains "$out" "  Cloudflare: pending"
+  lacks "$out" "asked Cloudflare"
+  # The nameservers are other ones.
+  if out="$(TEST_CF_TOKEN=cf-token FAKE_TAKEN="moneyspider.dpdns.org" FAKE_ZONES="moneyspider.dpdns.org:pending" domain_in "$d" status moneyspider.dpdns.org 2>&1)"; then echo "status should have failed"; return 1; fi
+  contains "$out" "  nameservers: ns1.example.net, not Cloudflare's for this zone. Set ada.ns.cloudflare.com and bob.ns.cloudflare.com at"
+  # Delegated, and Cloudflare hasn't noticed yet: it asks Cloudflare to check.
+  rm "$d/fake.log"
+  if out="$(TEST_CF_TOKEN=cf-token FAKE_DELEGATED="moneyspider.dpdns.org" FAKE_ZONES="moneyspider.dpdns.org:pending" domain_in "$d" status moneyspider.dpdns.org 2>&1)"; then echo "status should have failed"; return 1; fi
+  contains "$out" "  nameservers: ada.ns.cloudflare.com, bob.ns.cloudflare.com (Cloudflare's)"
+  contains "$out" "  asked Cloudflare to check the nameservers again"
+  grep -qx 'api PUT /zones/zone-moneyspider.dpdns.org/activation_check token=cf-token' "$d/fake.log"
+  # Active: ready, and the exit status says so.
+  out="$(TEST_CF_TOKEN=cf-token FAKE_DELEGATED="moneyspider.dpdns.org" FAKE_ZONES="moneyspider.dpdns.org:active" domain_in "$d" status moneyspider.dpdns.org 2>&1)"
+  contains "$out" "  Cloudflare: active"
+  contains "$out" 'ready: zone = "moneyspider.dpdns.org" in .freelunch/cloudflare/terraform.tfvars, then freelunch apply cloudflare'
+  # Without a token only the nameservers are checked; without a zone, add comes first.
+  out="$(FAKE_DELEGATED="moneyspider.dpdns.org" domain_in "$d" status moneyspider.dpdns.org 2>&1)"
+  contains "$out" "  Cloudflare: not checked without CLOUDFLARE_API_TOKEN"
+  if out="$(TEST_CF_TOKEN=cf-token domain_in "$d" status moneyspider.dpdns.org 2>&1)"; then echo "status should have failed"; return 1; fi
+  contains "$out" "  Cloudflare: no zone for moneyspider.dpdns.org on this account yet (freelunch domain add moneyspider.dpdns.org)"
 }
 
 test_domain_suggest_checks_names_first() {

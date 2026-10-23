@@ -19,7 +19,8 @@ or as a Docker image.
   works too, for 24 hours at a time. Free resources exist only in your home region.
 - A **domain on Cloudflare** (free plan) and an **API token** with the
   [permissions listed here](../providers/cloudflare/README.md#api-token). The domain can be
-  a free name: see [Free domains](free-domains.md).
+  a free name: see [Free domains](free-domains.md). `freelunch domain add` puts it on
+  Cloudflare, and `freelunch domain status` says when it's ready.
 - An **SSH key pair**. `freelunch deploy` connects with it.
 - Your app as a **Compose file that uses images** (from Docker Hub, GHCR or any registry).
   Images are pulled on the host; nothing is built there.
@@ -174,6 +175,7 @@ routes = {
 ```
 
 ```bash
+freelunch domain status example.com   # the zone is on Cloudflare and active
 freelunch apply cloudflare
 ```
 
@@ -343,6 +345,7 @@ as `myapp-oci-main`. The machine you deploy from has to be on the same tailnet.
 | Cloudflare error 1033 | cloudflared is not running on the host: run `freelunch deploy` |
 | Cloudflare error 502 | cloudflared runs but the app does not answer on `127.0.0.1:<port>` |
 | `apply cloudflare` says a host is unknown | Apply the host stack first; host names are `<provider>-<instance>` |
+| `apply cloudflare` finds no zone | `freelunch domain status <zone>`: the zone has to be on the token's account (`freelunch domain add <zone>`) |
 | `locked provider ... does not match configured version constraint` | The freelunch release you moved to needs newer providers. Delete `.freelunch/<stack>/.terraform.lock.hcl`, run the command again and commit the new lock file |
 | `doesn't match any of the checksums previously recorded in the dependency lock file` | The provider download differs from the one your project locked. Find out why (a proxy, a mirror, tampering) before you touch the lock file |
 
