@@ -144,6 +144,7 @@ routes can share a token, and a route can list `emails` too, so people sign in f
 browser while your code uses the token.
 
 A token expires after `service_token_duration`, a year by default (`expires_at` says when).
+`freelunch status` shows when, and `deploy`, `doctor` and `status` warn from 30 days before.
 To renew it, replace it and give the new secret to your clients:
 
 ```bash

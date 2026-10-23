@@ -41,6 +41,12 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
 - **Access service tokens** for machine clients: `access = { service_tokens = ["backend"] }`
   on a route puts a Service Auth policy in front of it, so Cloudflare answers 401 to
   requests without the token's headers and they never reach the host.
+- **`freelunch status`** shows the project on one screen: hosts with their addresses,
+  architecture and shape; the apps on each host and whether their containers run and are
+  healthy (over SSH, only to hosts whose key is pinned, and apps that `apps.tfvars` lists
+  but the host doesn't run yet); whether each tunnel is connected, from the Cloudflare
+  API, with its URLs; when each service token expires; and capacity waits. `deploy`,
+  `doctor` and `status` warn about a service token from 30 days before it expires.
 - `freelunch output <stack> [name]` prints a stack's outputs from its state, e.g.
   `output cloudflare -json service_tokens` or `output hybrid -raw ssh_config`.
 - `freelunch plan --show-user-data` prints the cloud-init of each host in the plan, decoded,
