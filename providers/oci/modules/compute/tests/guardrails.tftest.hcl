@@ -75,6 +75,60 @@ run "max_free_layout_passes" {
   }
 }
 
+# Capacity retries raise the offset by one to try the next AD that offers the shape.
+run "offset_moves_to_the_next_ad_with_the_shape" {
+  command = plan
+
+  variables {
+    instances = {
+      main   = { ocpus = 2, memory_in_gbs = 12, boot_volume_gb = 100 }
+      edge-1 = { shape = "VM.Standard.E2.1.Micro", boot_volume_gb = 50 }
+      pinned = { shape = "VM.Standard.E2.1.Micro", boot_volume_gb = 50, availability_domain_index = 1 }
+    }
+    availability_domain_offset = 1
+  }
+
+  assert {
+    condition     = oci_core_instance.this["main"].availability_domain == "Xyz:EU-FRANKFURT-1-AD-2"
+    error_message = "With offset 1 the A1 instance should go to the second AD that offers its shape."
+  }
+
+  assert {
+    condition     = oci_core_instance.this["edge-1"].availability_domain == "Xyz:EU-FRANKFURT-1-AD-2"
+    error_message = "The micro shape is offered in one AD only, so every offset lands there."
+  }
+
+  assert {
+    condition     = oci_core_instance.this["pinned"].availability_domain == "Xyz:EU-FRANKFURT-1-AD-2"
+    error_message = "availability_domain_index should win over the offset."
+  }
+}
+
+run "offset_wraps_around" {
+  command = plan
+
+  variables {
+    instances                  = { main = {} }
+    availability_domain_offset = 5
+  }
+
+  assert {
+    condition     = oci_core_instance.this["main"].availability_domain == "Xyz:EU-FRANKFURT-1-AD-2"
+    error_message = "Offset 5 over two ADs should land on the second one."
+  }
+}
+
+run "offset_must_be_a_whole_number" {
+  command = plan
+
+  variables {
+    instances                  = { main = {} }
+    availability_domain_offset = 1.5
+  }
+
+  expect_failures = [var.availability_domain_offset]
+}
+
 run "legacy_4_24_a1_is_blocked" {
   command = plan
 

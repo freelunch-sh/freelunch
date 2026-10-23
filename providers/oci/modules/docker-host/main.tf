@@ -52,6 +52,7 @@ module "compute" {
   name_prefix    = var.name_prefix
 
   ssh_public_keys                = var.ssh_public_keys
+  availability_domain_offset     = var.availability_domain_offset
   reserved_block_storage_gb      = var.reserved_block_storage_gb
   acknowledge_billable_resources = var.acknowledge_billable_resources
 

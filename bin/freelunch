@@ -13,9 +13,16 @@ INIT_STACKS=(oci cloudflare)
 PROJECT=""      # the project's .freelunch folder; empty in home mode (config and state live in this checkout)
 TMP=""          # scratch folder removed on exit (deploy keeps tunnel tokens there)
 SSH_OPTS=()
-trap '[[ -z "$TMP" ]] || rm -rf "$TMP"' EXIT
+WAIT=""         # state file of a capacity wait in progress (see wait_state)
+DIED=""         # what die said last, for that state file
+trap 'on_exit $?' EXIT
 
-die() { echo "freelunch: $*" >&2; exit 1; }
+on_exit() {
+  [[ -z "$WAIT" ]] || end_wait stopped "${DIED:-the CLI stopped (exit status $1)}"
+  [[ -z "$TMP" ]] || rm -rf "$TMP"
+}
+
+die() { DIED="$*"; echo "freelunch: $*" >&2; exit 1; }
 log() { echo "==> $*" >&2; }
 rel() { echo "${1#"$PWD"/}"; }
 
@@ -35,10 +42,15 @@ Project:
 Infrastructure:
   list                    Show every provider with status, layer and deployment state
   plan    <p...|all>      Plan provider stacks. --show-user-data also prints the cloud-init of
-                          each host in the plan, with secrets left out
+                          each host in the plan, with secrets left out. --out <file> saves the
+                          plan of one stack for apply --plan
   apply   <p...|all>      Apply provider stacks (hosts, then services), refresh hybrid, then glue.
-                          --wait-for-capacity retries hosts until OCI has the capacity for them
+                          --plan <file> applies a saved plan without a prompt.
+                          --wait-for-capacity retries hosts until OCI has the capacity for them,
+                          each time in the next availability domain; with --detach it waits in
+                          the background, logging to .freelunch/<stack>/wait.log
   destroy <p...|all>      Destroy provider stacks in reverse layer order, then refresh hybrid
+  status                  How each capacity wait is going: attempts, the last result, the next try
   hybrid                  Re-aggregate deployed host stacks into the hybrid inventory
   inventory               Write inventory.json (all hosts across providers)
   output <stack> [args]   Print a stack's outputs from its state, e.g. output cloudflare -json
@@ -59,7 +71,9 @@ FREELUNCH_AUTO_APPROVE=1 skips apply/destroy prompts. FREELUNCH_TF picks tofu or
 FREELUNCH_SSH_KEY sets the key deploy uses, FREELUNCH_SSH replaces the ssh command, and
 FREELUNCH_DEPLOY_TIMEOUT (seconds, default 180) limits the wait for healthy containers.
 FREELUNCH_CAPACITY_INTERVAL (seconds, default 120) spaces out capacity retries, and
-FREELUNCH_CAPACITY_TIMEOUT (seconds) stops them after that long.
+FREELUNCH_CAPACITY_TIMEOUT (seconds) stops them after that long. When a wait ends, a desktop
+notification says so, and FREELUNCH_NOTIFY (an ntfy, Discord or Slack URL) gets a message too;
+FREELUNCH_NOTIFY=off turns both off.
 EOF
 }
 
@@ -261,11 +275,19 @@ check_oci_session() {
 
 # Free Arm capacity on OCI comes and goes, so creating an A1 host can fail with "Out of
 # host capacity" for hours or days. apply --wait-for-capacity tries again until it works,
-# and only retries that error and OCI's rate limit. You approve the first attempt as
-# usual. Each retry plans again and applies that plan only if it destroys nothing, so a
-# change made while it waits can't remove anything without you.
+# and only retries that error and OCI's rate limit. The first attempt is approved like any
+# apply, or is a plan reviewed beforehand (plan --out, then apply --plan). Each retry plans
+# again and applies that plan only if it destroys nothing and, after a reviewed plan, makes
+# no change the reviewed plan doesn't. So a change made while it waits can't do anything
+# that nobody approved.
 CAPACITY_ERRORS='out of (host )?capacity|TooManyRequests'
 MAX_CAPACITY_DELAY=1800 # backing off from rate limits stops here; a session token lasts an hour
+# What a plan changes, by resource address and actions.
+CHANGES='[.resource_changes[]? | select(.change.actions != ["no-op"] and .change.actions != ["read"]) | {address, actions: .change.actions}]'
+
+# A wait records how it goes in <stack config>/wait.state, for freelunch status. WAIT is
+# that file while a wait runs; if the CLI stops before the host exists, on_exit marks it.
+WAIT_PROVIDER="" WAIT_STARTED="" WAIT_ATTEMPT=0 WAIT_TRIES=0 WAIT_AD="" WAIT_INTERRUPTED=0 SLEEP_PID=""
 
 # tee that ignores Ctrl-C. tofu/terraform keep printing while they stop and save the
 # state; with tee gone, their next line would kill them (SIGPIPE).
@@ -279,14 +301,69 @@ retry_reason() {
   if grep -q 'TooManyRequests' <<< "$errors"; then echo busy; else echo capacity; fi
 }
 
-destroys_nothing() { # destroys_nothing <provider> <saved plan>
-  tf_for "$1" "$(stack_dir "$1")" show -json "$2" | jq -e 'any(.resource_changes[]?.change.actions[]; . == "delete") | not' >/dev/null
+# ads_in <plan json>: the availability domains the plan creates instances in, without the
+# tenancy prefix (Xyz:UK-LONDON-1-AD-2 is UK-LONDON-1-AD-2)
+ads_in() {
+  jq -r '[.resource_changes[]? | select(.change.actions | index("create")) | .change.after.availability_domain? // empty | sub("^[^:]*:"; "")] | unique | join(", ")' "$1"
 }
 
-apply_until_capacity() { # apply_until_capacity <provider> [extra args]
-  local p="$1"; shift
-  local dir out plan profile="" interval delay pause cap deadline="" attempt=1 summary why a
-  local args=() state=() approve=()
+# host_addresses <provider>: "oci-main 203.0.113.10" per host in the stack's state
+host_addresses() {
+  jq -r '.outputs.hosts.value[]? | "\(.provider)-\(.name) \(.public_ip // .private_ip // "")"' "$(config_dir "$1")/terraform.tfstate" 2>/dev/null || true
+}
+
+# wait_state <waiting|done|stopped> <what happened> [next attempt, seconds since the epoch].
+# attempt is how many attempts were made, the one running included (WAIT_TRIES).
+wait_state() {
+  [[ -n "$WAIT" ]] || return 0
+  printf 'state=%s\npid=%s\nstarted=%s\nupdated=%s\nattempt=%s\nlast=%s\nnext=%s\nlog=%s\n' \
+    "$1" "$$" "$WAIT_STARTED" "$(date +%s)" "$WAIT_TRIES" "$2" "${3:-}" "${FREELUNCH_WAIT_LOG:-}" > "$WAIT.new"
+  mv "$WAIT.new" "$WAIT"
+}
+
+# end_wait <done|stopped> <what happened>: record the end, and tell whoever is waiting for
+# it: a wait in the background, or one that had to retry. Not when someone stopped it.
+end_wait() {
+  wait_state "$1" "$2"
+  WAIT=""
+  if [[ $WAIT_INTERRUPTED -eq 0 ]] && [[ -n "${FREELUNCH_WAIT_LOG:-}" || $WAIT_ATTEMPT -gt 1 ]]; then
+    notify "$WAIT_PROVIDER: ${2#"$WAIT_PROVIDER: "}"
+  fi
+}
+
+# wait_pid <provider>: the pid of a wait for that stack that is still running
+wait_pid() {
+  local file pid
+  file="$(config_dir "$1")/wait.state"
+  [[ "$(sed -n 's/^state=//p' "$file" 2>/dev/null)" == "waiting" ]] || return 1
+  pid="$(sed -n 's/^pid=//p' "$file")"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && echo "$pid"
+}
+
+# notify <message>: a desktop notification (macOS, or Linux with notify-send), and a POST
+# to FREELUNCH_NOTIFY when it is a URL. ntfy takes the text as it is; Discord and Slack
+# webhooks get JSON. FREELUNCH_NOTIFY=off sends nothing.
+notify() {
+  local url="${FREELUNCH_NOTIFY:-}" body="$1" type=text/plain
+  [[ "$url" != "off" ]] || return 0
+  if command -v osascript >/dev/null; then
+    osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "freelunch"' -e 'end run' "$1" >/dev/null 2>&1 || true
+  elif command -v notify-send >/dev/null; then
+    notify-send freelunch "$1" >/dev/null 2>&1 || true
+  fi
+  [[ "$url" == http://* || "$url" == https://* ]] || return 0
+  case "$url" in
+    https://discord.com/api/webhooks/*|https://discordapp.com/api/webhooks/*) type=application/json; body="$(jq -nc --arg m "$1" '{content: $m}')" ;;
+    https://hooks.slack.com/*) type=application/json; body="$(jq -nc --arg m "$1" '{text: $m}')" ;;
+  esac
+  curl -fsS --max-time 15 -H "Content-Type: $type" -H "Title: freelunch" --data-binary "$body" "$url" >/dev/null 2>&1 \
+    || log "couldn't send the notification to FREELUNCH_NOTIFY"
+}
+
+apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan, or ""> [extra args]
+  local p="$1" reviewed="$2"; shift 2
+  local dir out plan json profile="" interval delay pause cap deadline="" summary why a pid unreviewed rotates=0
+  local args=() state=() approve=() offset=()
   dir="$(stack_dir "$p")"
   interval="${FREELUNCH_CAPACITY_INTERVAL:-120}"
   [[ "$interval" =~ ^[0-9]+$ ]] || die "FREELUNCH_CAPACITY_INTERVAL is a number of seconds, not '$interval'"
@@ -300,35 +377,59 @@ apply_until_capacity() { # apply_until_capacity <provider> [extra args]
   if [[ -n "$profile" ]] && ! command -v oci >/dev/null; then
     die "oci: a session token (oci_auth = \"SecurityToken\") expires within the hour, and --wait-for-capacity needs the OCI CLI to refresh it. Install the OCI CLI, or sign in with an API key"
   fi
+  if pid="$(wait_pid "$p")" && [[ "$pid" != "$$" ]]; then die "$p: a wait for capacity is running already (pid $pid); freelunch status shows how it goes"; fi
 
+  WAIT="$(config_dir "$p")/wait.state" WAIT_PROVIDER="$p" WAIT_STARTED="$(date +%s)" WAIT_ATTEMPT=1
+  wait_state waiting "starting"
   prepare_stack apply "$p"
   while IFS= read -r a; do
     args+=("$a")
     if [[ "$a" == -state=* ]]; then state=("$a"); fi
   done < <(project_args "$p")
   if [[ "${FREELUNCH_AUTO_APPROVE:-0}" == "1" ]]; then approve=(-auto-approve); fi
+  # A stack that declares availability_domain_offset gets the next AD on each retry.
+  if grep -qs 'variable "availability_domain_offset"' "$dir"/*.tf; then rotates=1; fi
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   out="$TMP/$p.out"
   plan="$TMP/$p.tfplan"
-  trap 'die "$p: stopped waiting for capacity"' INT
+  json="$TMP/$p.json"
+  if [[ -n "$reviewed" ]]; then
+    tf_for "$p" "$dir" show -json "$reviewed" > "$TMP/reviewed.json" || die "$p: can't read the plan in $(rel "$reviewed")"
+    jq -c "$CHANGES" "$TMP/reviewed.json" > "$TMP/reviewed.changes"
+    WAIT_AD="$(ads_in "$TMP/reviewed.json")"
+  fi
+  trap 'WAIT_INTERRUPTED=1; [[ -z "$SLEEP_PID" ]] || kill "$SLEEP_PID" 2>/dev/null; die "$p: stopped waiting for capacity"' INT TERM
 
   delay="$interval"
   while :; do
     # prepare_stack checked the session before the first attempt.
-    if [[ -n "$profile" && $attempt -gt 1 ]]; then
-      check_oci_session "$profile" "the session expired after $((attempt - 1)) attempt(s). A session lasts 24 hours at most, so for a longer wait use an API key (oci setup bootstrap)"
+    if [[ -n "$profile" && $WAIT_ATTEMPT -gt 1 ]]; then
+      check_oci_session "$profile" "the session expired after $((WAIT_ATTEMPT - 1)) attempt(s). A session lasts 24 hours at most, so for a longer wait use an API key (oci setup bootstrap)"
     fi
-    if [[ $attempt -eq 1 ]]; then
-      if tf_for "$p" "$dir" apply -input=false ${args[@]+"${args[@]}"} ${approve[@]+"${approve[@]}"} "$@" 2>&1 | keep "$out"; then break; fi
-    # A retry shows only the summary of its plan, unless the plan fails or is refused.
-    elif tf_for "$p" "$dir" plan -input=false -no-color -out="$plan" ${args[@]+"${args[@]}"} "$@" > "$out" 2>&1; then
-      summary="$(grep -m1 -E '^(Plan:|No changes)' "$out" || true)"
-      if ! destroys_nothing "$p" "$plan"; then
-        cat "$out" >&2
-        die "$p: the plan for attempt $attempt destroys or replaces something, so it is not applied without you. Run freelunch apply $p to review it"
-      fi
-      [[ -z "$summary" ]] || log "$p: attempt $attempt: $summary"
+    WAIT_TRIES=$WAIT_ATTEMPT
+    wait_state waiting "attempt $WAIT_ATTEMPT is running"
+    if [[ $WAIT_ATTEMPT -eq 1 ]]; then
       # A saved plan already holds the variables; only the state has to be pointed at.
+      if [[ -n "$reviewed" ]]; then
+        if tf_for "$p" "$dir" apply -input=false ${state[@]+"${state[@]}"} "$reviewed" 2>&1 | keep "$out"; then break; fi
+      elif tf_for "$p" "$dir" apply -input=false ${args[@]+"${args[@]}"} ${approve[@]+"${approve[@]}"} "$@" 2>&1 | keep "$out"; then break; fi
+    # A retry shows only the summary of its plan, unless the plan fails or is refused.
+    elif tf_for "$p" "$dir" plan -input=false -no-color -out="$plan" ${args[@]+"${args[@]}"} ${offset[@]+"${offset[@]}"} "$@" > "$out" 2>&1; then
+      tf_for "$p" "$dir" show -json "$plan" > "$json"
+      summary="$(grep -m1 -E '^(Plan:|No changes)' "$out" || true)"
+      WAIT_AD="$(ads_in "$json")"
+      if jq -e 'any(.resource_changes[]?.change.actions[]; . == "delete")' "$json" >/dev/null; then
+        cat "$out" >&2
+        die "$p: the plan for attempt $WAIT_ATTEMPT destroys or replaces something, so it is not applied without you. Run freelunch apply $p to review it"
+      fi
+      if [[ -n "$reviewed" ]]; then
+        unreviewed="$(jq -r --slurpfile ok "$TMP/reviewed.changes" "$CHANGES"' | map(select(. as $c | any($ok[0][]; . == $c) | not) | "\(.address) (\(.actions | join(",")))") | join(", ")' "$json")"
+        if [[ -n "$unreviewed" ]]; then
+          cat "$out" >&2
+          die "$p: the plan for attempt $WAIT_ATTEMPT changes what the reviewed plan doesn't: $unreviewed. It is not applied; review a new plan (freelunch plan $p --out <file>)"
+        fi
+      fi
+      [[ -z "$summary" ]] || log "$p: attempt $WAIT_ATTEMPT${WAIT_AD:+ in $WAIT_AD}: $summary"
       if tf_for "$p" "$dir" apply -input=false ${state[@]+"${state[@]}"} "$plan" 2>&1 | keep "$out"; then break; fi
     else
       cat "$out" >&2
@@ -340,27 +441,75 @@ apply_until_capacity() { # apply_until_capacity <provider> [extra args]
     esac
     pause=$((delay + RANDOM % (delay / 5 + 1)))
     if [[ -n "$deadline" && $((SECONDS + pause)) -gt $deadline ]]; then
-      die "$p: still out of capacity after $attempt attempt(s), and FREELUNCH_CAPACITY_TIMEOUT=$FREELUNCH_CAPACITY_TIMEOUT ends the wait here"
+      die "$p: still out of capacity after $WAIT_ATTEMPT attempt(s), and FREELUNCH_CAPACITY_TIMEOUT=$FREELUNCH_CAPACITY_TIMEOUT ends the wait here"
     fi
-    attempt=$((attempt + 1))
-    log "$p: $why; attempt $attempt in ${pause}s (Ctrl-C stops waiting)"
-    sleep "$pause"
+    wait_state waiting "$why${WAIT_AD:+ in $WAIT_AD}" "$(($(date +%s) + pause))"
+    WAIT_ATTEMPT=$((WAIT_ATTEMPT + 1))
+    [[ $rotates -eq 0 ]] || offset=(-var="availability_domain_offset=$((WAIT_ATTEMPT - 1))")
+    log "$p: $why${WAIT_AD:+ in $WAIT_AD}; attempt $WAIT_ATTEMPT in ${pause}s (Ctrl-C stops waiting)"
+    # In the background, so that kill stops the wait right away.
+    sleep "$pause" & SLEEP_PID=$!
+    wait "$SLEEP_PID" || true
+    SLEEP_PID=""
   done
-  trap - INT
-  [[ $attempt -eq 1 ]] || log "$p: applied on attempt $attempt"
+  trap - INT TERM
+  [[ $WAIT_ATTEMPT -eq 1 ]] || log "$p: applied on attempt $WAIT_ATTEMPT${WAIT_AD:+ in $WAIT_AD}"
+  end_wait "done" "got the host on attempt $WAIT_ATTEMPT${WAIT_AD:+ in $WAIT_AD}$(host_addresses "$p" | awk 'NF == 2 { s = s ", " $1 " at " $2 } END { if (s) print ":" substr(s, 2) }')"
 }
 
-# apply_host <provider> [extra args]: apply a host stack once, and point to
-# --wait-for-capacity when it fails for lack of capacity
+# detach_wait <provider> <freelunch args...>: run a wait in the background, with its output
+# in <stack config>/wait.log
+detach_wait() {
+  local p="$1" log_file pid; shift
+  log_file="$(config_dir "$p")/wait.log"
+  if pid="$(wait_pid "$p")"; then die "$p: a wait for capacity is running already (pid $pid); freelunch status shows how it goes"; fi
+  printf '\n==> %s: freelunch %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$log_file"
+  # shellcheck disable=SC2094 # the wait only records where its log is
+  FREELUNCH_WAIT_LOG="$log_file" nohup "$ROOT/bin/freelunch" "$@" >> "$log_file" 2>&1 < /dev/null &
+  pid=$!
+  log "$p: waiting for capacity in the background (pid $pid); it notifies you when the host exists"
+  log "freelunch status shows the attempts, $(rel "$log_file") the output, and kill $pid stops it"
+}
+
+# apply_once <provider> <saved plan, or ""> [extra args]: apply that plan without a prompt,
+# or plan and apply as usual
+apply_once() {
+  local p="$1" saved="$2" a state=(); shift 2
+  if [[ -z "$saved" ]]; then run_stack apply "$p" "$@"; return; fi
+  prepare_stack apply "$p"
+  while IFS= read -r a; do [[ "$a" != -state=* ]] || state=("$a"); done < <(project_args "$p")
+  tf_for "$p" "$(stack_dir "$p")" apply -input=false ${state[@]+"${state[@]}"} "$saved"
+}
+
+# apply_host <provider> <saved plan, or ""> [extra args]: apply a host stack once, and
+# point to --wait-for-capacity when it fails for lack of capacity
 apply_host() {
-  local p="$1"; shift
+  local p="$1" saved="$2" again; shift 2
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-  if run_stack apply "$p" "$@" 2>&1 | keep "$TMP/$p.out"; then return 0; fi
+  if apply_once "$p" "$saved" "$@" 2>&1 | keep "$TMP/$p.out"; then return 0; fi
+  again="freelunch apply $p${saved:+ --plan $(rel "$saved")} --wait-for-capacity"
   case "$(retry_reason "$TMP/$p.out")" in
-    capacity) die "$p: out of host capacity. freelunch apply $p --wait-for-capacity tries again until the host exists" ;;
-    busy)     die "$p: too many requests. freelunch apply $p --wait-for-capacity waits and tries again" ;;
+    capacity) die "$p: out of host capacity. $again tries again until the host exists" ;;
+    busy)     die "$p: too many requests. $again waits and tries again" ;;
   esac
   exit 1
+}
+
+# saved_plan <provider> <file>: after plan --out
+saved_plan() {
+  local how="applies exactly this plan, without a prompt"
+  chmod 600 "$2"
+  [[ "$(meta "$1" layer)" != "host" ]] || how="$how; add --wait-for-capacity to keep trying while there is no capacity"
+  log "saved the plan in $(rel "$2"). freelunch apply $1 --plan $(rel "$2") $how"
+  if git -C "$(dirname "$2")" rev-parse --git-dir >/dev/null 2>&1 && ! git -C "$(dirname "$2")" check-ignore -q "$2"; then
+    log "$(rel "$2") holds the stack's variables and state, secrets included. Keep it out of git (add it to .gitignore)"
+  fi
+}
+
+abs_path() { # abs_path <file>: the file's absolute path; its folder must exist
+  local d
+  d="$(cd "$(dirname "$1")" 2>/dev/null && pwd)" || die "no such folder: $(dirname "$1")"
+  echo "$d/$(basename "$1")"
 }
 
 # --- after plan and apply -------------------------------------------------------------
@@ -402,11 +551,11 @@ next_steps() {
   local p host address known unpinned="" steps=() i
   known="$(state_root)/known_hosts"
   for p in "$@"; do
-    while IFS=$'\t' read -r host address; do
+    while read -r host address; do
       [[ -n "$address" ]] || continue
       log "$host is ready at $address"
       ssh-keygen -F "$address" -f "$known" >/dev/null 2>&1 || unpinned="${unpinned:+$unpinned, }$host"
-    done < <(jq -r '.outputs.hosts.value[]? | ["\(.provider)-\(.name)", (.public_ip // .private_ip // "")] | @tsv' "$(config_dir "$p")/terraform.tfstate" 2>/dev/null)
+    done < <(host_addresses "$p")
   done
   # Apps come from deploy when there is an apps file or a tunnel to start.
   if [[ -f "$(state_root)/apps.tfvars" ]] || is_configured cloudflare || is_deployed cloudflare; then
@@ -475,23 +624,45 @@ cmd_output() { # cmd_output <stack|hybrid> [tofu/terraform output args]
 cmd_lifecycle() { # plan|apply|destroy
   need_tf
   local action="$1"; shift
-  local names=() extra=() seen_dashes=0 wait_for_capacity=0 user_data=0 a
-  for a in "$@"; do
-    if [[ $seen_dashes -eq 1 ]]; then extra+=("$a"); continue; fi
-    case "$a" in
-      --)                  seen_dashes=1 ;;
+  local names=() extra=() wait_for_capacity=0 user_data=0 detach=0 out="" saved="" plan_file="" a child=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --)                  shift; extra=("$@"); break ;;
       --wait-for-capacity) wait_for_capacity=1 ;;
       --show-user-data)    user_data=1 ;;
-      *)                   names+=("$a") ;;
+      --detach)            detach=1 ;;
+      --out|--plan)        [[ $# -gt 1 ]] || die "$action: $1 takes a file"
+                           if [[ "$1" == "--out" ]]; then out="$2"; else plan_file="$2"; fi
+                           shift ;;
+      --out=*)             out="${1#--out=}" ;;
+      --plan=*)            plan_file="${1#--plan=}" ;;
+      -*)                  die "$action: unknown option $1 (tofu/terraform options go after --)" ;;
+      *)                   names+=("$1") ;;
     esac
+    shift
   done
   [[ $wait_for_capacity -eq 0 || "$action" == "apply" ]] || die "$action: only apply takes --wait-for-capacity"
   [[ $user_data -eq 0 || "$action" == "plan" ]] || die "$action: only plan takes --show-user-data"
   [[ $user_data -eq 0 ]] || command -v jq >/dev/null || die "jq is required for --show-user-data"
+  [[ -z "$out" || "$action" == "plan" ]] || die "$action: only plan takes --out (apply takes the saved plan with --plan)"
+  [[ -z "$plan_file" || "$action" == "apply" ]] || die "$action: only apply takes --plan (save one with freelunch plan <stack> --out <file>)"
+  [[ $detach -eq 0 || $wait_for_capacity -eq 1 ]] || die "$action: --detach goes with apply --wait-for-capacity"
+  [[ -z "$out" ]] || out="$(abs_path "$out")"
+  if [[ -n "$plan_file" ]]; then
+    [[ -f "$plan_file" ]] || die "apply: there is no plan at $plan_file (save one with freelunch plan <stack> --out <file>)"
+    [[ ${#extra[@]} -eq 0 ]] || die "apply: a saved plan takes no tofu/terraform options; it was made with its own"
+    plan_file="$(abs_path "$plan_file")"
+  fi
+  if [[ $detach -eq 1 && -z "$plan_file" && "${FREELUNCH_AUTO_APPROVE:-0}" != "1" ]]; then
+    die "apply: nobody is at the prompt of a wait in the background, so --detach needs a reviewed plan: freelunch plan <stack> --out <file>, then freelunch apply <stack> --plan <file> --wait-for-capacity --detach"
+  fi
   local resolved providers=()
   resolved="$(resolve ${names[@]+"${names[@]}"})" || exit 1
   while IFS= read -r a; do [[ -n "$a" ]] && providers+=("$a"); done <<< "$resolved"
   [[ ${#providers[@]} -gt 0 ]] || die "nothing to do: no ready provider has a terraform.tfvars"
+  if [[ -n "$out$plan_file" || $detach -eq 1 ]] && [[ ${#providers[@]} -ne 1 ]]; then
+    die "$action: --out, --plan and --detach take one stack, not ${#providers[@]}"
+  fi
 
   local hosts=() services=() glue=()
   for a in "${providers[@]}"; do
@@ -504,20 +675,32 @@ cmd_lifecycle() { # plan|apply|destroy
 
   case "$action" in
     plan)
-      for a in ${hosts[@]+"${hosts[@]}"}; do
-        if [[ $user_data -eq 0 ]]; then run_stack plan "$a" ${extra[@]+"${extra[@]}"}; continue; fi
-        [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-        run_stack plan "$a" -out="$TMP/$a.tfplan" ${extra[@]+"${extra[@]}"}
-        show_user_data "$a" "$TMP/$a.tfplan"
-      done
-      for a in ${services[@]+"${services[@]}"} ${glue[@]+"${glue[@]}"}; do run_stack plan "$a" ${extra[@]+"${extra[@]}"}; done ;;
+      for a in ${hosts[@]+"${hosts[@]}"} ${services[@]+"${services[@]}"} ${glue[@]+"${glue[@]}"}; do
+        saved="$out"
+        if [[ -z "$saved" && $user_data -eq 1 && "$(meta "$a" layer)" == "host" ]]; then
+          [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+          saved="$TMP/$a.tfplan"
+        fi
+        if [[ -z "$saved" ]]; then run_stack plan "$a" ${extra[@]+"${extra[@]}"}; continue; fi
+        run_stack plan "$a" -out="$saved" ${extra[@]+"${extra[@]}"}
+        [[ $user_data -eq 0 || "$(meta "$a" layer)" != "host" ]] || show_user_data "$a" "$saved"
+        [[ -z "$out" ]] || saved_plan "$a" "$saved"
+      done ;;
     apply)
+      if [[ $detach -eq 1 ]]; then
+        [[ ${#hosts[@]} -eq 1 ]] || die "apply: --detach waits for the capacity of a host stack"
+        child=(apply "${hosts[0]}" --wait-for-capacity)
+        [[ -z "$plan_file" ]] || child+=(--plan "$plan_file")
+        [[ ${#extra[@]} -eq 0 ]] || child+=(-- "${extra[@]}")
+        detach_wait "${hosts[0]}" "${child[@]}"
+        return 0
+      fi
       for a in ${hosts[@]+"${hosts[@]}"}; do
-        if [[ $wait_for_capacity -eq 1 ]]; then apply_until_capacity "$a" ${extra[@]+"${extra[@]}"}; else apply_host "$a" ${extra[@]+"${extra[@]}"}; fi
+        if [[ $wait_for_capacity -eq 1 ]]; then apply_until_capacity "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; else apply_host "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; fi
       done
-      for a in ${services[@]+"${services[@]}"}; do run_stack apply "$a" ${extra[@]+"${extra[@]}"}; done
+      for a in ${services[@]+"${services[@]}"}; do apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; done
       [[ ${#hosts[@]} -gt 0 ]] && cmd_hybrid
-      for a in ${glue[@]+"${glue[@]}"}; do run_stack apply "$a" ${extra[@]+"${extra[@]}"}; done
+      for a in ${glue[@]+"${glue[@]}"}; do apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; done
       next_steps ${hosts[@]+"${hosts[@]}"} ;;
     destroy)
       for a in ${glue[@]+"${glue[@]}"} ${services[@]+"${services[@]}"} ${hosts[@]+"${hosts[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
@@ -535,6 +718,68 @@ cmd_list() {
     fi
     printf "%-20s %-14s %-9s %-8s %-10s %s\n" "$p" "$(meta "$p" category)" "$(meta "$p" status)" "$(meta "$p" layer)" "$(meta "$p" iac)" "$state"
   done
+}
+
+# --- status ---------------------------------------------------------------------------
+
+fmt_time() { # fmt_time <seconds since the epoch>: local date and time
+  date -r "$1" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$1" '+%Y-%m-%d %H:%M'
+}
+
+attempts() { if [[ "$1" == "1" ]]; then echo "1 attempt"; else echo "$1 attempts"; fi; }
+
+fmt_duration() { # fmt_duration <seconds>: 2d 3h, 1h 5m, 4m 10s or 12s
+  local s="$1"
+  if [[ $s -ge 86400 ]]; then echo "$((s / 86400))d $((s % 86400 / 3600))h"
+  elif [[ $s -ge 3600 ]]; then echo "$((s / 3600))h $((s % 3600 / 60))m"
+  elif [[ $s -ge 60 ]]; then echo "$((s / 60))m $((s % 60))s"
+  else echo "${s}s"; fi
+}
+
+show_wait() { # show_wait <provider> <wait.state>
+  local p="$1" key value state="" pid="" started=0 updated=0 attempt=0 last="" next="" log_file="" now
+  while IFS='=' read -r key value; do
+    case "$key" in
+      state)   state="$value" ;;
+      pid)     pid="$value" ;;
+      started) started="$value" ;;
+      updated) updated="$value" ;;
+      attempt) attempt="$value" ;;
+      last)    last="${value#"$p: "}" ;;
+      next)    next="$value" ;;
+      log)     log_file="$value" ;;
+    esac
+  done < "$2"
+  now="$(date +%s)"
+  case "$state" in
+    waiting)
+      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        echo "$p: waiting for capacity for $(fmt_duration $((now - started))), $(attempts "$attempt") so far (pid $pid)"
+        echo "  last: $last"
+        if [[ -n "$next" && $next -gt $now ]]; then echo "  next attempt: $(fmt_time "$next"), in $(fmt_duration $((next - now)))"; fi
+      else
+        echo "$p: the wait for capacity ended unexpectedly after $(attempts "$attempt"), $(fmt_time "$updated") (pid $pid is gone)"
+        echo "  last: $last"
+      fi ;;
+    done)
+      echo "$p: $last"
+      echo "  $(fmt_time "$updated"), after waiting $(fmt_duration $((updated - started)))" ;;
+    *)
+      echo "$p: stopped waiting for capacity after $(attempts "$attempt"), $(fmt_time "$updated")"
+      echo "  last: $last" ;;
+  esac
+  [[ -z "$log_file" ]] || echo "  log: $(rel "$log_file")"
+}
+
+cmd_status() {
+  local p file found=0
+  for p in $(all_providers); do
+    file="$(config_dir "$p")/wait.state"
+    [[ -d "$(stack_dir "$p")" && -f "$file" ]] || continue
+    found=1
+    show_wait "$p" "$file"
+  done
+  [[ $found -eq 1 ]] || echo "No capacity wait has run here; freelunch apply <stack> --wait-for-capacity starts one."
 }
 
 # --- init -----------------------------------------------------------------------------
@@ -577,6 +822,9 @@ cmd_init() {
 *.env
 inventory.json
 known_hosts
+*/wait.log
+*/wait.state
+*.tfplan
 EOF
 
   # Host stacks have a project.tfvars.example: only SSH open and no apps in cloud-init,
@@ -1011,6 +1259,7 @@ main() {
     domain)               cmd_domain "$@" ;;
     list)                 cmd_list ;;
     plan|apply|destroy)   cmd_lifecycle "$cmd" "$@" ;;
+    status)               cmd_status ;;
     hybrid)               cmd_hybrid ;;
     inventory)            cmd_inventory ;;
     output)               cmd_output "$@" ;;
