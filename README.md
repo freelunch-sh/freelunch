@@ -133,8 +133,8 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 
 | Command | What it does |
 |---|---|
-| `freelunch init [--name <name>] [stack...]` | Create `.freelunch/` in your project (default stacks: `oci cloudflare`), with resources named after the project |
-| `freelunch deploy [host\|provider]` | Copy Compose apps and their secrets to the hosts over SSH, start them, wait until healthy, start `cloudflared` (`--dry-run` to preview) |
+| `freelunch init [--name <name>] [--image-workflow] [stack...]` | Create `.freelunch/` in your project (default stacks: `oci cloudflare`), with resources named after the project. `--image-workflow` adds a GitHub Actions workflow that builds your image for the hosts and pushes it to GHCR |
+| `freelunch deploy [host\|provider]` | Check that every image has a build for its host, copy Compose apps and their secrets to the hosts over SSH, start them, wait until healthy, start `cloudflared` (`--dry-run` to preview) |
 | `freelunch domain suggest <name...>` | Whether the name you typed is registered, then free names like it at every free domain provider, and similar ones where yours is taken ([docs/free-domains.md](docs/free-domains.md)) |
 | `freelunch domain add\|status <name>` | Put the name on Cloudflare and print the nameservers to set at its provider; say when they are set and the zone is active |
 | `freelunch list` | Every provider with category, status, layer, IaC support and deployment state |

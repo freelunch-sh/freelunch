@@ -23,7 +23,9 @@ or as a Docker image.
   Cloudflare, and `freelunch domain status` says when it's ready.
 - An **SSH key pair**. `freelunch deploy` connects with it.
 - Your app as a **Compose file that uses images** (from Docker Hub, GHCR or any registry).
-  Images are pulled on the host; nothing is built there.
+  Images are pulled on the host; nothing is built there. An Oracle A1 VM is Arm, so the
+  image needs a `linux/arm64` build. No image yet? `freelunch init --image-workflow` adds a
+  GitHub Actions workflow that builds it for your hosts and pushes it to GHCR.
 
 ## 1. Pin freelunch
 
@@ -243,7 +245,9 @@ GHCR_TOKEN=ghp_...
 ```
 
 `deploy` logs the host in to every registry in `registries` before pulling, and out again
-when it finishes, so the token doesn't stay on the host. For Docker Hub, use `"docker.io"`
+when it finishes, so the token doesn't stay on the host. The workflow from
+`freelunch init --image-workflow` pushes to `ghcr.io/<owner>/<repo>`, which is private when
+the repository is. For Docker Hub, use `"docker.io"`
 and a read-only access token. Variables set in your shell (or in CI) override
 `.freelunch/.env`.
 
@@ -261,7 +265,12 @@ freelunch deploy --dry-run    # shows what would run on the host, secrets left o
 freelunch deploy
 ```
 
-For each host, `deploy`:
+Before it connects anywhere, `deploy` asks each registry which platforms the app's images
+are built for, with the logins from `apps.tfvars`, and stops when one has no build for its
+host: `ghcr.io/you/api:1.4.2 is built for linux/amd64 only, but oci-main is linux/arm64`.
+A registry it can't reach is skipped; `FREELUNCH_CHECK_IMAGES=0` skips the check.
+
+Then, for each host, `deploy`:
 
 1. waits for SSH and for cloud-init to finish on a new host,
 2. logs in to your registries,
@@ -341,6 +350,8 @@ as `myapp-oci-main`. The machine you deploy from has to be on the same tailnet.
 | `deploy` waits for SSH and gives up | The VM's public IP in `freelunch inventory`, `ssh_source_cidrs`, and your key (`FREELUNCH_SSH_KEY`) |
 | `Permission denied (publickey)` | The key in `ssh_public_keys` must match the one `deploy` uses |
 | `REMOTE HOST IDENTIFICATION HAS CHANGED` | If you recreated the VM with the same IP, remove its line from `.freelunch/known_hosts`. If you didn't, stop: something else answers at that address |
+| `is built for linux/amd64 only, but oci-main is linux/arm64` | Build the image for the host too: `docker buildx build --platform linux/amd64,linux/arm64 --push`, or the workflow from `freelunch init --image-workflow` |
+| `the registry won't show <image>` | Check the tag. A private image needs its registry under `registries` in `apps.tfvars`, with a token that can read it (`read:packages` on GHCR) |
 | An app is not healthy | The logs printed by `deploy`, or `ssh ubuntu@<ip> 'cd /opt/freelunch/apps/api && sudo docker compose logs'` |
 | Cloudflare error 1033 | cloudflared is not running on the host: run `freelunch deploy` |
 | Cloudflare error 502 | cloudflared runs but the app does not answer on `127.0.0.1:<port>` |

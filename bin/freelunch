@@ -31,13 +31,15 @@ usage() {
 Usage: freelunch <command> [args] [-- extra tofu/terraform args]
 
 Project:
-  init [--name <name>] [stack...]
+  init [--name <name>] [--image-workflow] [stack...]
                           Create .freelunch/ in the current directory (default stacks: oci
                           cloudflare). Resources are named after the project: --name, or the
-                          folder's name
-  deploy [target...]      Copy Compose apps and their env to the hosts over SSH, start them and
-                          wait until they are healthy. Targets: all (default), a provider (oci)
-                          or a host (oci-main). --dry-run prints the remote script instead.
+                          folder's name. --image-workflow adds a GitHub Actions workflow that
+                          builds the image for the hosts and pushes it to ghcr.io
+  deploy [target...]      Check that each image has a build for its host, copy Compose apps and
+                          their env to the hosts over SSH, start them and wait until they are
+                          healthy. Targets: all (default), a provider (oci) or a host
+                          (oci-main). --dry-run prints the remote script instead.
   domain suggest <name...>
                           Whether the name you typed is registered, then free names like it
                           (myapp.dpdns.org, myapp.pp.ua, myapp.eu.org, ...) and whether they are
@@ -78,6 +80,8 @@ Inside the freelunch checkout, each stack keeps them in providers/<name>/stack/ 
 FREELUNCH_AUTO_APPROVE=1 skips apply/destroy prompts. FREELUNCH_TF picks tofu or terraform.
 FREELUNCH_SSH_KEY sets the key deploy uses, FREELUNCH_SSH replaces the ssh command, and
 FREELUNCH_DEPLOY_TIMEOUT (seconds, default 180) limits the wait for healthy containers.
+deploy asks the registries which platforms each image has first; FREELUNCH_CHECK_IMAGES=0
+skips that.
 FREELUNCH_CAPACITY_INTERVAL (seconds, default 120) spaces out capacity retries, and
 FREELUNCH_CAPACITY_TIMEOUT (seconds) stops them after that long. When a wait ends, a desktop
 notification says so, and FREELUNCH_NOTIFY (an ntfy, Discord or Slack URL) gets a message too;
@@ -802,6 +806,75 @@ ready_stacks() {
   return 0
 }
 
+# image_workflow <project folder> <stacks...>: a GitHub Actions workflow that builds the
+# project's image for the hosts of those stacks and pushes it to GitHub's registry. An
+# Oracle A1 VM is Arm; the default hosts of the other clouds are x86.
+image_workflow() {
+  local base="$1" s arm=0 x86=0 platforms; shift
+  for s in "$@"; do
+    case "$s" in
+      oci) arm=1 ;;
+      gcp|aws|azure) x86=1 ;;
+    esac
+  done
+  if [[ $arm -eq $x86 ]]; then platforms="linux/amd64,linux/arm64"; elif [[ $arm -eq 1 ]]; then platforms="linux/arm64"; else platforms="linux/amd64"; fi
+  mkdir -p "$base/.github/workflows"
+  write_new "$base/.github/workflows/image.yml" <<EOF
+# Written by freelunch init --image-workflow. Builds the image from the Dockerfile and
+# pushes it to GitHub's container registry as ghcr.io/<owner>/<repo>: :main and
+# :sha-<commit> for each push to main, :<version> for tags like v1.2.3. Use one of them
+# as the image in your Compose file.
+#
+# platforms are the architectures of your hosts: linux/arm64 for an Oracle A1 VM,
+# linux/amd64 for x86 ones. Builds for other architectures than the runner's run under
+# emulation: slower, but free. In a public repository, runs-on: ubuntu-24.04-arm builds
+# Arm images natively, also for free.
+name: image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: \${{ github.actor }}
+          password: \${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/\${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=sha
+            type=semver,pattern={{version}}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: $platforms
+          push: true
+          tags: \${{ steps.meta.outputs.tags }}
+          labels: \${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+EOF
+  [[ -f "$base/Dockerfile" ]] || log "there is no Dockerfile yet; the image workflow builds ./Dockerfile"
+  log "the image workflow builds for $platforms. A package of a private repository is private: give deploy a read:packages token under registries in apps.tfvars"
+}
+
 # project_name <folder name>: a name every provider takes for its resources, e.g.
 # "Shop API" is shop-api. OCI's network module is the strictest: 2 to 21 characters.
 project_name() {
@@ -826,11 +899,12 @@ with_name() {
 }
 
 cmd_init() {
-  local base cfg s src name="" stacks=()
+  local base cfg s src name="" workflow=0 stacks=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name)   [[ $# -gt 1 ]] || die "init: --name takes a name"; name="$2"; shift ;;
       --name=*) name="${1#--name=}" ;;
+      --image-workflow) workflow=1 ;;
       -*)       die "init: unknown option $1" ;;
       *)        stacks+=("$1") ;;
     esac
@@ -934,6 +1008,7 @@ CLOUDFLARE_API_TOKEN=
 EOF
 
   log "project name: $name (name_prefix in each stack's tfvars)"
+  [[ $workflow -eq 0 ]] || image_workflow "$base" "${stacks[@]}"
   [[ -f "$base/$compose" ]] || log "there is no $compose yet; apps.tfvars expects one"
   local applies=""
   for s in "${stacks[@]}"; do applies="${applies:+$applies, then }freelunch apply $s"; done
@@ -954,6 +1029,124 @@ signs you in through the browser and creates one that doesn't expire; then set
 oci_config_profile = "freelunch" in .freelunch/oci/terraform.tfvars.
 EOF
   fi
+}
+
+# --- images ---------------------------------------------------------------------------
+
+# A host pulls its apps' images itself, and an image without a build for the host's
+# architecture only shows up there, as "no matching manifest". So deploy asks the registry
+# first, over the HTTP API docker uses, with the logins from apps.tfvars: which platforms
+# each image has. Only a clear answer stops a deploy; a registry it can't ask is skipped.
+INDEX_TYPES="application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json"
+MANIFEST_TYPES="application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+
+# compose_images <compose file>: the images it names. Images built from variables are left
+# out, since only the host knows their values.
+compose_images() {
+  sed -n -E "s/^[[:space:]]*image:[[:space:]]*['\"]?([^'\" #]+).*/\1/p" "$1" | grep -v '\$' || true
+}
+
+# image_parts <image>: registry, repository and tag (or digest), tab-separated. Without a
+# registry the image is on Docker Hub, which keeps official images under library/.
+image_parts() {
+  local name="$1" registry="docker.io" ref="latest" last
+  if [[ "$name" == *@* ]]; then ref="${name#*@}"; name="${name%%@*}"; fi
+  last="${name##*/}"
+  if [[ "$last" == *:* ]]; then
+    [[ "$ref" != "latest" ]] || ref="${last##*:}"
+    name="${name%:*}"
+  fi
+  if [[ "$name" == */* ]] && [[ "${name%%/*}" == *.* || "${name%%/*}" == *:* || "${name%%/*}" == "localhost" ]]; then
+    registry="${name%%/*}"
+    name="${name#*/}"
+  fi
+  [[ "$registry" != "docker.io" || "$name" == */* ]] || name="library/$name"
+  printf '%s\t%s\t%s\n' "$registry" "$name" "$ref"
+}
+
+# registry_get <registry> <path> <accept> <output file> [user password]: GET from the
+# registry's v2 API into the file, and print the HTTP status (000 when it can't be reached).
+# A 401 says how to log in: a token from its realm, or basic auth.
+registry_get() {
+  local host="$1" path="$2" accept="$3" file="$4" user="${5:-}" pass="${6:-}" code challenge realm service scope token
+  local login=() query=()
+  [[ "$host" != "docker.io" ]] || host="registry-1.docker.io"
+  [[ -z "$user" ]] || login=(-u "$user:$pass")
+  code="$(curl -s -L --max-time 20 -D "$file.headers" -o "$file" -w '%{http_code}' -H "Accept: $accept" "https://$host/v2/$path")" || { echo 000; return 0; }
+  [[ "$code" == "401" ]] || { echo "$code"; return 0; }
+  challenge="$(tr -d '\r' < "$file.headers" | grep -i '^www-authenticate:' | tail -1 | sed 's/^[^:]*: *//')"
+  case "$challenge" in
+    [Bb]earer*)
+      realm="$(sed -n 's/.*realm="\([^"]*\)".*/\1/p' <<< "$challenge")"
+      service="$(sed -n 's/.*service="\([^"]*\)".*/\1/p' <<< "$challenge")"
+      scope="$(sed -n 's/.*scope="\([^"]*\)".*/\1/p' <<< "$challenge")"
+      [[ -z "$service" ]] || query+=(--data-urlencode "service=$service")
+      [[ -z "$scope" ]] || query+=(--data-urlencode "scope=$scope")
+      token="$(curl -s --max-time 20 ${login[@]+"${login[@]}"} -G ${query[@]+"${query[@]}"} "$realm" | jq -r '.token // .access_token // empty' 2>/dev/null)" || token=""
+      [[ -n "$token" ]] || { echo 401; return 0; }
+      login=(-H "Authorization: Bearer $token") ;;
+    [Bb]asic*)
+      [[ ${#login[@]} -gt 0 ]] || { echo 401; return 0; } ;;
+    *)
+      echo 401; return 0 ;;
+  esac
+  code="$(curl -s -L --max-time 20 -o "$file" -w '%{http_code}' -H "Accept: $accept" "${login[@]}" "https://$host/v2/$path")" || code=000
+  echo "$code"
+}
+
+# image_platforms <image> [user password]: the platforms the image has a build for, such as
+# "linux/amd64 linux/arm64", or denied, missing or unknown
+image_platforms() {
+  local registry repo ref code config file="$TMP/manifest.json"
+  IFS=$'\t' read -r registry repo ref <<< "$(image_parts "$1")"
+  code="$(registry_get "$registry" "$repo/manifests/$ref" "$INDEX_TYPES, $MANIFEST_TYPES" "$file" "${@:2}")"
+  case "$code" in
+    200)     ;;
+    401|403) echo denied; return 0 ;;
+    404)     echo missing; return 0 ;;
+    *)       echo unknown; return 0 ;;
+  esac
+  # An index lists a manifest per platform (build attestations say unknown/unknown).
+  if jq -e '.manifests' "$file" >/dev/null 2>&1; then
+    jq -r '[.manifests[].platform | select(. != null and .os != "unknown") | "\(.os)/\(.architecture)"] | unique | join(" ") | if . == "" then "unknown" else . end' "$file"
+    return 0
+  fi
+  # A single manifest: its config blob says the platform.
+  config="$(jq -r '.config.digest // empty' "$file" 2>/dev/null)"
+  if [[ -n "$config" && "$(registry_get "$registry" "$repo/blobs/$config" "*/*" "$TMP/config.json" "${@:2}")" == "200" ]]; then
+    jq -r '"\(.os)/\(.architecture)"' "$TMP/config.json" 2>/dev/null || echo unknown
+  else
+    echo unknown
+  fi
+}
+
+# check_images <hosts...>: before anything reaches a host, each of its apps' images has to
+# exist for the host's architecture, and be readable with the registry logins in apps.tfvars
+check_images() {
+  local host arch compose image server user var platforms why
+  command -v curl >/dev/null || { log "no curl here, so the images are not checked before deploying"; return 0; }
+  for host in "$@"; do
+    arch="$(jq -r --arg h "$host" '.[$h].arch // empty' "$TMP/targets.json")"
+    [[ -n "$arch" ]] || continue
+    while IFS= read -r compose; do
+      for image in $(compose_images "$compose"); do
+        server="$(image_parts "$image" | cut -f1)"
+        user="$(jq -r --arg s "$server" '.[$s].username // empty' "$TMP/registries.json")"
+        var="$(jq -r --arg s "$server" '.[$s].password_env // empty' "$TMP/registries.json")"
+        if [[ -n "$user" ]]; then platforms="$(image_platforms "$image" "$user" "${!var:-}")"; else platforms="$(image_platforms "$image")"; fi
+        case "$platforms" in
+          denied)
+            if [[ -n "$user" ]]; then why="to $user: check the tag, and that \$$var can read it"
+            else why=": it doesn't exist, or it is private and needs a login under registries in apps.tfvars"; fi
+            die "deploy: the registry won't show $image $why" ;;
+          missing) die "deploy: $image doesn't exist: the registry has no such tag" ;;
+          unknown) log "$host: couldn't ask the registry about $image; the host pulls it as usual" ;;
+          *)       [[ " $platforms " == *" linux/$arch "* ]] \
+                     || die "deploy: $image is built for $platforms only, but $host is linux/$arch. Build it for linux/$arch too (docker buildx build --platform linux/$arch, or the workflow from freelunch init --image-workflow)" ;;
+        esac
+      done
+    done < <(jq -r --arg h "$host" '.[$h].apps[].compose' "$TMP/targets.json")
+  done
 }
 
 # --- deploy ---------------------------------------------------------------------------
@@ -1149,6 +1342,7 @@ cmd_deploy() {
   for var in $(jq -r '.[].password_env' "$TMP/registries.json"); do
     [[ -n "${!var:-}" ]] || die "deploy: \$$var is not set (registries in apps.tfvars); export it or add it to $(rel "$(state_root)")/.env"
   done
+  [[ "${FREELUNCH_CHECK_IMAGES:-1}" == "0" ]] || check_images "${hosts[@]}"
 
   SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15
     -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$(state_root)/known_hosts")

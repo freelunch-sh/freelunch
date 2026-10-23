@@ -43,6 +43,58 @@ case "$1 ${2:-}" in
 esac
 exit 0
 EOF
+# A registry for deploy's image check, at any host. A manifest without a token gets a 401
+# with a Bearer challenge; the token endpoint hands out tokens, for repositories in
+# FAKE_PRIVATE only with the password FAKE_PASSWORD (default ghp_test-token). An image is
+# an index of FAKE_PLATFORMS (default linux/amd64 linux/arm64), or one manifest for
+# FAKE_SINGLE_ARCH. Repositories in FAKE_MISSING don't exist, and FAKE_REGISTRY_DOWN fails
+# every request. Requests go to $FAKE_LOG.registry.
+cat > "$WORK/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+headers="" out="" write="" auth="" basic="" url="" query=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -D) headers="$2"; shift ;;
+    -o) out="$2"; shift ;;
+    -w) write="$2"; shift ;;
+    -u) basic="$2"; shift ;;
+    -H) [[ "$2" != "Authorization: Bearer "* ]] || auth="${2#Authorization: Bearer }"; shift ;;
+    --data-urlencode) query+=("$2"); shift ;;
+    --max-time) shift ;;
+    -*) ;;
+    *) url="$1" ;;
+  esac
+  shift
+done
+echo "$url${basic:+ basic=$basic}${auth:+ bearer=$auth}${query[*]:+ ${query[*]}}" >> "$FAKE_LOG.registry"
+[[ -z "${FAKE_REGISTRY_DOWN:-}" ]] || exit 7
+host="${url#https://}"
+host="${host%%/*}"
+respond() { # respond <status> <body>
+  if [[ -n "$out" ]]; then printf '%s' "$2" > "$out"; else printf '%s' "$2"; fi
+  [[ -z "$write" ]] || printf '%s' "$1"
+}
+case "$url" in
+  */token)
+    repo="$(printf '%s\n' "${query[@]}" | sed -n 's/^scope=repository:\(.*\):pull$/\1/p')"
+    if [[ " ${FAKE_PRIVATE:-} " == *" $repo "* && "${basic#*:}" != "${FAKE_PASSWORD:-ghp_test-token}" ]]; then respond 200 '{"token":"anonymous"}'
+    else respond 200 "{\"token\":\"good-for-$repo\"}"; fi ;;
+  */v2/*)
+    repo="${url#*/v2/}"
+    repo="${repo%/manifests/*}"
+    repo="${repo%/blobs/*}"
+    if [[ "$auth" != "good-for-$repo" ]]; then
+      [[ -z "$headers" ]] || printf 'HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm="https://%s/token",service="%s",scope="repository:%s:pull"\r\n\r\n' "$host" "$host" "$repo" > "$headers"
+      respond 401 '{"errors":[{"code":"UNAUTHORIZED"}]}'
+    elif [[ " ${FAKE_MISSING:-} " == *" $repo "* ]]; then respond 404 '{"errors":[{"code":"MANIFEST_UNKNOWN"}]}'
+    elif [[ "$url" == */blobs/* ]]; then respond 200 "{\"os\":\"linux\",\"architecture\":\"$FAKE_SINGLE_ARCH\"}"
+    elif [[ -n "${FAKE_SINGLE_ARCH:-}" ]]; then respond 200 '{"schemaVersion":2,"config":{"digest":"sha256:config"}}'
+    else
+      # shellcheck disable=SC2086 # one argument per platform
+      respond 200 "$(jq -nc '{manifests: ([$ARGS.positional[] | split("/") | {platform: {os: .[0], architecture: .[1]}}] + [{platform: {os: "unknown", architecture: "unknown"}}])}' --args ${FAKE_PLATFORMS:-linux/amd64 linux/arm64})"
+    fi ;;
+esac
+EOF
 ssh-keygen -q -t ed25519 -N '' -C fake-host -f "$WORK/hostkey"
 printf '#!/bin/sh\nexit 0\n' > "$WORK/bin/cloud-init"
 # Records the arguments a stack run gets instead of running tofu/terraform. Like them, init
@@ -397,6 +449,25 @@ test_init_names_the_project() {
 project_name_of() {
   mkdir -p "$WORK/names/$1" && (cd "$WORK/names/$1" && "$CLI" init cloudflare >/dev/null 2>&1)
   sed -n 's/^name_prefix = "\(.*\)"$/\1/p' "$WORK/names/$1/.freelunch/cloudflare/terraform.tfvars.example"
+}
+
+# The image has to exist for the host: init can add a workflow that builds and pushes it.
+test_init_writes_an_image_workflow() {
+  local p="$WORK/init-workflow" out
+  mkdir -p "$p/arm" "$p/both" "$p/none"
+  touch "$p/arm/Dockerfile"
+  out="$(cd "$p/arm" && "$CLI" init --image-workflow 2>&1)"
+  grep -qx '          platforms: linux/arm64' "$p/arm/.github/workflows/image.yml"
+  # shellcheck disable=SC2016 # a GitHub Actions expression, not a shell one
+  grep -qF 'images: ghcr.io/${{ github.repository }}' "$p/arm/.github/workflows/image.yml"
+  contains "$out" "the image workflow builds for linux/arm64"
+  lacks "$out" "no Dockerfile"
+  out="$(cd "$p/both" && "$CLI" init --image-workflow oci gcp 2>&1)"
+  grep -qx '          platforms: linux/amd64,linux/arm64' "$p/both/.github/workflows/image.yml"
+  contains "$out" "there is no Dockerfile yet"
+  # Only when asked: init writes nothing outside .freelunch/ otherwise.
+  (cd "$p/none" && "$CLI" init >/dev/null 2>&1)
+  absent "$p/none/.github"
 }
 
 test_init_never_overwrites() {
@@ -873,6 +944,61 @@ test_deploy_copies_files_and_starts_apps() {
   contains "$out" "example/api:1.0 = sha256:digest-of-api"
   contains "$out" "example/cloudflared:1.0 = sha256:digest-of-cloudflared"
   contains "$(grep '^docker' "$p/fake.log" | tail -1)" "docker logout ghcr.io"
+}
+
+# deploy asks the registry first, so an image without a build for the host never gets there.
+test_deploy_checks_images_for_the_host() {
+  local p="$WORK/images" out
+  new_project "$p"
+  if out="$(GHCR_TOKEN=x FAKE_PLATFORMS="linux/amd64" deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "deploy: ghcr.io/me/api:1.0.0 is built for linux/amd64 only, but oci-main is linux/arm64. Build it for linux/arm64 too"
+  absent "$p/fake.log"
+  # The token comes with the registry login from apps.tfvars.
+  grep -qx 'https://ghcr.io/token basic=me:x service=ghcr.io scope=repository:me/api:pull' "$p/fake.log.registry"
+  grep -qx 'https://ghcr.io/v2/me/api/manifests/1.0.0 bearer=good-for-me/api' "$p/fake.log.registry"
+  # A single manifest: its config says the platform.
+  GHCR_TOKEN=x FAKE_SINGLE_ARCH=arm64 deploy_in "$p" --dry-run >/dev/null 2>&1
+  grep -qx 'https://ghcr.io/v2/me/api/blobs/sha256:config bearer=good-for-me/api' "$p/fake.log.registry"
+  if out="$(GHCR_TOKEN=x FAKE_SINGLE_ARCH=amd64 deploy_in "$p" --dry-run 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "is built for linux/amd64 only"
+  # A private image needs a login that works, and a missing tag is no build at all.
+  if out="$(GHCR_TOKEN=wrong FAKE_PRIVATE=me/api deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "the registry won't show ghcr.io/me/api:1.0.0 to me: check the tag, and that \$GHCR_TOKEN can read it"
+  GHCR_TOKEN=ghp_test-token FAKE_PRIVATE=me/api deploy_in "$p" --dry-run >/dev/null 2>&1
+  if out="$(GHCR_TOKEN=x FAKE_MISSING=me/api deploy_in "$p" --dry-run 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "ghcr.io/me/api:1.0.0 doesn't exist: the registry has no such tag"
+  sed -i.bak '/^registries = {/,/^}/d' "$p/.freelunch/apps.tfvars"
+  if out="$(FAKE_PRIVATE=me/api deploy_in "$p" --dry-run 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "it doesn't exist, or it is private and needs a login under registries in apps.tfvars"
+  # A registry out of reach is skipped, and FREELUNCH_CHECK_IMAGES=0 skips the check.
+  out="$(FAKE_REGISTRY_DOWN=1 deploy_in "$p" --dry-run 2>&1)"
+  contains "$out" "oci-main: couldn't ask the registry about ghcr.io/me/api:1.0.0; the host pulls it as usual"
+  rm "$p/fake.log.registry"
+  FREELUNCH_CHECK_IMAGES=0 FAKE_PLATFORMS=linux/amd64 deploy_in "$p" --dry-run >/dev/null 2>&1
+  absent "$p/fake.log.registry"
+}
+
+# Images come from the Compose files: Docker Hub when no registry is named, library/ for
+# official images, and none that only the host can work out.
+test_deploy_reads_the_images_of_compose_files() {
+  local p="$WORK/compose-images"
+  new_project "$p"
+  cat > "$p/compose.yaml" <<'EOF'
+services:
+  web:
+    image: "nginx:1.27"
+  db:
+    image: postgres   # the database
+  app:
+    image: ghcr.io/me/app:${TAG:-latest}
+  proxy:
+    image: 'registry.example.com:5000/team/proxy:2@sha256:abc'
+  built:
+    build: .
+EOF
+  GHCR_TOKEN=x deploy_in "$p" --dry-run >/dev/null 2>&1
+  equals "$(grep -o '^https://[^ ]*/manifests/[^ ]*' "$p/fake.log.registry" | sort -u | tr '\n' ' ')" \
+    "https://registry-1.docker.io/v2/library/nginx/manifests/1.27 https://registry-1.docker.io/v2/library/postgres/manifests/latest https://registry.example.com:5000/v2/team/proxy/manifests/sha256:abc "
 }
 
 test_deploy_shows_a_new_host_key_once() {

@@ -1,5 +1,5 @@
 output "targets" {
-  description = "Deploy plan per host: SSH address and user, apps with absolute file paths, whether a tunnel runs there, and its public URLs."
+  description = "Deploy plan per host: SSH address and user, CPU architecture, apps with absolute file paths, whether a tunnel runs there, and its public URLs."
   value       = local.targets
 
   precondition {
