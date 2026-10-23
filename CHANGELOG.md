@@ -35,6 +35,14 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
   `oci session refresh` before each attempt and stops with the sign-in command once the
   session's 24 hours are up. `FREELUNCH_CAPACITY_INTERVAL` and `FREELUNCH_CAPACITY_TIMEOUT`
   tune it.
+- **Free domains.** A new catalog category with DigitalPlat FreeDomain (recommended), EU.org
+  and pp.ua, whose free names (`myapp.dpdns.org`, `myapp.eu.org`, `myapp.pp.ua`) work as the
+  cloudflare stack's zone. Freenom and is-a.dev are listed under Excluded with the reason.
+  `freelunch domain suggest <name...>` looks names like yours up at each of them, the
+  recommended one first, and offers similar names where yours is taken.
+  `docs/free-domains.md` compares the providers and shows how to put a name on Cloudflare.
+- `recommended: true` in `provider.yaml` marks the provider to start with in its category;
+  the checklist shows it.
 - `deploy/`, a read-only root module that resolves `apps.tfvars` against the inventory and
   the tunnels, with checks for unknown hosts and missing files.
 - `hybrid/` takes `state_dir` to read host state from a project.
@@ -45,7 +53,8 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
   catalog drift check, and an image build.
 - `freelunch test [folder...]` runs only the suites under the given folders.
 - Offline tests: Cloudflare module and stack, `deploy/`, OCI network ingress, and
-  `tests/cli.sh` for init, project state and deploy against a fake ssh and docker.
+  `tests/cli.sh` for init, project state, deploy and domain suggest against a fake ssh,
+  docker and DNS resolver.
 
 ### Changed
 
