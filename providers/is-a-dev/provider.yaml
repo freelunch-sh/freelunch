@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: is-a-dev
+display_name: "is-a.dev"
+category: domains
+status: excluded
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "Free name.is-a.dev subdomains, but no NS delegation to DNS hosts such as Cloudflare, so they can't be a zone for the cloudflare stack"
+card_required: "no"
+url: "https://is-a.dev"
+last_verified: "2026-10-23"
+notes: "Excluded: names are records in is-a.dev's own zone (A, AAAA, CNAME, MX, TXT and a few more), added by GitHub pull request. NS records are only granted to SaaS that requires them, not for Cloudflare or self-hosting, and sites must be non-commercial software projects."
+sources:
+  - "github.com/is-a-dev/docs FAQ: who can use NS records (checked 2026-10-23)"
+  - "github.com/is-a-dev/docs maintainers guide on reviewing PRs (checked 2026-10-23)"
+inspire: []

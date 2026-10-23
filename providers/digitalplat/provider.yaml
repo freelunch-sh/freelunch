@@ -1,0 +1,26 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: digitalplat
+display_name: "DigitalPlat FreeDomain"
+category: domains
+status: ready
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "One free name per account under dpdns.org, qzz.io, us.kg or xx.kg, ready in minutes; the dashboard shows which suffixes take new names"
+# The quickest way to a free name that Cloudflare accepts: no card, no manual review.
+recommended: true
+card_required: "no"
+url: "https://dash.domain.digitalplat.org/"
+last_verified: "2026-10-23"
+notes: "Run by the non-profit DigitalPlat Foundation, with over 500,000 names registered. The .kg registry switched us.kg off twice in December 2024, and 2026 reports say us.kg and xx.kg paused new names and qzz.io became paid, so dpdns.org is the safe pick. Its fifth suffix, qd.je, is left out: it is not on the Public Suffix List, so Cloudflare's free plan won't take its names as zones. The terms give no uptime or renewal guarantee."
+# Checked by `freelunch domain suggest`. Only suffixes on the Public Suffix List: Cloudflare's
+# free plan treats names under any other suffix as subdomains and refuses them.
+suffixes: ["dpdns.org", "qzz.io", "us.kg", "xx.kg"]
+sources:
+  - "github.com/DigitalPlatDev/FreeDomain README, FAQ and platform tutorial (checked 2026-10-23)"
+  - "dev.to/mattleeee/free-domain-options-in-2026-from-euorg-to-digitalplat-dpdnsorg-3k3o (checked 2026-10-23)"
+  - "securityonline.info on the us.kg suspensions of December 2024 (checked 2026-10-23)"
+  - "Public Suffix List 2026-10-22 lists dpdns.org, qzz.io, us.kg and xx.kg, not qd.je (checked 2026-10-23)"
+  - "nodeseek.com/post-797903-1: qd.je names refused as Cloudflare zones (checked 2026-10-23)"
+inspire: []

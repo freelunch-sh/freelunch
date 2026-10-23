@@ -23,6 +23,9 @@
 - key: networking
   title: Networking & tunnels
   description: "Private mesh networks and tunnels that join hosts across clouds into one network."
+- key: domains
+  title: Free domains
+  description: "Free names to use instead of a paid domain. Each can be delegated to Cloudflare, so the cloudflare stack serves your apps on it. `freelunch domain suggest` checks which names are still free."
 - key: dns
   title: DNS
   description: "Free DNS hosting with an API. Cloudflare and Hetzner DNS are covered by their own providers."

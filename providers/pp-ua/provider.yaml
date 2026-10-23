@@ -1,0 +1,22 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: pp-ua
+display_name: "pp.ua"
+category: domains
+status: ready
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "Free names under pp.ua, renewed every year for free with a phone check by SMS or Telegram"
+card_required: "yes"
+url: "https://nic.ua/en/domains/.pp.ua"
+last_verified: "2026-10-23"
+notes: "Registered through NIC.UA and other .ua registrars. NIC.UA asks for a confirmed email and a linked card for free orders, to identify you, not to charge you. A name is tied to a phone number; SMS to numbers outside Ukraine has been unreliable, and the Telegram bot @ppuabot sends the code too."
+# Checked by `freelunch domain suggest`.
+suffixes: ["pp.ua"]
+sources:
+  - "nic.ua knowledge base: pp.ua restrictions and activation (checked 2026-10-23)"
+  - "nic.ua conditions for free orders (checked 2026-10-23)"
+  - "blog.51sec.org on pp.ua with Cloudflare (2021)"
+  - "Public Suffix List lists pp.ua (checked 2026-10-23)"
+inspire: []
