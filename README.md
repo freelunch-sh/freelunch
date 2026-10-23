@@ -135,7 +135,7 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 | `freelunch deploy [host\|provider]` | Copy Compose apps and their secrets to the hosts over SSH, start them, wait until healthy, start `cloudflared` (`--dry-run` to preview) |
 | `freelunch domain suggest <name...>` | Free names like yours at every free domain provider, and similar ones where yours is taken ([docs/free-domains.md](docs/free-domains.md)) |
 | `freelunch list` | Every provider with category, status, layer, IaC support and deployment state |
-| `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts → services → hybrid → glue). `apply --wait-for-capacity` retries hosts while OCI is out of capacity ([how](providers/oci/README.md#waiting-for-capacity)) |
+| `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts → services → hybrid → glue). `plan --show-user-data` prints each host's cloud-init with secrets left out. `apply --wait-for-capacity` retries hosts while OCI is out of capacity ([how](providers/oci/README.md#waiting-for-capacity)) |
 | `freelunch hybrid` | Re-aggregate deployed host stacks |
 | `freelunch inventory` | Write `inventory.json` |
 | `freelunch output <stack> [name]` | Print a stack's outputs from its state, e.g. `output cloudflare -json service_tokens` or `output hybrid -raw ssh_config` |
