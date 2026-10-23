@@ -71,6 +71,12 @@ token in `.freelunch/.env` (git-ignored):
 CLOUDFLARE_API_TOKEN=...
 ```
 
+`freelunch domain add` creates the zone itself, which a token limited to one zone can't do,
+since the zone doesn't exist yet. For that one command, use a token whose *Zone Resources*
+are *All zones from an account* (yours), with *Zone → DNS → Edit*. Once the zone exists,
+narrow its *Zone Resources* to it, or switch back to the narrower token. `freelunch domain
+status` only reads the zone and works with either.
+
 ## Usage
 
 ```hcl

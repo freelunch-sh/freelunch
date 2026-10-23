@@ -53,7 +53,8 @@ and state live in your repository; freelunch is pinned as a submodule or a Docke
 
 The domain can be free too. `freelunch domain suggest myapp` finds free names like
 `myapp.dpdns.org` at each [free domain provider](#provider-checklist), the recommended one
-first, and [docs/free-domains.md](docs/free-domains.md) shows how to put one on Cloudflare.
+first. `freelunch domain add` puts the one you register on Cloudflare and `domain status`
+says when it's ready ([docs/free-domains.md](docs/free-domains.md)).
 
 ```bash
 cd your-project
@@ -134,7 +135,8 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 |---|---|
 | `freelunch init [--name <name>] [stack...]` | Create `.freelunch/` in your project (default stacks: `oci cloudflare`), with resources named after the project |
 | `freelunch deploy [host\|provider]` | Copy Compose apps and their secrets to the hosts over SSH, start them, wait until healthy, start `cloudflared` (`--dry-run` to preview) |
-| `freelunch domain suggest <name...>` | Free names like yours at every free domain provider, and similar ones where yours is taken ([docs/free-domains.md](docs/free-domains.md)) |
+| `freelunch domain suggest <name...>` | Whether the name you typed is registered, then free names like it at every free domain provider, and similar ones where yours is taken ([docs/free-domains.md](docs/free-domains.md)) |
+| `freelunch domain add\|status <name>` | Put the name on Cloudflare and print the nameservers to set at its provider; say when they are set and the zone is active |
 | `freelunch list` | Every provider with category, status, layer, IaC support and deployment state |
 | `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts → services → hybrid → glue). `plan --show-user-data` prints each host's cloud-init with secrets left out, `plan --out <file>` saves a plan and `apply --plan <file>` applies it without a prompt. `apply --wait-for-capacity` retries hosts while OCI is out of capacity, `--detach` in the background ([how](providers/oci/README.md#waiting-for-capacity)) |
 | `freelunch status` | How each capacity wait is going: attempts, the last result, the next try |
