@@ -3,11 +3,17 @@
 # tunnel reach apps that publish their ports on 127.0.0.1.
 services:
   cloudflared:
-    image: cloudflare/cloudflared:2026.10.0
+    # Pinned by digest, so the tag cannot be moved to a different build.
+    image: cloudflare/cloudflared:2026.10.0@sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07
     command: tunnel --no-autoupdate --metrics 127.0.0.1:20241 run
     env_file: .env
     network_mode: host
     restart: unless-stopped
+    # The one container that faces the internet: no capabilities, no privilege
+    # escalation, nothing writable. It runs as the image's nonroot user.
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
     healthcheck:
       # Healthy once the tunnel has a connection to Cloudflare's edge.
       test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:20241", "ready"]

@@ -13,4 +13,9 @@ routes = {
 
   # Private app behind Cloudflare Access (email one-time PIN login):
   # "admin.example.com" = { host = "oci-main", port = 9000, access = { emails = ["you@example.com"] } }
+
+  # API for your own clients only: Cloudflare answers 401 to requests without the token's
+  # headers, so they never reach the host. `freelunch output cloudflare -json service_tokens`
+  # prints the client ID and secret.
+  # "internal.example.com" = { host = "oci-main", port = 8081, access = { service_tokens = ["backend"] } }
 }

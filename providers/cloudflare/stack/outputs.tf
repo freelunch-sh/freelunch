@@ -19,3 +19,10 @@ output "urls" {
   description = "Public URLs."
   value       = module.tunnel.urls
 }
+
+# freelunch output cloudflare -json service_tokens
+output "service_tokens" {
+  description = "Client ID, secret and expiry per Access service token."
+  value       = module.tunnel.service_tokens
+  sensitive   = true
+}
