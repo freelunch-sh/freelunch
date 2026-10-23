@@ -46,7 +46,14 @@ pp.ua: Free names under pp.ua, renewed every year for free with a phone check by
   register at https://nic.ua/en/domains/.pp.ua
 ```
 
-`suggest` takes the first label of each name you give (`myapp` here) and looks it up under
+When the name you give is a paid one, like `myapp.com`, `suggest` first says whether it is
+registered, from the RDAP server of its extension, or from DNS for extensions without one:
+
+```
+myapp.com: registered
+```
+
+Then it takes the first label of each name you give (`myapp` here) and looks it up under
 every suffix of every provider above, the recommended one first. Where it is taken, it shows
 the first free one of a few similar names: `myapp-com` (from the extension you typed),
 `getmyapp`, `myapphq` and `trymyapp`. Give several names to compare them.
@@ -60,13 +67,42 @@ lookup failed. The lookups go to Cloudflare's public resolver over HTTPS, so `su
 
 Whichever provider you pick, the name ends up as a zone on Cloudflare's free plan:
 
-1. Add the name in the Cloudflare dashboard (*Add a domain*, Free plan) and note the two
-   nameservers Cloudflare assigns.
-2. Enter them at the provider. DigitalPlat asks for them when you register; for pp.ua, set
-   them in the registrar's panel after registering; EU.org takes them after approval (its
-   [page](../providers/eu-org/) has the steps).
-3. Wait until Cloudflare shows the domain as active. It checks the nameservers on its own,
-   which can take up to a day.
+1. Add the name to Cloudflare, which assigns it two nameservers:
+
+   ```bash
+   freelunch domain add myapp.dpdns.org
+   ```
+
+   ```
+   ==> myapp.dpdns.org is on Cloudflare now, on the free plan
+   Set these nameservers for myapp.dpdns.org at DigitalPlat FreeDomain (https://dash.domain.digitalplat.org/), in place of any others:
+     ada.ns.cloudflare.com
+     bob.ns.cloudflare.com
+   ```
+
+   It takes a `CLOUDFLARE_API_TOKEN` that may create zones
+   ([which one](../providers/cloudflare/README.md#api-token)); *Add a domain* in the
+   dashboard does the same.
+2. Enter the two nameservers at the provider. DigitalPlat asks for them when you register;
+   for pp.ua, set them in the registrar's panel after registering; EU.org takes them after
+   approval (its [page](../providers/eu-org/) has the steps).
+3. Wait until Cloudflare has taken over, which can take up to a day:
+
+   ```bash
+   freelunch domain status myapp.dpdns.org
+   ```
+
+   ```
+   myapp.dpdns.org
+     nameservers: ada.ns.cloudflare.com, bob.ns.cloudflare.com (Cloudflare's)
+     Cloudflare: active
+   ==> ready: zone = "myapp.dpdns.org" in .freelunch/cloudflare/terraform.tfvars, then freelunch apply cloudflare
+   ```
+
+   It shows which nameservers DNS has for the name and whether the zone is active, and once
+   the nameservers are right it asks Cloudflare to check again. It exits with an error until
+   the name is ready, so `until freelunch domain status myapp.dpdns.org; do sleep 600; done`
+   waits for it.
 4. Make it the cloudflare stack's zone:
 
    ```hcl
