@@ -34,7 +34,8 @@ Project:
 
 Infrastructure:
   list                    Show every provider with status, layer and deployment state
-  plan    <p...|all>      Plan provider stacks
+  plan    <p...|all>      Plan provider stacks. --show-user-data also prints the cloud-init of
+                          each host in the plan, with secrets left out
   apply   <p...|all>      Apply provider stacks (hosts, then services), refresh hybrid, then glue.
                           --wait-for-capacity retries hosts until OCI has the capacity for them
   destroy <p...|all>      Destroy provider stacks in reverse layer order, then refresh hybrid
@@ -349,6 +350,77 @@ apply_until_capacity() { # apply_until_capacity <provider> [extra args]
   [[ $attempt -eq 1 ]] || log "$p: applied on attempt $attempt"
 }
 
+# apply_host <provider> [extra args]: apply a host stack once, and point to
+# --wait-for-capacity when it fails for lack of capacity
+apply_host() {
+  local p="$1"; shift
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if run_stack apply "$p" "$@" 2>&1 | keep "$TMP/$p.out"; then return 0; fi
+  case "$(retry_reason "$TMP/$p.out")" in
+    capacity) die "$p: out of host capacity. freelunch apply $p --wait-for-capacity tries again until the host exists" ;;
+    busy)     die "$p: too many requests. freelunch apply $p --wait-for-capacity waits and tries again" ;;
+  esac
+  exit 1
+}
+
+# --- after plan and apply -------------------------------------------------------------
+
+# user_data_in_plan <provider> <saved plan>: host, actions and base64 user data of every
+# instance in the plan. OCI keeps it in metadata.user_data, AWS in user_data_base64 and
+# Azure in custom_data, all base64; GCP has it as text in metadata["user-data"].
+user_data_in_plan() {
+  tf_for "$1" "$(stack_dir "$1")" show -json "$2" | jq -r '
+    .resource_changes[]? | select(.change.after != null) | . as $r | .change.after
+    | (.metadata.user_data? // .user_data_base64? // .custom_data? // (.metadata["user-data"]? // empty | @base64)) as $data
+    | [($r.index // $r.name | tostring), ($r.change.actions | join(",")), $data] | @tsv'
+}
+
+# redact_user_data: cloud-init on stdin, without the Tailscale auth key and the content of
+# .env files
+redact_user_data() {
+  awk '
+    /^[ \t]*- path: / { secret = ($NF ~ /\.env"?$/) }
+    secret && /^[ \t]*content: / { sub(/content: .*/, "content: <redacted>"); print; next }
+    { gsub(/--auth-key=[^ "\\]+/, "--auth-key=<redacted>"); print }
+  '
+}
+
+show_user_data() { # show_user_data <provider> <saved plan>
+  local host actions data found=0
+  while IFS=$'\t' read -r host actions data; do
+    found=1
+    log "$1-$host: cloud-init ($actions), secrets left out"
+    printf '%s' "$data" | base64 -d | redact_user_data
+    [[ "$actions" == *create* ]] || log "$1-$host exists already. cloud-init only runs on first boot, so this is what it booted with"
+  done < <(user_data_in_plan "$1" "$2")
+  [[ $found -eq 1 ]] || log "$1: no host in this plan has user data"
+}
+
+# next_steps <host providers...>: after apply, where the hosts are and what is left before
+# the apps run on them
+next_steps() {
+  local p host address known unpinned="" steps=() i
+  known="$(state_root)/known_hosts"
+  for p in "$@"; do
+    while IFS=$'\t' read -r host address; do
+      [[ -n "$address" ]] || continue
+      log "$host is ready at $address"
+      ssh-keygen -F "$address" -f "$known" >/dev/null 2>&1 || unpinned="${unpinned:+$unpinned, }$host"
+    done < <(jq -r '.outputs.hosts.value[]? | ["\(.provider)-\(.name)", (.public_ip // .private_ip // "")] | @tsv' "$(config_dir "$p")/terraform.tfstate" 2>/dev/null)
+  done
+  # Apps come from deploy when there is an apps file or a tunnel to start.
+  if [[ -f "$(state_root)/apps.tfvars" ]] || is_configured cloudflare || is_deployed cloudflare; then
+    if [[ -n "$unpinned" ]]; then
+      steps+=("Check the host key of $unpinned before the first deploy (docs/deploy-a-container.md#check-the-host-key)")
+    fi
+    if [[ -d "$(stack_dir cloudflare)" ]] && is_configured cloudflare && ! is_deployed cloudflare; then steps+=("freelunch apply cloudflare"); fi
+    steps+=("freelunch deploy")
+  fi
+  [[ ${#steps[@]} -gt 0 ]] || return 0
+  printf '\nNext steps:\n' >&2
+  for i in "${!steps[@]}"; do echo "  $((i + 1)). ${steps[$i]}" >&2; done
+}
+
 deployed_hosts_json() {
   local p first=1
   printf '['
@@ -403,16 +475,19 @@ cmd_output() { # cmd_output <stack|hybrid> [tofu/terraform output args]
 cmd_lifecycle() { # plan|apply|destroy
   need_tf
   local action="$1"; shift
-  local names=() extra=() seen_dashes=0 wait_for_capacity=0 a
+  local names=() extra=() seen_dashes=0 wait_for_capacity=0 user_data=0 a
   for a in "$@"; do
     if [[ $seen_dashes -eq 1 ]]; then extra+=("$a"); continue; fi
     case "$a" in
       --)                  seen_dashes=1 ;;
       --wait-for-capacity) wait_for_capacity=1 ;;
+      --show-user-data)    user_data=1 ;;
       *)                   names+=("$a") ;;
     esac
   done
   [[ $wait_for_capacity -eq 0 || "$action" == "apply" ]] || die "$action: only apply takes --wait-for-capacity"
+  [[ $user_data -eq 0 || "$action" == "plan" ]] || die "$action: only plan takes --show-user-data"
+  [[ $user_data -eq 0 ]] || command -v jq >/dev/null || die "jq is required for --show-user-data"
   local resolved providers=()
   resolved="$(resolve ${names[@]+"${names[@]}"})" || exit 1
   while IFS= read -r a; do [[ -n "$a" ]] && providers+=("$a"); done <<< "$resolved"
@@ -429,14 +504,21 @@ cmd_lifecycle() { # plan|apply|destroy
 
   case "$action" in
     plan)
-      for a in ${hosts[@]+"${hosts[@]}"} ${services[@]+"${services[@]}"} ${glue[@]+"${glue[@]}"}; do run_stack plan "$a" ${extra[@]+"${extra[@]}"}; done ;;
+      for a in ${hosts[@]+"${hosts[@]}"}; do
+        if [[ $user_data -eq 0 ]]; then run_stack plan "$a" ${extra[@]+"${extra[@]}"}; continue; fi
+        [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+        run_stack plan "$a" -out="$TMP/$a.tfplan" ${extra[@]+"${extra[@]}"}
+        show_user_data "$a" "$TMP/$a.tfplan"
+      done
+      for a in ${services[@]+"${services[@]}"} ${glue[@]+"${glue[@]}"}; do run_stack plan "$a" ${extra[@]+"${extra[@]}"}; done ;;
     apply)
       for a in ${hosts[@]+"${hosts[@]}"}; do
-        if [[ $wait_for_capacity -eq 1 ]]; then apply_until_capacity "$a" ${extra[@]+"${extra[@]}"}; else run_stack apply "$a" ${extra[@]+"${extra[@]}"}; fi
+        if [[ $wait_for_capacity -eq 1 ]]; then apply_until_capacity "$a" ${extra[@]+"${extra[@]}"}; else apply_host "$a" ${extra[@]+"${extra[@]}"}; fi
       done
       for a in ${services[@]+"${services[@]}"}; do run_stack apply "$a" ${extra[@]+"${extra[@]}"}; done
       [[ ${#hosts[@]} -gt 0 ]] && cmd_hybrid
-      for a in ${glue[@]+"${glue[@]}"}; do run_stack apply "$a" ${extra[@]+"${extra[@]}"}; done ;;
+      for a in ${glue[@]+"${glue[@]}"}; do run_stack apply "$a" ${extra[@]+"${extra[@]}"}; done
+      next_steps ${hosts[@]+"${hosts[@]}"} ;;
     destroy)
       for a in ${glue[@]+"${glue[@]}"} ${services[@]+"${services[@]}"} ${hosts[@]+"${hosts[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
       [[ ${#hosts[@]} -gt 0 ]] && cmd_hybrid ;;

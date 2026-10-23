@@ -128,7 +128,8 @@ else through its UI (see `inspire/repos/oci-vm/statickidz-*` for reference).
 ### Waiting for capacity
 
 Free A1 capacity comes and goes, and creating the host often fails with
-`500-InternalError, Out of host capacity`. Instead of running `apply` until it works:
+`500-InternalError, Out of host capacity`. A plain `apply` that fails this way ends by
+pointing to this command. Instead of running `apply` until it works:
 
 ```bash
 bin/freelunch apply oci --wait-for-capacity

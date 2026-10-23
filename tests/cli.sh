@@ -465,6 +465,85 @@ test_capacity_retries_stop_on_other_errors() {
   fails grep -q '^sleep ' "$p/fake.log"
 }
 
+# A plain apply that runs out of capacity says how to wait for it.
+test_apply_points_to_waiting_for_capacity() {
+  local p="$WORK/capacity-hint" out
+  capacity_project "$p"
+  if out="$(FAKE_APPLY="capacity" apply_in "$p" oci 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "Out of host capacity."
+  contains "$out" "freelunch: oci: out of host capacity. freelunch apply oci --wait-for-capacity tries again until the host exists"
+  lacks "$out" "Next steps"
+  rm "$p/fake.log"*
+  if out="$(FAKE_APPLY="capacity+auth" apply_in "$p" oci 2>&1)"; then echo "apply should have failed"; return 1; fi
+  lacks "$out" "--wait-for-capacity"
+}
+
+# After apply: where the host is, and the steps left before the app runs on it.
+test_apply_says_what_is_next() {
+  local p="$WORK/next" out key
+  capacity_project "$p"
+  scratch_checkout "$p-checkout" cloudflare
+  out="$(apply_in "$p" oci 2>&1)"
+  contains "$out" "==> oci-main is ready at 203.0.113.10"
+  contains "$out" "==> oci-edge-1 is ready at 203.0.113.11"
+  contains "$out" "$(printf 'Next steps:\n  1. Check the host key of oci-main, oci-edge-1 before the first deploy (docs/deploy-a-container.md#check-the-host-key)\n  2. freelunch deploy')"
+  # Pinned keys need no check, and a cloudflare stack that isn't applied yet comes first.
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  printf '203.0.113.10 %s\n203.0.113.11 %s\n' "$key" "$key" > "$p/.freelunch/known_hosts"
+  rm "$p/.freelunch/cloudflare/terraform.tfstate"
+  touch "$p/.freelunch/cloudflare/terraform.tfvars"
+  out="$(apply_in "$p" oci 2>&1)"
+  contains "$out" "$(printf 'Next steps:\n  1. freelunch apply cloudflare\n  2. freelunch deploy')"
+  # With nothing to deploy there are no steps.
+  rm "$p/.freelunch/apps.tfvars" "$p/.freelunch/cloudflare/terraform.tfvars"
+  out="$(apply_in "$p" oci 2>&1)"
+  contains "$out" "oci-main is ready at 203.0.113.10"
+  lacks "$out" "Next steps"
+}
+
+# The plan only says metadata = (sensitive value). --show-user-data prints the cloud-init
+# each host gets, without the Tailscale key and app secrets.
+test_plan_shows_user_data_without_secrets() {
+  local p="$WORK/user-data" cloud_init plan out
+  capacity_project "$p"
+  cloud_init='#cloud-config
+write_files:
+  - path: /opt/freelunch/apps/api/compose.yaml
+    encoding: b64
+    permissions: "0640"
+    content: c2VydmljZXM6IHt9Cg==
+  - path: /opt/freelunch/apps/api/.env
+    encoding: b64
+    permissions: "0600"
+    content: QVBJX1NFQ1JFVD1zM2NyZXQ=
+runcmd:
+  - "tailscale up --auth-key=tskey-auth-k1234-S3CRET --hostname=freelunch-oci-main"'
+  # A new OCI host (base64 under metadata), an existing one in GCP's shape (text under
+  # metadata["user-data"]), and a resource without user data.
+  plan="$(jq -n --arg b64 "$(printf '%s\n' "$cloud_init" | base64 | tr -d '\n')" --arg text "#cloud-config
+runcmd: []" '{resource_changes: [
+    {name: "this", change: {actions: ["create"], after: {display_name: "freelunch"}}},
+    {index: "main", name: "this", change: {actions: ["create"], after: {metadata: {ssh_authorized_keys: "ssh-ed25519 AAAA", user_data: $b64}}}},
+    {index: "edge-1", name: "this", change: {actions: ["no-op"], after: {metadata: {"user-data": $text}}}}]}')"
+  out="$(FAKE_PLAN="$plan" freelunch_in "$p" plan oci --show-user-data 2>&1)"
+  grep -q -- "-chdir=$p-checkout/providers/oci/stack plan -input=false -var-file=$p/.freelunch/oci/terraform.tfvars -state=$p/.freelunch/oci/terraform.tfstate -out=.*/oci.tfplan$" "$p/fake.log"
+  contains "$out" "$(printf '==> oci-main: cloud-init (create), secrets left out\n#cloud-config\nwrite_files:')"
+  contains "$out" "content: c2VydmljZXM6IHt9Cg=="
+  contains "$out" "$(printf '    permissions: "0600"\n    content: <redacted>')"
+  contains "$out" '"tailscale up --auth-key=<redacted> --hostname=freelunch-oci-main"'
+  lacks "$out" "S3CRET"
+  lacks "$out" "QVBJX1NFQ1JFVD1zM2NyZXQ="
+  contains "$out" "$(printf '==> oci-edge-1: cloud-init (no-op), secrets left out\n#cloud-config\nruncmd: []')"
+  contains "$out" "oci-edge-1 exists already. cloud-init only runs on first boot"
+  lacks "$out" "oci-main exists already"
+  # Without the flag nothing is saved or shown, and only plan takes it.
+  rm "$p/fake.log"*
+  out="$(FAKE_PLAN="$plan" freelunch_in "$p" plan oci 2>&1)"
+  lacks "$out" "cloud-init"
+  fails grep -q -- '-out=' "$p/fake.log"
+  fails freelunch_in "$p" apply oci --show-user-data
+}
+
 test_capacity_retries_give_up_and_only_apply_waits() {
   local p="$WORK/capacity-limits" out
   capacity_project "$p"

@@ -28,6 +28,12 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
   requests without the token's headers and they never reach the host.
 - `freelunch output <stack> [name]` prints a stack's outputs from its state, e.g.
   `output cloudflare -json service_tokens` or `output hybrid -raw ssh_config`.
+- `freelunch plan --show-user-data` prints the cloud-init of each host in the plan, decoded,
+  with the Tailscale auth key and the content of `.env` files left out. The plan itself only
+  shows `metadata = (sensitive value)`.
+- `apply` ends with the address of each host it applied and the steps left before the apps
+  run there: checking the host key, applying the cloudflare stack, `freelunch deploy`. A
+  plain `apply` that fails for lack of OCI capacity prints the `--wait-for-capacity` command.
 - **`freelunch apply --wait-for-capacity`** keeps retrying a host stack while OCI is out of
   capacity, with the project's tfvars, state and plugins like any other run. You approve
   the first attempt; each retry plans again and applies that plan only if it destroys
