@@ -111,9 +111,15 @@ scanner on the internet. Close it if you can:
 - **Your own IP**, if it doesn't change: `ssh_source_cidrs = ["203.0.113.7/32"]`.
 
 ```bash
+freelunch doctor                      # tools, the OCI sign-in and home region, your SSH key
 freelunch plan oci --show-user-data   # optional: the plan, plus the VM's cloud-init
 freelunch apply oci
 ```
+
+`freelunch doctor` checks what the next steps will need, and says what to fix: a session
+that has expired, a `region` that isn't your home region, an SSH key that isn't in
+`ssh_public_keys`. Run it again before `deploy`: by then it also checks your images and
+registry logins, and the Cloudflare token, its permissions and the zone.
 
 The plan shows the VM's user data only as `metadata = (sensitive value)`. With
 `--show-user-data` it also prints the cloud-init the VM boots with, decoded, with the
@@ -261,6 +267,7 @@ important data in a managed database or back it up (backups are planned for v1.5
 ## 6. Deploy
 
 ```bash
+freelunch doctor              # images, registry logins, the Cloudflare token and zone
 freelunch deploy --dry-run    # shows what would run on the host, secrets left out
 freelunch deploy
 ```
