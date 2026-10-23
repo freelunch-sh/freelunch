@@ -79,6 +79,8 @@ Development:
 
 In a repository with a .freelunch/ folder (looked up from the current directory, or set
 FREELUNCH_PROJECT), terraform.tfvars, state, inventory.json and .env live in that folder.
+A value in .env can be op://<vault>/<item>/<field> (1Password) or keychain:<name> (macOS
+keychain); commands that use credentials read those.
 Inside the freelunch checkout, each stack keeps them in providers/<name>/stack/ as before.
 
 `all` means: providers with status `ready` that have a terraform.tfvars.
@@ -129,7 +131,8 @@ find_project() {
 }
 
 # Export KEY=VALUE lines from a dotenv file without running it as shell code. Variables that
-# are already set win, so the shell and CI can override the file.
+# are already set win, so the shell and CI can override the file. A value can name a secret
+# instead of holding it (see resolve_env_refs); those are kept for later.
 load_env_file() {
   local line key value
   [[ -f "$1" ]] || return 0
@@ -141,8 +144,48 @@ load_env_file() {
     value="${line#*=}"
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     if [[ ${#value} -ge 2 && ( "$value" == \"*\" || "$value" == \'*\' ) ]]; then value="${value:1:${#value}-2}"; fi
-    [[ -n "${!key+x}" ]] || export "$key=$value"
+    [[ -z "${!key+x}" ]] || continue
+    case "$value" in
+      op://*|keychain:*) ENV_REFS+=("$key=$value") ;;
+      *)                 export "$key=$value" ;;
+    esac
   done < "$1"
+}
+
+# A value in .env can name a secret instead of holding it: op://<vault>/<item>/<field> from
+# 1Password (through the op CLI), or keychain:<name> from the macOS keychain. They are read
+# once, and only by the commands that use credentials, so list or init never ask for them.
+ENV_REFS=() # KEY=reference pairs that load_env_file found
+
+# secret_ref <reference>: the secret, or why it can't be read
+secret_ref() {
+  case "$1" in
+    op://*)
+      command -v op >/dev/null || { echo "that takes the 1Password CLI (op)"; return 1; }
+      op read "$1" 2>&1 ;;
+    keychain:*)
+      command -v security >/dev/null || { echo "that takes the macOS keychain (the security command)"; return 1; }
+      security find-generic-password -s "${1#keychain:}" -w 2>&1 ;;
+  esac
+}
+
+# resolve_env_refs [report]: export the .env values that come from a secret store. One that
+# can't be read stops the command, or with report is a failed doctor check.
+resolve_env_refs() {
+  local pair key ref value
+  for pair in ${ENV_REFS[@]+"${ENV_REFS[@]}"}; do
+    key="${pair%%=*}"
+    ref="${pair#*=}"
+    if value="$(secret_ref "$ref")" && [[ -n "$value" ]]; then
+      export "$key=$value"
+      [[ "${1:-}" != "report" ]] || check ok "$key comes from $ref"
+    elif [[ "${1:-}" == "report" ]]; then
+      check fail "$key in .env is $ref, which can't be read: ${value:-it is empty}"
+    else
+      die "$key in $(rel "$(state_root)")/.env is $ref, which can't be read: ${value:-it is empty}"
+    fi
+  done
+  ENV_REFS=()
 }
 
 state_root()   { if [[ -n "$PROJECT" ]]; then echo "$PROJECT"; else echo "$ROOT"; fi; }
@@ -1149,6 +1192,12 @@ CLOUDFLARE_API_TOKEN=
 
 # SSH key for deploy, if it is not your default key or in ssh-agent
 # FREELUNCH_SSH_KEY=~/.ssh/id_ed25519
+
+# A value can name a secret instead of holding it, read when a command needs it:
+# op://<vault>/<item>/<field> from 1Password (the op CLI), or keychain:<name> from the
+# macOS keychain (security add-generic-password -s <name> -a "$USER" -w adds one).
+# GHCR_TOKEN=op://Private/GHCR/token
+# CLOUDFLARE_API_TOKEN=keychain:freelunch-cloudflare
 EOF
 
   log "project name: $name (name_prefix in each stack's tfvars)"
@@ -1739,6 +1788,7 @@ cmd_domain() {
   command -v curl >/dev/null || die "curl is required for 'domain $sub'"
   command -v jq >/dev/null || die "jq is required for 'domain $sub'"
   if [[ "$sub" == "suggest" ]]; then domain_suggest "$@"; return; fi
+  resolve_env_refs
   [[ $# -eq 1 ]] || die "domain $sub: name one domain, e.g. freelunch domain $sub myapp.dpdns.org"
   set -- "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   [[ "$1" =~ $re ]] || die "domain $sub: '$1' is not a domain name"
@@ -2041,6 +2091,7 @@ cmd_doctor() {
   echo
   doctor_tools
   doctor_config
+  if [[ ${#ENV_REFS[@]} -gt 0 ]]; then echo "Secrets ($(rel "$(state_root)")/.env)"; resolve_env_refs report; fi
   if [[ -d "$(stack_dir oci)" ]] && is_configured oci; then doctor_oci; fi
   doctor_ssh
   doctor_images
@@ -2122,6 +2173,11 @@ main() {
     die "FREELUNCH_PROJECT=$FREELUNCH_PROJECT has no .freelunch folder (run freelunch init there)"
   fi
   load_env_file "$(state_root)/.env"
+  # Secrets from a store are read by the commands that use credentials (domain: add and
+  # status; doctor reports on them).
+  case "$cmd" in
+    plan|apply|destroy|deploy|status) resolve_env_refs ;;
+  esac
   case "$cmd" in
     init)                 cmd_init "$@" ;;
     deploy)               cmd_deploy "$@" ;;

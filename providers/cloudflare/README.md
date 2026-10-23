@@ -71,6 +71,9 @@ token in `.freelunch/.env` (git-ignored):
 CLOUDFLARE_API_TOKEN=...
 ```
 
+Or `CLOUDFLARE_API_TOKEN=op://<vault>/<item>/<field>` (1Password) or
+`CLOUDFLARE_API_TOKEN=keychain:<name>` (macOS keychain), so the token isn't in the file.
+
 `freelunch domain add` creates the zone itself, which a token limited to one zone can't do,
 since the zone doesn't exist yet. For that one command, use a token whose *Zone Resources*
 are *All zones from an account* (yours), with *Zone → DNS → Edit*. Once the zone exists,

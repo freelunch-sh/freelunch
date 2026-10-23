@@ -151,7 +151,9 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 
 `freelunch` is `bin/freelunch` in a checkout. In a directory with a `.freelunch/` folder it
 reads and writes config and state there; elsewhere in the checkout it uses each
-`providers/<name>/stack/`. `all` means every `ready` provider that has a `terraform.tfvars`.
+`providers/<name>/stack/`. Credentials come from your shell or `.freelunch/.env`, where a
+value can also name a secret in 1Password (`op://...`) or the macOS keychain
+(`keychain:<name>`). `all` means every `ready` provider that has a `terraform.tfvars`.
 
 ## Repository layout
 

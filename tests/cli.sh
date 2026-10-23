@@ -156,6 +156,25 @@ echo "post $a [$type] $body" >> "$FAKE_LOG"
 EOF
 chmod +x "$WORK/wait-bin/"*
 mkdir -p "$WORK/doctor-bin" && ln -s "$WORK/wait-bin/oci" "$WORK/doctor-bin/oci"
+# Secret stores: 1Password's op knows op://Private/GHCR/token, the macOS keychain knows
+# freelunch-cloudflare. Both log what they are asked.
+mkdir -p "$WORK/secret-bin"
+cat > "$WORK/secret-bin/op" <<'EOF'
+#!/usr/bin/env bash
+echo "op $*" >> "$FAKE_LOG"
+if [[ "$1 $2" == "read op://Private/GHCR/token" ]]; then echo "ghp_from-1password"; exit 0; fi
+echo "[ERROR] 2026/10/23 23:59:00 could not read secret '$2': no item found" >&2
+exit 1
+EOF
+cat > "$WORK/secret-bin/security" <<'EOF'
+#!/usr/bin/env bash
+echo "security $*" >> "$FAKE_LOG"
+if [[ "$*" == "find-generic-password -s freelunch-cloudflare -w" ]]; then echo "cf-from-keychain"; exit 0; fi
+echo "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain." >&2
+exit 44
+EOF
+chmod +x "$WORK/secret-bin/"*
+
 # For trust: an ssh-keyscan that finds the key in FAKE_SCANNED at any address.
 mkdir -p "$WORK/trust-bin"
 cat > "$WORK/trust-bin/ssh-keyscan" <<'EOF'
@@ -475,6 +494,7 @@ test_init_writes_the_project_folder() {
   grep -q 'host    = "oci-main"' "$p/.freelunch/apps.tfvars"
   grep -q 'compose = "../docker-compose.yml"' "$p/.freelunch/apps.tfvars"
   cmp "$p/.freelunch/.gitignore" "$ROOT/examples/backend-app/.freelunch/.gitignore"
+  cmp "$p/.freelunch/.env.example" "$ROOT/examples/backend-app/.freelunch/.env.example"
 }
 
 # Host stacks start from their project example: only SSH open, no apps in cloud-init.
@@ -1152,6 +1172,34 @@ test_deploy_reads_secrets_from_the_project_env_file() {
   # The shell wins over the file.
   GHCR_TOKEN=from-shell deploy_in "$p"
   grep -qx 'stdin: from-shell' "$p/fake.log"
+}
+
+# .env can name secrets in 1Password or the macOS keychain instead of holding them.
+test_env_values_from_a_secret_store() {
+  local p="$WORK/secret-store" out
+  new_project "$p"
+  printf 'GHCR_TOKEN=op://Private/GHCR/token\nCLOUDFLARE_API_TOKEN="keychain:freelunch-cloudflare"\n' > "$p/.freelunch/.env"
+  (unset GHCR_TOKEN CLOUDFLARE_API_TOKEN; PATH="$WORK/secret-bin:$PATH" deploy_in "$p")
+  grep -qx 'stdin: ghp_from-1password' "$p/fake.log"
+  grep -qx 'op read op://Private/GHCR/token' "$p/fake.log"
+  grep -qx 'security find-generic-password -s freelunch-cloudflare -w' "$p/fake.log"
+  # Commands without credentials don't ask the stores.
+  rm "$p/fake.log"
+  (cd "$p" && unset GHCR_TOKEN CLOUDFLARE_API_TOKEN && PATH="$WORK/secret-bin:$PATH" FAKE_LOG="$p/fake.log" "$CLI" list >/dev/null)
+  absent "$p/fake.log"
+  # The shell still wins, without a lookup.
+  (unset CLOUDFLARE_API_TOKEN; GHCR_TOKEN=from-shell PATH="$WORK/secret-bin:$PATH" deploy_in "$p")
+  grep -qx 'stdin: from-shell' "$p/fake.log"
+  fails grep -q '^op ' "$p/fake.log"
+  # A secret that can't be read stops the command and says why.
+  printf 'GHCR_TOKEN=op://Private/Missing/token\n' > "$p/.freelunch/.env"
+  if out="$(unset GHCR_TOKEN; PATH="$WORK/secret-bin:$PATH" deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "GHCR_TOKEN in .freelunch/.env is op://Private/Missing/token, which can't be read: [ERROR] 2026/10/23 23:59:00 could not read secret"
+  # doctor reports on each one instead of stopping.
+  printf 'GHCR_TOKEN=op://Private/GHCR/token\nCLOUDFLARE_API_TOKEN=keychain:no-such-item\n' > "$p/.freelunch/.env"
+  out="$(cd "$p" && { unset GHCR_TOKEN CLOUDFLARE_API_TOKEN; PATH="$WORK/secret-bin:$WORK/bin:$PATH" FAKE_LOG="$p/fake.log" "$CLI" doctor 2>&1; })" || true
+  contains "$out" "$(printf 'Secrets (.freelunch/.env)\n  ok    GHCR_TOKEN comes from op://Private/GHCR/token')"
+  contains "$out" "  fail  CLOUDFLARE_API_TOKEN in .env is keychain:no-such-item, which can't be read: security: SecKeychainSearchCopyNext"
 }
 
 test_dry_run_shows_the_plan_without_secrets() {
