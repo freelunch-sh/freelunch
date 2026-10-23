@@ -140,6 +140,7 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 | `freelunch list` | Every provider with category, status, layer, IaC support and deployment state |
 | `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts → services → hybrid → glue). `plan --show-user-data` prints each host's cloud-init with secrets left out, `plan --out <file>` saves a plan and `apply --plan <file>` applies it without a prompt. `apply --wait-for-capacity` retries hosts while OCI is out of capacity, `--detach` in the background ([how](providers/oci/README.md#waiting-for-capacity)) |
 | `freelunch status` | How each capacity wait is going: attempts, the last result, the next try |
+| `freelunch doctor` | Check what plan, apply and deploy will need before they run: tools, the OCI sign-in and home region, SSH keys, images and registry logins, the Cloudflare token, its permissions and the zone |
 | `freelunch hybrid` | Re-aggregate deployed host stacks |
 | `freelunch inventory` | Write `inventory.json` |
 | `freelunch output <stack> [name]` | Print a stack's outputs from its state, e.g. `output cloudflare -json service_tokens` or `output hybrid -raw ssh_config` |
@@ -192,7 +193,7 @@ Releases are small: every usable feature gets its own tag.
   3. **$0 guardrails:** a budget alert on every provider and a cost summary after each plan.
   4. **Health alerts** for hosts and apps.
   5. **Backups** to R2 or B2, with restore.
-  6. **`freelunch doctor`:** credentials, billable leftovers, expiring trials.
+  6. **`freelunch doctor`, continued:** billable leftovers, expiring trials and free names.
 - **Later:** more menus (self-hosted PaaS, homelab, k3s, VPN, n8n, CI runners, game
   servers), moving a host to another cloud with its data, encrypted remote state, secrets
   managers, PaaS and GPU providers, and a linter that flags billable resources in any

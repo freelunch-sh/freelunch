@@ -43,58 +43,6 @@ case "$1 ${2:-}" in
 esac
 exit 0
 EOF
-# A registry for deploy's image check, at any host. A manifest without a token gets a 401
-# with a Bearer challenge; the token endpoint hands out tokens, for repositories in
-# FAKE_PRIVATE only with the password FAKE_PASSWORD (default ghp_test-token). An image is
-# an index of FAKE_PLATFORMS (default linux/amd64 linux/arm64), or one manifest for
-# FAKE_SINGLE_ARCH. Repositories in FAKE_MISSING don't exist, and FAKE_REGISTRY_DOWN fails
-# every request. Requests go to $FAKE_LOG.registry.
-cat > "$WORK/bin/curl" <<'EOF'
-#!/usr/bin/env bash
-headers="" out="" write="" auth="" basic="" url="" query=()
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -D) headers="$2"; shift ;;
-    -o) out="$2"; shift ;;
-    -w) write="$2"; shift ;;
-    -u) basic="$2"; shift ;;
-    -H) [[ "$2" != "Authorization: Bearer "* ]] || auth="${2#Authorization: Bearer }"; shift ;;
-    --data-urlencode) query+=("$2"); shift ;;
-    --max-time) shift ;;
-    -*) ;;
-    *) url="$1" ;;
-  esac
-  shift
-done
-echo "$url${basic:+ basic=$basic}${auth:+ bearer=$auth}${query[*]:+ ${query[*]}}" >> "$FAKE_LOG.registry"
-[[ -z "${FAKE_REGISTRY_DOWN:-}" ]] || exit 7
-host="${url#https://}"
-host="${host%%/*}"
-respond() { # respond <status> <body>
-  if [[ -n "$out" ]]; then printf '%s' "$2" > "$out"; else printf '%s' "$2"; fi
-  [[ -z "$write" ]] || printf '%s' "$1"
-}
-case "$url" in
-  */token)
-    repo="$(printf '%s\n' "${query[@]}" | sed -n 's/^scope=repository:\(.*\):pull$/\1/p')"
-    if [[ " ${FAKE_PRIVATE:-} " == *" $repo "* && "${basic#*:}" != "${FAKE_PASSWORD:-ghp_test-token}" ]]; then respond 200 '{"token":"anonymous"}'
-    else respond 200 "{\"token\":\"good-for-$repo\"}"; fi ;;
-  */v2/*)
-    repo="${url#*/v2/}"
-    repo="${repo%/manifests/*}"
-    repo="${repo%/blobs/*}"
-    if [[ "$auth" != "good-for-$repo" ]]; then
-      [[ -z "$headers" ]] || printf 'HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm="https://%s/token",service="%s",scope="repository:%s:pull"\r\n\r\n' "$host" "$host" "$repo" > "$headers"
-      respond 401 '{"errors":[{"code":"UNAUTHORIZED"}]}'
-    elif [[ " ${FAKE_MISSING:-} " == *" $repo "* ]]; then respond 404 '{"errors":[{"code":"MANIFEST_UNKNOWN"}]}'
-    elif [[ "$url" == */blobs/* ]]; then respond 200 "{\"os\":\"linux\",\"architecture\":\"$FAKE_SINGLE_ARCH\"}"
-    elif [[ -n "${FAKE_SINGLE_ARCH:-}" ]]; then respond 200 '{"schemaVersion":2,"config":{"digest":"sha256:config"}}'
-    else
-      # shellcheck disable=SC2086 # one argument per platform
-      respond 200 "$(jq -nc '{manifests: ([$ARGS.positional[] | split("/") | {platform: {os: .[0], architecture: .[1]}}] + [{platform: {os: "unknown", architecture: "unknown"}}])}' --args ${FAKE_PLATFORMS:-linux/amd64 linux/arm64})"
-    fi ;;
-esac
-EOF
 ssh-keygen -q -t ed25519 -N '' -C fake-host -f "$WORK/hostkey"
 printf '#!/bin/sh\nexit 0\n' > "$WORK/bin/cloud-init"
 # Records the arguments a stack run gets instead of running tofu/terraform. Like them, init
@@ -139,11 +87,28 @@ chmod +x "$WORK/bin/"*
 
 # For OCI runs: an OCI CLI whose session refresh works FAKE_SESSION_REFRESHES times
 # (always when unset, never at 0) and then finds the session expired, or fails with
-# FAKE_OCI_ERROR. And a sleep that only records how long it was asked to wait.
+# FAKE_OCI_ERROR. session validate fails at 0 too. region-subscription list signs in with
+# the API key unless FAKE_OCI_KEY_BAD, and the home region is FAKE_HOME_REGION
+# (eu-frankfurt-1, as in the example tfvars). And a sleep that only records how long it
+# was asked to wait.
 mkdir -p "$WORK/wait-bin"
 cat > "$WORK/wait-bin/oci" <<'EOF'
 #!/usr/bin/env bash
 echo "oci $*" >> "$FAKE_LOG"
+case "$1 ${2:-}" in
+  "--version "*)
+    echo "3.90.0"; exit 0 ;;
+  "session validate")
+    if [[ "${FAKE_SESSION_REFRESHES:-1000}" == "0" ]]; then echo "Session has expired" >&2; exit 1; fi
+    echo "Session is valid until 2026-10-24 10:00:00" >&2; exit 0 ;;
+  "iam region-subscription")
+    if [[ -n "${FAKE_OCI_KEY_BAD:-}" ]]; then
+      echo 'ServiceError: {"code": "NotAuthenticated", "message": "The required information to complete authentication was not provided or was incorrect."}' >&2
+      exit 1
+    fi
+    printf '{"data": [{"is-home-region": true, "region-name": "%s"}, {"is-home-region": false, "region-name": "us-ashburn-1"}]}\n' "${FAKE_HOME_REGION:-eu-frankfurt-1}"
+    exit 0 ;;
+esac
 n=$(( $(cat "$FAKE_LOG.refreshes" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$FAKE_LOG.refreshes"
 if [[ -n "${FAKE_OCI_ERROR:-}" ]]; then echo "$FAKE_OCI_ERROR" >&2; exit 1; fi
@@ -175,32 +140,51 @@ done
 echo "post $a [$type] $body" >> "$FAKE_LOG"
 EOF
 chmod +x "$WORK/wait-bin/"*
+mkdir -p "$WORK/doctor-bin" && ln -s "$WORK/wait-bin/oci" "$WORK/doctor-bin/oci"
 
-# A fake internet for `freelunch domain`. Cloudflare's DNS-over-HTTPS resolver: names in
-# FAKE_TAKEN exist (example.com always does), names in FAKE_BROKEN fail to resolve, names in
-# FAKE_DELEGATED have Cloudflare's nameservers, and the rest don't exist. FAKE_OFFLINE fails
-# every lookup like a dropped connection. IANA's RDAP list has .app and .dev, whose RDAP
-# server knows the names in FAKE_REGISTERED. The Cloudflare API has the accounts in
-# FAKE_ACCOUNTS ("id:name ...", default acc1:Me) and the zones in FAKE_ZONES ("name:status
-# ..."), and refuses new zones with FAKE_ZONE_REFUSED.
+# The fake internet (below) for `freelunch domain`.
 mkdir -p "$WORK/doh-bin"
-cat > "$WORK/doh-bin/curl" <<'EOF'
+# A fake internet: one curl for every service the CLI talks to, picked by URL.
+# - Cloudflare's DNS-over-HTTPS resolver: names in FAKE_TAKEN exist (example.com always
+#   does), names in FAKE_BROKEN fail to resolve, names in FAKE_DELEGATED have Cloudflare's
+#   nameservers, and the rest don't exist. FAKE_OFFLINE fails every lookup.
+# - RDAP: IANA's list has .app and .dev, whose server knows the names in FAKE_REGISTERED.
+# - The Cloudflare API: the accounts in FAKE_ACCOUNTS ("id:name ...", default acc1:Me), the
+#   zones in FAKE_ZONES ("name:status ..."), new zones refused with FAKE_ZONE_REFUSED, a token
+#   that is invalid with FAKE_TOKEN_INVALID, and no access to the parts named in FAKE_DENY
+#   (dns, tunnel, access, service_tokens).
+# - A container registry at any other host, for deploy's image check. A manifest without a
+#   token gets a 401 with a Bearer challenge; the token endpoint hands out tokens, for
+#   repositories in FAKE_PRIVATE only with the password FAKE_PASSWORD (default
+#   ghp_test-token). An image is an index of FAKE_PLATFORMS (default linux/amd64
+#   linux/arm64), or one manifest for FAKE_SINGLE_ARCH. Repositories in FAKE_MISSING don't
+#   exist, and FAKE_REGISTRY_DOWN fails every request. These go to $FAKE_LOG.registry.
+cat > "$WORK/bin/curl" <<'EOF'
 #!/usr/bin/env bash
-method=GET data="" write="" token=""
+method=GET data="" headers="" out="" write="" auth="" basic="" url="" query=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -X)      method="$2"; shift ;;
     --data)  data="$2"; shift ;;
+    -D)      headers="$2"; shift ;;
+    -o)      out="$2"; shift ;;
     -w)      write="$2"; shift ;;
-    -H)      [[ "$2" != "Authorization: Bearer "* ]] || token="${2#Authorization: Bearer }"; shift ;;
-    -o|--max-time) shift ;;
+    -u)      basic="$2"; shift ;;
+    -H)      [[ "$2" != "Authorization: Bearer "* ]] || auth="${2#Authorization: Bearer }"; shift ;;
+    --data-urlencode) query+=("$2"); shift ;;
+    --max-time) shift ;;
     -*)      ;;
     *)       url="$1" ;;
   esac
   shift
 done
+respond() { # respond <status> <body>
+  if [[ -n "$out" ]]; then printf '%s' "$2" > "$out"; else printf '%s\n' "$2"; fi
+  [[ -z "$write" ]] || printf '%s' "$1"
+}
 zone_status() { local z; for z in ${FAKE_ZONES:-}; do [[ "${z%%:*}" != "$1" ]] || { echo "${z#*:}"; return; }; done; }
-zone() { jq -nc --arg n "$1" --arg s "$2" '{id: ("zone-" + $n), name: $n, status: $s, name_servers: ["bob.ns.cloudflare.com", "ada.ns.cloudflare.com"]}'; }
+zone() { jq -nc --arg n "$1" --arg s "$2" '{id: ("zone-" + $n), name: $n, status: $s, account: {id: "acc1"}, name_servers: ["bob.ns.cloudflare.com", "ada.ns.cloudflare.com"]}'; }
+allowed() { [[ " ${FAKE_DENY:-} " != *" $1 "* ]] && echo '{"success":true,"result":[]}' || echo '{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}'; }
 case "$url" in
   https://cloudflare-dns.com/*)
     name="${url#*\?name=}"
@@ -221,9 +205,12 @@ case "$url" in
     [[ -z "$write" ]] || printf '%s' "$code" ;;
   https://api.cloudflare.com/client/v4/*)
     path="${url#https://api.cloudflare.com/client/v4}"
-    echo "api $method $path token=$token${data:+ $data}" >> "$FAKE_LOG"
+    echo "api $method $path token=$auth${data:+ $data}" >> "$FAKE_LOG"
     case "$method $path" in
-      "GET /accounts"*)
+      "GET /user/tokens/verify")
+        if [[ -n "${FAKE_TOKEN_INVALID:-}" ]]; then echo '{"success":false,"errors":[{"code":1000,"message":"Invalid API Token"}]}'
+        else echo '{"success":true,"result":{"id":"tok1","status":"active"}}'; fi ;;
+      "GET /accounts?"*)
         jq -nc '{success: true, result: [$ARGS.positional[] | split(":") | {id: .[0], name: .[1]}]}' --args ${FAKE_ACCOUNTS:-acc1:Me} ;;
       "POST /zones")
         name="$(jq -r .name <<< "$data")"
@@ -239,12 +226,41 @@ case "$url" in
         status="$(zone_status "$name")"
         if [[ -n "$status" ]]; then jq -nc --argjson z "$(zone "$name" "$status")" '{success: true, result: [$z]}'
         else echo '{"success":true,"result":[]}'; fi ;;
+      "GET /zones/"*/dns_records*) allowed dns ;;
+      "GET /accounts/"*/cfd_tunnel*) allowed tunnel ;;
+      "GET /accounts/"*/access/apps*) allowed access ;;
+      "GET /accounts/"*/access/service_tokens*) allowed service_tokens ;;
       "PUT /zones/"*/activation_check) echo '{"success":true,"result":{}}' ;;
       *) echo '{"success":false,"errors":[{"code":7003,"message":"No route for that URI"}]}' ;;
     esac ;;
+  */token)
+    echo "$url${basic:+ basic=$basic}${query[*]:+ ${query[*]}}" >> "$FAKE_LOG.registry"
+    [[ -z "${FAKE_REGISTRY_DOWN:-}" ]] || exit 7
+    repo="$(printf '%s\n' "${query[@]}" | sed -n 's/^scope=repository:\(.*\):pull$/\1/p')"
+    if [[ " ${FAKE_PRIVATE:-} " == *" $repo "* && "${basic#*:}" != "${FAKE_PASSWORD:-ghp_test-token}" ]]; then respond 200 '{"token":"anonymous"}'
+    else respond 200 "{\"token\":\"good-for-$repo\"}"; fi ;;
+  */v2/*)
+    echo "$url${auth:+ bearer=$auth}" >> "$FAKE_LOG.registry"
+    [[ -z "${FAKE_REGISTRY_DOWN:-}" ]] || exit 7
+    host="${url#https://}"
+    host="${host%%/*}"
+    repo="${url#*/v2/}"
+    repo="${repo%/manifests/*}"
+    repo="${repo%/blobs/*}"
+    if [[ "$auth" != "good-for-$repo" ]]; then
+      [[ -z "$headers" ]] || printf 'HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm="https://%s/token",service="%s",scope="repository:%s:pull"\r\n\r\n' "$host" "$host" "$repo" > "$headers"
+      respond 401 '{"errors":[{"code":"UNAUTHORIZED"}]}'
+    elif [[ " ${FAKE_MISSING:-} " == *" $repo "* ]]; then respond 404 '{"errors":[{"code":"MANIFEST_UNKNOWN"}]}'
+    elif [[ "$url" == */blobs/* ]]; then respond 200 "{\"os\":\"linux\",\"architecture\":\"$FAKE_SINGLE_ARCH\"}"
+    elif [[ -n "${FAKE_SINGLE_ARCH:-}" ]]; then respond 200 '{"schemaVersion":2,"config":{"digest":"sha256:config"}}'
+    else
+      # shellcheck disable=SC2086 # one argument per platform
+      respond 200 "$(jq -nc '{manifests: ([$ARGS.positional[] | split("/") | {platform: {os: .[0], architecture: .[1]}}] + [{platform: {os: "unknown", architecture: "unknown"}}])}' --args ${FAKE_PLATFORMS:-linux/amd64 linux/arm64})"
+    fi ;;
 esac
 EOF
-chmod +x "$WORK/doh-bin/curl"
+chmod +x "$WORK/bin/curl"
+cp "$WORK/bin/curl" "$WORK/doh-bin/curl"
 
 # Helpers -------------------------------------------------------------------------------
 
@@ -282,6 +298,26 @@ scratch_checkout() { # scratch_checkout <dir> <stack...>
 deploy_in() {
   local dir="$1"; shift
   (cd "$dir" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" "$CLI" deploy "$@")
+}
+
+# doctor_project <dir>: a project with every stack configured for doctor, a home folder of
+# its own with an SSH key that ssh_public_keys has and an OCI API key profile
+doctor_project() {
+  new_project "$1"
+  mkdir -p "$1/home/.ssh" "$1/home/.oci"
+  ssh-keygen -q -t ed25519 -N '' -C me@laptop -f "$1/home/.ssh/id_ed25519"
+  sed "s|\"ssh-ed25519 AAAA... you@laptop\"|\"$(cat "$1/home/.ssh/id_ed25519.pub")\"|" "$ROOT/providers/oci/stack/project.tfvars.example" > "$1/.freelunch/oci/terraform.tfvars"
+  printf '[DEFAULT]\nuser=ocid1.user.oc1..me\nfingerprint=aa:bb\nkey_file=~/.oci/key.pem\ntenancy=ocid1.tenancy.oc1..me\nregion=eu-frankfurt-1\n' > "$1/home/.oci/config"
+  touch "$1/home/.oci/key.pem"
+  printf 'zone   = "example.com"\nroutes = { "api.example.com" = { host = "oci-main", port = 8080 } }\n' > "$1/.freelunch/cloudflare/terraform.tfvars"
+}
+
+# doctor_in <dir> [args]: run doctor there with the fakes, its own home folder, no ssh-agent,
+# and only the credentials the test gives: TEST_CF_TOKEN, TEST_SSH_KEY and GHCR_TOKEN
+doctor_in() {
+  local dir="$1"; shift
+  (cd "$dir" && HOME="$dir/home" SSH_AUTH_SOCK="" PATH="${TEST_PATH:-$WORK/doctor-bin:$WORK/bin:$PATH}" FAKE_LOG="$dir/fake.log" \
+    CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN:-}" FREELUNCH_SSH_KEY="${TEST_SSH_KEY:-}" GHCR_TOKEN="${GHCR_TOKEN:-}" "$CLI" doctor "$@")
 }
 
 # suggest_in <dir> [names...]: run domain suggest against the fake internet
@@ -1063,6 +1099,91 @@ test_deploy_rejects_unknown_hosts_and_missing_secrets() {
   sed -i.bak 's/oci-main/oci-mian/' "$p/.freelunch/apps.tfvars"
   if out="$(GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
   contains "$out" "not in the inventory"
+}
+
+# doctor checks what plan, apply and deploy will need, before they spend time on it.
+test_doctor_finds_nothing_wrong_with_a_good_project() {
+  local p="$WORK/doctor-good" out
+  doctor_project "$p"
+  out="$(GHCR_TOKEN=x TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" doctor_in "$p" 2>&1)"
+  contains "$out" "  ok    OCI CLI 3.90.0"
+  contains "$out" "  ok    profile DEFAULT signs in with its API key"
+  contains "$out" "  ok    region eu-frankfurt-1 is the tenancy's home region"
+  contains "$out" "  ok    the key deploy uses (ssh-agent or ~/.ssh) is in ssh_public_keys"
+  contains "$out" "  ok    \$GHCR_TOKEN is set (registries in apps.tfvars)"
+  contains "$out" "  ok    ghcr.io/me/api:1.0.0 has a linux/arm64 build for oci-main"
+  contains "$out" "  ok    CLOUDFLARE_API_TOKEN is active"
+  contains "$out" "  ok    the zone example.com is active"
+  contains "$out" "  ok    the token reaches the zone's DNS records"
+  contains "$out" "  ok    the token reaches the account's tunnels"
+  lacks "$out" "  fail"
+  # The host exists already, so the key that counts is on it.
+  contains "$out" "  warn  keys only reach a host when it is created"
+  contains "$out" "No problems found, 1 warning(s)."
+  grep -qx 'api GET /user/tokens/verify token=cf-token' "$p/fake.log"
+  grep -q '^oci iam region-subscription list --tenancy-id ocid1.tenancy.oc1..aaaaaaaa... --profile DEFAULT$' "$p/fake.log"
+}
+
+test_doctor_reports_every_problem() {
+  local p="$WORK/doctor-bad" out
+  doctor_project "$p"
+  ssh-keygen -q -t ed25519 -N '' -C other -f "$p/other-key"
+  printf '  "internal.example.com" = { host = "oci-main", port = 8081, access = { service_tokens = ["backend"] } }\n' > "$p/routes"
+  sed -i.bak 's/^routes = .*/routes = {/' "$p/.freelunch/cloudflare/terraform.tfvars"
+  cat "$p/routes" >> "$p/.freelunch/cloudflare/terraform.tfvars" && echo "}" >> "$p/.freelunch/cloudflare/terraform.tfvars"
+  if out="$(TEST_SSH_KEY="$p/other-key" FAKE_HOME_REGION=uk-london-1 FAKE_PLATFORMS=linux/amd64 TEST_CF_TOKEN=cf-token \
+    FAKE_ZONES="example.com:pending" FAKE_DENY="tunnel service_tokens" doctor_in "$p" 2>&1)"; then echo "doctor should have failed"; return 1; fi
+  contains "$out" "  fail  region is eu-frankfurt-1, but the tenancy's home region is uk-london-1"
+  contains "$out" "  fail  none of ssh_public_keys in .freelunch/oci/terraform.tfvars is the key deploy uses (FREELUNCH_SSH_KEY ($p/other-key))"
+  contains "$out" "  fail  \$GHCR_TOKEN is not set (registries in apps.tfvars)"
+  contains "$out" "  fail  ghcr.io/me/api:1.0.0 is built for linux/amd64 only, but oci-main is linux/arm64"
+  contains "$out" "  fail  the zone example.com is pending: freelunch domain status example.com shows what is left"
+  contains "$out" "  fail  the token can't reach the account's tunnels: give it Account > Cloudflare Tunnel > Edit"
+  contains "$out" "  fail  routes use service_tokens, but the token can't reach them"
+  contains "$out" "7 problem(s), 1 warning(s)."
+  # A key OCI turns down, a token Cloudflare turns down, a zone the token can't see.
+  out="$(FAKE_OCI_KEY_BAD=1 TEST_CF_TOKEN=bad FAKE_TOKEN_INVALID=1 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  fail  profile DEFAULT can't sign in to OCI: "
+  contains "$out" "NotAuthenticated"
+  contains "$out" "  fail  Cloudflare doesn't take CLOUDFLARE_API_TOKEN: Invalid API Token (1000)"
+  out="$(TEST_CF_TOKEN=cf-token doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  fail  the token can't see the zone example.com: add it to Cloudflare (freelunch domain add example.com)"
+  out="$(doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  fail  CLOUDFLARE_API_TOKEN is not set"
+  # A stack with only its example.
+  rm "$p/.freelunch/cloudflare/terraform.tfvars"
+  out="$(doctor_in "$p" 2>&1 || true)"
+  contains "$out" "$(printf 'Config\n  warn  cloudflare has no terraform.tfvars yet: copy .freelunch/cloudflare/terraform.tfvars.example and fill it in')"
+  lacks "$out" "Cloudflare ("
+}
+
+test_doctor_checks_oci_sessions_and_works_without_the_oci_cli() {
+  local p="$WORK/doctor-oci" out
+  doctor_project "$p"
+  session_profile "$p" tradio
+  printf '[tradio]\nsecurity_token_file=~/.oci/sessions/tradio/token\nkey_file=~/.oci/sessions/tradio/key.pem\n' >> "$p/home/.oci/config"
+  out="$(doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  ok    the session of profile tradio is valid until 2026-10-24 10:00:00"
+  grep -q '^oci iam region-subscription list .*--profile tradio --auth security_token$' "$p/fake.log"
+  out="$(FAKE_SESSION_REFRESHES=0 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  fail  the session of profile tradio has expired: oci session authenticate --profile-name tradio"
+  # Without the OCI CLI: the token's expiry, and a warning.
+  mkdir -p "$p/home/.oci/sessions/tradio"
+  fake_token $(( $(date +%s) - 60 )) > "$p/home/.oci/sessions/tradio/token"
+  out="$(TEST_PATH="$WORK/bin:$(path_without_oci)" doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  warn  no OCI CLI"
+  contains "$out" "  fail  the session of profile tradio has expired"
+  # An API key without the CLI: its key file has to be there.
+  sed -i.bak '/^oci_auth/d; /^oci_config_profile/d' "$p/.freelunch/oci/terraform.tfvars"
+  out="$(TEST_PATH="$WORK/bin:$(path_without_oci)" doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  ok    profile DEFAULT has its API key (not asked at OCI: no OCI CLI)"
+  rm "$p/home/.oci/key.pem"
+  out="$(TEST_PATH="$WORK/bin:$(path_without_oci)" doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  fail  the key_file of profile DEFAULT is missing: ~/.oci/key.pem"
+  # A profile that isn't there at all.
+  rm "$p/home/.oci/config"
+  out="$(doctor_in "$p" 2>&1 || true)"
+  contains "$out" "has no profile DEFAULT; oci setup bootstrap --profile-name DEFAULT creates one"
 }
 
 test_output_reads_a_stack_from_the_project() {
