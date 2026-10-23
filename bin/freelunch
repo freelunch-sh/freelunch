@@ -61,6 +61,8 @@ Infrastructure:
                           the background, logging to .freelunch/<stack>/wait.log
   destroy <p...|all>      Destroy provider stacks in reverse layer order, then refresh hybrid
   status                  How each capacity wait is going: attempts, the last result, the next try
+  doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in, SSH
+                          keys, images and their registry logins, the Cloudflare token and zone
   hybrid                  Re-aggregate deployed host stacks into the hybrid inventory
   inventory               Write inventory.json (all hosts across providers)
   output <stack> [args]   Print a stack's outputs from its state, e.g. output cloudflare -json
@@ -1120,33 +1122,51 @@ image_platforms() {
   fi
 }
 
-# check_images <hosts...>: before anything reaches a host, each of its apps' images has to
-# exist for the host's architecture, and be readable with the registry logins in apps.tfvars
-check_images() {
-  local host arch compose image server user var platforms why
-  command -v curl >/dev/null || { log "no curl here, so the images are not checked before deploying"; return 0; }
+# image_verdict <image> <host> <arch>: "ok <platforms>", "unknown", or "bad <why>", asked
+# with the registry login from apps.tfvars (registries.json of the deploy plan)
+image_verdict() {
+  local image="$1" host="$2" arch="$3" server user var platforms
+  server="$(image_parts "$image" | cut -f1)"
+  user="$(jq -r --arg s "$server" '.[$s].username // empty' "$TMP/registries.json")"
+  var="$(jq -r --arg s "$server" '.[$s].password_env // empty' "$TMP/registries.json")"
+  if [[ -n "$user" ]]; then platforms="$(image_platforms "$image" "$user" "${!var:-}")"; else platforms="$(image_platforms "$image")"; fi
+  case "$platforms" in
+    denied)
+      if [[ -n "$user" ]]; then echo "bad the registry won't show $image to $user: check the tag, and that \$$var can read it"
+      else echo "bad the registry won't show $image: it doesn't exist, or it is private and needs a login under registries in apps.tfvars"; fi ;;
+    missing) echo "bad $image doesn't exist: the registry has no such tag" ;;
+    unknown) echo "unknown" ;;
+    *)
+      if [[ " $platforms " == *" linux/$arch "* ]]; then echo "ok $platforms"
+      else echo "bad $image is built for $platforms only, but $host is linux/$arch. Build it for linux/$arch too (docker buildx build --platform linux/$arch, or the workflow from freelunch init --image-workflow)"; fi ;;
+  esac
+}
+
+# each_image <hosts...>: host, architecture and image of every app on those hosts, from the
+# deploy plan. Hosts outside the inventory have no known architecture and are left out.
+each_image() {
+  local host arch compose image
   for host in "$@"; do
     arch="$(jq -r --arg h "$host" '.[$h].arch // empty' "$TMP/targets.json")"
     [[ -n "$arch" ]] || continue
     while IFS= read -r compose; do
-      for image in $(compose_images "$compose"); do
-        server="$(image_parts "$image" | cut -f1)"
-        user="$(jq -r --arg s "$server" '.[$s].username // empty' "$TMP/registries.json")"
-        var="$(jq -r --arg s "$server" '.[$s].password_env // empty' "$TMP/registries.json")"
-        if [[ -n "$user" ]]; then platforms="$(image_platforms "$image" "$user" "${!var:-}")"; else platforms="$(image_platforms "$image")"; fi
-        case "$platforms" in
-          denied)
-            if [[ -n "$user" ]]; then why="to $user: check the tag, and that \$$var can read it"
-            else why=": it doesn't exist, or it is private and needs a login under registries in apps.tfvars"; fi
-            die "deploy: the registry won't show $image $why" ;;
-          missing) die "deploy: $image doesn't exist: the registry has no such tag" ;;
-          unknown) log "$host: couldn't ask the registry about $image; the host pulls it as usual" ;;
-          *)       [[ " $platforms " == *" linux/$arch "* ]] \
-                     || die "deploy: $image is built for $platforms only, but $host is linux/$arch. Build it for linux/$arch too (docker buildx build --platform linux/$arch, or the workflow from freelunch init --image-workflow)" ;;
-        esac
-      done
+      for image in $(compose_images "$compose"); do printf '%s\t%s\t%s\n' "$host" "$arch" "$image"; done
     done < <(jq -r --arg h "$host" '.[$h].apps[].compose' "$TMP/targets.json")
   done
+}
+
+# check_images <hosts...>: before anything reaches a host, each of its apps' images has to
+# exist for the host's architecture, and be readable with the registry logins in apps.tfvars
+check_images() {
+  local host arch image verdict
+  command -v curl >/dev/null || { log "no curl here, so the images are not checked before deploying"; return 0; }
+  while IFS=$'\t' read -r host arch image; do
+    verdict="$(image_verdict "$image" "$host" "$arch")"
+    case "$verdict" in
+      bad\ *)  die "deploy: ${verdict#bad }" ;;
+      unknown) log "$host: couldn't ask the registry about $image; the host pulls it as usual" ;;
+    esac
+  done < <(each_image "$@")
 }
 
 # --- deploy ---------------------------------------------------------------------------
@@ -1163,10 +1183,10 @@ deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
   if [[ -f "$apps_file" ]]; then args+=(-var-file="$apps_file"); fi
   if [[ -n "$tunnel_state" ]]; then args+=(-var "tunnel_state_path=$tunnel_state"); fi
   check_checkout_tfvars "$ROOT/deploy"
-  TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" init -input=false >/dev/null
-  TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" apply -input=false -auto-approve "${args[@]}" >/dev/null
+  TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" init -input=false >/dev/null || return 1
+  TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" apply -input=false -auto-approve "${args[@]}" >/dev/null || return 1
   for o in targets registries tunnel_tokens; do
-    TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" output -state="$TMP/deploy.tfstate" -json "$o" > "$TMP/$o.json"
+    TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" output -state="$TMP/deploy.tfstate" -json "$o" > "$TMP/$o.json" || return 1
   done
 }
 
@@ -1577,6 +1597,221 @@ cmd_domain() {
   "domain_$sub" "$1"
 }
 
+# --- doctor ---------------------------------------------------------------------------
+
+# Everything a project needs before plan, apply or deploy spend time on it: tools, cloud
+# sign-ins, SSH keys, images and the Cloudflare token and zone. Each check prints ok, warn
+# or fail. It only reads, at the providers too, and exits 1 when a check failed.
+FAILS=0 WARNS=0
+
+check() { # check <ok|warn|fail> <what>
+  case "$1" in
+    fail) FAILS=$((FAILS + 1)) ;;
+    warn) WARNS=$((WARNS + 1)) ;;
+  esac
+  printf '  %-5s %s\n' "$1" "$2"
+}
+
+doctor_tools() {
+  local t
+  echo "Tools"
+  if [[ -n "$TF" ]]; then check ok "$("$TF" version | head -1)"; else check fail "neither tofu nor terraform is installed (or use the runner image)"; fi
+  for t in jq curl; do
+    if command -v "$t" >/dev/null; then check ok "$t"; else check fail "$t is not installed"; fi
+  done
+  if command -v "$SSH" >/dev/null; then check ok "ssh"; else check fail "$SSH is not installed; deploy needs it"; fi
+  if command -v oci >/dev/null; then check ok "OCI CLI $(oci --version 2>/dev/null)"
+  elif is_configured oci; then check warn "no OCI CLI: it refreshes session tokens, and --wait-for-capacity with a session token needs it"; fi
+}
+
+doctor_oci() {
+  local tfvars profile session tenancy region out home key login=()
+  tfvars="$(config_dir oci)/terraform.tfvars"
+  profile="$(tfvar "$tfvars" oci_config_profile)"
+  profile="${profile:-${TF_VAR_oci_config_profile:-DEFAULT}}"
+  session="$(oci_session_profile "$tfvars")"
+  tenancy="$(tfvar "$tfvars" tenancy_ocid)"
+  region="$(tfvar "$tfvars" region)"
+  echo "OCI ($(rel "$tfvars"))"
+  if ! grep -qsx "\[$profile\]" "$HOME/.oci/config"; then
+    check fail "$HOME/.oci/config has no profile $profile; oci setup bootstrap --profile-name $profile creates one"
+    return 0
+  fi
+  if ! command -v oci >/dev/null; then
+    # Without the CLI, only what the provider will read can be checked.
+    if [[ -n "$session" ]]; then
+      key="$(oci_token_expiry "$profile")"
+      if [[ "$key" =~ ^[0-9]+$ && $key -le $(date +%s) ]]; then check fail "the session of profile $profile has expired: oci session authenticate --profile-name $profile"
+      elif [[ "$key" =~ ^[0-9]+$ ]]; then check ok "the session of profile $profile is valid until $(fmt_time "$key") (not asked at OCI: no OCI CLI)"
+      else check warn "can't read the session token of profile $profile"; fi
+    else
+      key="$(awk -v p="[$profile]" '$0 == p { s = 1; next } /^\[/ { s = 0 } s && /^key_file[ \t]*=/ { sub(/^[^=]*=[ \t]*/, ""); print; exit }' "$HOME/.oci/config")"
+      if [[ -f "${key/#\~/$HOME}" ]]; then check ok "profile $profile has its API key (not asked at OCI: no OCI CLI)"
+      else check fail "the key_file of profile $profile is missing: ${key:-none set}"; fi
+    fi
+    return 0
+  fi
+  if [[ -n "$session" ]]; then
+    if out="$(oci session validate --profile "$profile" 2>&1)"; then
+      check ok "the session of profile $profile is valid until ${out##*valid until } (refreshed before each run, for 24 hours after signing in)"
+    else
+      check fail "the session of profile $profile has expired: oci session authenticate --profile-name $profile (an API key doesn't expire: oci setup bootstrap)"
+      return 0
+    fi
+    login=(--auth security_token)
+  fi
+  if out="$(oci iam region-subscription list ${tenancy:+--tenancy-id "$tenancy"} --profile "$profile" ${login[@]+"${login[@]}"} 2>&1)"; then
+    [[ -n "$session" ]] || check ok "profile $profile signs in with its API key"
+    home="$(jq -r '.data[]? | select(."is-home-region") | ."region-name"' <<< "$out" 2>/dev/null)"
+    if [[ -n "$home" && -n "$region" ]]; then
+      if [[ "$home" == "$region" ]]; then check ok "region $region is the tenancy's home region"
+      else check fail "region is $region, but the tenancy's home region is $home, and Always Free resources only exist there"; fi
+    fi
+  else
+    check fail "profile $profile can't sign in to OCI: $(grep -m1 -E 'message|Error|error' <<< "$out" | sed 's/^[[:space:]]*//')"
+  fi
+}
+
+# public_keys <file>: the SSH public keys in a file, as "type base64", without comments
+public_keys() {
+  grep -v '^[[:space:]]*#' "$1" 2>/dev/null | grep -oE '(ssh|ecdsa|sk)-[a-z0-9@.-]+ [A-Za-z0-9+/]+=*' | sort -u || true
+}
+
+# The keys deploy can sign in with: FREELUNCH_SSH_KEY, or else the agent's and ssh's default
+# keys. Their public halves come from the .pub file next to them.
+deploy_keys() {
+  local key f
+  if [[ -n "${FREELUNCH_SSH_KEY:-}" ]]; then
+    key="${FREELUNCH_SSH_KEY/#\~/$HOME}"
+    if [[ -f "$key.pub" ]]; then public_keys "$key.pub"; else ssh-keygen -y -P '' -f "$key" 2>/dev/null | public_keys /dev/stdin; fi
+    return 0
+  fi
+  { ssh-add -L 2>/dev/null || true
+    for f in "$HOME"/.ssh/id_ed25519.pub "$HOME"/.ssh/id_ecdsa.pub "$HOME"/.ssh/id_rsa.pub; do [[ ! -f "$f" ]] || cat "$f"; done
+  } | public_keys /dev/stdin
+}
+
+doctor_ssh() {
+  local p tfvars mine theirs which
+  mine="$(deploy_keys)"
+  which="${FREELUNCH_SSH_KEY:+FREELUNCH_SSH_KEY ($FREELUNCH_SSH_KEY)}"
+  for p in $(all_providers); do
+    if [[ "$(meta "$p" layer)" != "host" || ! -d "$(stack_dir "$p")" ]] || ! is_configured "$p"; then continue; fi
+    tfvars="$(config_dir "$p")/terraform.tfvars"
+    echo "SSH to $p hosts"
+    theirs="$(public_keys "$tfvars")"
+    if [[ -z "$theirs" ]]; then check fail "ssh_public_keys in $(rel "$tfvars") has no key"; continue; fi
+    if [[ -z "$mine" ]]; then
+      check fail "deploy has no key to sign in with: ${which:-no ssh-agent key and no ~/.ssh/id_* key}${which:+ has no readable public key (put it next to it as .pub)}"
+    elif grep -qxF -f <(printf '%s\n' "$mine") <<< "$theirs"; then
+      check ok "the key deploy uses (${which:-ssh-agent or ~/.ssh}) is in ssh_public_keys"
+    else
+      check fail "none of ssh_public_keys in $(rel "$tfvars") is the key deploy uses (${which:-ssh-agent or ~/.ssh}). Add its .pub, or set FREELUNCH_SSH_KEY"
+    fi
+    [[ ! -s "$(config_dir "$p")/terraform.tfstate" ]] || check warn "keys only reach a host when it is created; for one that exists, what is in its authorized_keys counts"
+  done
+}
+
+doctor_images() {
+  local apps_file tunnel_state="" var host arch image verdict hosts=()
+  apps_file="$(state_root)/apps.tfvars"
+  [[ -f "$apps_file" && -n "$TF" ]] || return 0
+  echo "Images ($(rel "$apps_file"))"
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if ! { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1; then
+    check warn "apps.tfvars doesn't resolve against the inventory yet, so the images wait (apply the hosts first; freelunch deploy --dry-run says why)"
+    return 0
+  fi
+  for var in $(jq -r '.[].password_env' "$TMP/registries.json"); do
+    if [[ -n "${!var:-}" ]]; then check ok "\$$var is set (registries in apps.tfvars)"; else check fail "\$$var is not set (registries in apps.tfvars): export it or put it in $(rel "$(state_root)")/.env"; fi
+  done
+  while IFS= read -r host; do hosts+=("$host"); done < <(jq -r 'keys[]' "$TMP/targets.json")
+  while IFS=$'\t' read -r host arch image; do
+    verdict="$(image_verdict "$image" "$host" "$arch")"
+    case "$verdict" in
+      ok\ *)   check ok "$image has a linux/$arch build for $host" ;;
+      unknown) check warn "couldn't ask the registry about $image" ;;
+      *)       check fail "${verdict#bad }" ;;
+    esac
+  done < <(each_image ${hosts[@]+"${hosts[@]}"})
+}
+
+# cf_get <path>: GET from the Cloudflare API, or nothing when it can't be reached
+cf_get() {
+  curl -s --max-time 30 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$CF_API$1" || true
+}
+
+cf_ok() { [[ "$(jq -r '.success' <<< "$1" 2>/dev/null)" == "true" ]]; }
+
+doctor_cloudflare() {
+  local tfvars zone out zone_id account status
+  is_configured cloudflare || return 0
+  tfvars="$(config_dir cloudflare)/terraform.tfvars"
+  zone="$(tfvar "$tfvars" zone)"
+  echo "Cloudflare ($(rel "$tfvars"))"
+  if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then check fail "CLOUDFLARE_API_TOKEN is not set: export it or put it in $(rel "$(state_root)")/.env"; return 0; fi
+  out="$(cf_get /user/tokens/verify)"
+  if cf_ok "$out" && [[ "$(jq -r '.result.status' <<< "$out")" == "active" ]]; then
+    check ok "CLOUDFLARE_API_TOKEN is active$(jq -r 'if .result.expires_on then ", until \(.result.expires_on)" else "" end' <<< "$out")"
+  else
+    check fail "Cloudflare doesn't take CLOUDFLARE_API_TOKEN: $(cf_errors "$out")"
+    return 0
+  fi
+  [[ -n "$zone" ]] || { check fail "zone is not set in $(rel "$tfvars")"; return 0; }
+  out="$(cf_get "/zones?name=$zone")"
+  if ! cf_ok "$out" || [[ "$(jq -r '.result | length' <<< "$out")" != "1" ]]; then
+    check fail "the token can't see the zone $zone: add it to Cloudflare (freelunch domain add $zone), or to the token's zone resources"
+    return 0
+  fi
+  zone_id="$(jq -r '.result[0].id' <<< "$out")"
+  account="$(tfvar "$tfvars" account_id)"
+  account="${account:-$(jq -r '.result[0].account.id' <<< "$out")}"
+  status="$(jq -r '.result[0].status' <<< "$out")"
+  if [[ "$status" == "active" ]]; then check ok "the zone $zone is active"
+  else check fail "the zone $zone is $status: freelunch domain status $zone shows what is left"; fi
+  # Edit can't be tried without changing something, but a token without a permission can't
+  # read either.
+  if cf_ok "$(cf_get "/zones/$zone_id/dns_records?per_page=1")"; then check ok "the token reaches the zone's DNS records (it needs Zone > DNS > Edit)"
+  else check fail "the token can't reach the DNS records of $zone: give it Zone > DNS > Edit"; fi
+  if cf_ok "$(cf_get "/accounts/$account/cfd_tunnel?per_page=1")"; then check ok "the token reaches the account's tunnels (it needs Account > Cloudflare Tunnel > Edit)"
+  else check fail "the token can't reach the account's tunnels: give it Account > Cloudflare Tunnel > Edit"; fi
+  if grep -qs '^[^#]*access *=' "$tfvars"; then
+    if cf_ok "$(cf_get "/accounts/$account/access/apps?per_page=1")"; then check ok "the token reaches Access apps (routes with access need Account > Access: Apps and Policies > Edit)"
+    else check fail "routes use access, but the token can't reach Access apps: give it Account > Access: Apps and Policies > Edit"; fi
+  fi
+  if grep -qs '^[^#]*service_tokens *=' "$tfvars"; then
+    if cf_ok "$(cf_get "/accounts/$account/access/service_tokens?per_page=1")"; then check ok "the token reaches Access service tokens"
+    else check fail "routes use service_tokens, but the token can't reach them: give it Account > Access: Service Tokens > Edit"; fi
+  fi
+}
+
+# doctor_config: stacks in the project that have their example but no tfvars yet
+doctor_config() {
+  local d header=0
+  [[ -n "$PROJECT" ]] || return 0
+  for d in "$PROJECT"/*/; do
+    [[ -f "$d/terraform.tfvars.example" && ! -f "$d/terraform.tfvars" ]] || continue
+    [[ $header -eq 1 ]] || { echo "Config"; header=1; }
+    check warn "$(basename "$d") has no terraform.tfvars yet: copy $(rel "$d")terraform.tfvars.example and fill it in"
+  done
+}
+
+cmd_doctor() {
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  echo "freelunch doctor${PROJECT:+ ($(rel "$PROJECT"))}"
+  echo
+  doctor_tools
+  doctor_config
+  if [[ -d "$(stack_dir oci)" ]] && is_configured oci; then doctor_oci; fi
+  doctor_ssh
+  doctor_images
+  doctor_cloudflare
+  local warns=""
+  [[ $WARNS -eq 0 ]] || warns=", $WARNS warning(s)"
+  echo
+  if [[ $FAILS -eq 0 ]]; then echo "No problems found$warns."; else echo "$FAILS problem(s)$warns."; return 1; fi
+}
+
 # --- development ----------------------------------------------------------------------
 
 cmd_catalog() {
@@ -1655,6 +1890,7 @@ main() {
     list)                 cmd_list ;;
     plan|apply|destroy)   cmd_lifecycle "$cmd" "$@" ;;
     status)               cmd_status ;;
+    doctor)               cmd_doctor ;;
     hybrid)               cmd_hybrid ;;
     inventory)            cmd_inventory ;;
     output)               cmd_output "$@" ;;

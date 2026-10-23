@@ -26,6 +26,13 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
   Before it connects, it asks each registry which platforms the images have, with the
   logins from `apps.tfvars`, and stops when one has no build for its host's architecture,
   is missing, or can't be read.
+- **`freelunch doctor`** checks what plan, apply and deploy will need, before they spend
+  time on it, and exits 1 when something is wrong: tofu or terraform, jq, curl, ssh and the
+  OCI CLI; stacks without a tfvars; the OCI profile, a session's expiry, the API key and
+  the home region; the key deploy signs in with against `ssh_public_keys`; registry tokens
+  and whether each image has a build for its host; the Cloudflare token
+  (`/user/tokens/verify`), whether it reaches the zone's DNS records, the account's tunnels
+  and Access, and whether the zone is active. It only reads.
 - `freelunch init --image-workflow` adds a GitHub Actions workflow that builds the project's
   image for its hosts (`linux/arm64` for OCI) and pushes it to `ghcr.io`.
 - **Cloudflare glue stack** (`providers/cloudflare`): a remotely managed tunnel per host,
