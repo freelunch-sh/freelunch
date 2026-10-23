@@ -28,6 +28,9 @@ Project:
   deploy [target...]      Copy Compose apps and their env to the hosts over SSH, start them and
                           wait until they are healthy. Targets: all (default), a provider (oci)
                           or a host (oci-main). --dry-run prints the remote script instead.
+  domain suggest <name...>
+                          Free names like yours (myapp.dpdns.org, myapp.pp.ua, myapp.eu.org, ...)
+                          and whether they are taken, with similar ones where they are
 
 Infrastructure:
   list                    Show every provider with status, layer and deployment state
@@ -741,6 +744,76 @@ cmd_deploy() {
   for h in "${hosts[@]}"; do deploy_host "$h" "$dry_run"; done
 }
 
+# --- domain ---------------------------------------------------------------------------
+
+# Free names come from the catalog's "domains" providers, each with the suffixes it gives
+# names under. A name counts as free when DNS has nothing for it (NXDOMAIN): Cloudflare's
+# public resolver answers that over HTTPS, so curl and jq are enough. Only the provider can
+# say for sure, since a name can be registered without being in DNS yet.
+DOH_URL="https://cloudflare-dns.com/dns-query"
+
+domain_providers() { # catalogued free domain providers, the recommended one first, excluded ones left out
+  local p
+  for p in $(all_providers); do
+    [[ "$(meta "$p" category)" == "domains" && "$(meta "$p" status)" != "excluded" ]] || continue
+    if [[ "$(meta "$p" recommended)" == "true" ]]; then echo "0 $p"; else echo "1 $p"; fi
+  done | sort | cut -d' ' -f2
+}
+
+suffixes() { # suffixes <provider>: the one-line `suffixes` list of its provider.yaml
+  sed -n 's/^suffixes: *\[\(.*\)\].*/\1/p' "$PROVIDERS_DIR/$1/provider.yaml" | tr -d '" ' | tr ',' '\n' | grep . || true
+}
+
+name_state() { # name_state <name>: free, taken, or unknown when the lookup fails
+  local out
+  out="$(curl -s --max-time 5 -H "accept: application/dns-json" "$DOH_URL?name=$1&type=NS")" || { echo unknown; return 0; }
+  case "$(jq -r '.Status // empty' <<< "$out" 2>/dev/null)" in
+    3) echo free ;;
+    0) echo taken ;;
+    *) echo unknown ;;
+  esac
+}
+
+cmd_domain() {
+  local labels=() similar=() name label i p s v state title re='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+  [[ "${1:-}" == "suggest" ]] || die "domain: the command is freelunch domain suggest <name...>"
+  shift
+  [[ $# -gt 0 ]] || die "domain suggest: name what you want, e.g. freelunch domain suggest myapp.com"
+  command -v curl >/dev/null || die "curl is required for 'domain suggest'"
+  command -v jq >/dev/null || die "jq is required for 'domain suggest'"
+
+  # The first label is the name you want (myapp in myapp.com). Where it is taken, the first
+  # free one of a few similar names stands in.
+  for name in "$@"; do
+    name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    label="${name%%.*}"
+    [[ "$label" =~ $re ]] || die "domain suggest: '$name' should start with a name of letters, digits and hyphens, like myapp"
+    labels+=("$label")
+    if [[ "$name" == *.* ]]; then v="$label-${name##*.} "; else v=""; fi
+    similar+=("${v}get$label ${label}hq try$label")
+  done
+  [[ "$(name_state example.com)" == "taken" ]] || die "domain suggest: can't reach Cloudflare's DNS-over-HTTPS resolver ($DOH_URL)"
+
+  for p in $(domain_providers); do
+    title="$(meta "$p" display_name)"
+    [[ "$(meta "$p" recommended)" != "true" ]] || title="$title (recommended)"
+    echo "$title: $(meta "$p" free_tier)"
+    for i in "${!labels[@]}"; do
+      for s in $(suffixes "$p"); do
+        state="$(name_state "${labels[$i]}.$s")"
+        printf "  %-34s %s\n" "${labels[$i]}.$s" "$state"
+        [[ "$state" == "taken" ]] || continue
+        for v in ${similar[$i]}; do
+          if [[ ${#v} -le 63 && "$(name_state "$v.$s")" == "free" ]]; then printf "  %-34s %s\n" "$v.$s" free; break; fi
+        done
+      done
+    done
+    printf '  register at %s\n\n' "$(meta "$p" url)"
+  done
+  log "free: nothing in DNS uses the name yet, but the provider has the final say"
+  log "put the one you pick on Cloudflare and use it as the cloudflare stack's zone: docs/free-domains.md"
+}
+
 # --- development ----------------------------------------------------------------------
 
 cmd_catalog() {
@@ -815,6 +888,7 @@ main() {
   case "$cmd" in
     init)                 cmd_init "$@" ;;
     deploy)               cmd_deploy "$@" ;;
+    domain)               cmd_domain "$@" ;;
     list)                 cmd_list ;;
     plan|apply|destroy)   cmd_lifecycle "$cmd" "$@" ;;
     hybrid)               cmd_hybrid ;;

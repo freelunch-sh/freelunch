@@ -45,7 +45,8 @@ user with no capabilities, no privilege escalation and a read-only filesystem.
 
 ## Prerequisites
 
-1. A domain whose DNS is on Cloudflare (a free plan zone).
+1. A domain whose DNS is on Cloudflare (a free plan zone). It can be a free name such as
+   `myapp.dpdns.org`: see [docs/free-domains.md](../../docs/free-domains.md).
 2. An API token, see below.
 3. A host stack applied first (for example `freelunch apply oci`): every route names a host
    from the inventory, and the plan fails if it doesn't exist.

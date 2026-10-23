@@ -51,6 +51,10 @@ Put your backend's container on an Always Free Oracle Cloud VM and serve it at
 `https://api.example.com` through a Cloudflare Tunnel, with no port open except SSH. Config
 and state live in your repository; freelunch is pinned as a submodule or a Docker image.
 
+The domain can be free too. `freelunch domain suggest myapp` finds free names like
+`myapp.dpdns.org` at each [free domain provider](#provider-checklist), the recommended one
+first, and [docs/free-domains.md](docs/free-domains.md) shows how to put one on Cloudflare.
+
 ```bash
 cd your-project
 git submodule add https://github.com/freelunch-sh/freelunch freelunch   # or use the runner image
@@ -129,6 +133,7 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 |---|---|
 | `freelunch init [stack...]` | Create `.freelunch/` in your project (default stacks: `oci cloudflare`) |
 | `freelunch deploy [host\|provider]` | Copy Compose apps and their secrets to the hosts over SSH, start them, wait until healthy, start `cloudflared` (`--dry-run` to preview) |
+| `freelunch domain suggest <name...>` | Free names like yours at every free domain provider, and similar ones where yours is taken ([docs/free-domains.md](docs/free-domains.md)) |
 | `freelunch list` | Every provider with category, status, layer, IaC support and deployment state |
 | `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts → services → hybrid → glue). `apply --wait-for-capacity` retries hosts while OCI is out of capacity ([how](providers/oci/README.md#waiting-for-capacity)) |
 | `freelunch hybrid` | Re-aggregate deployed host stacks |
@@ -163,8 +168,8 @@ freelunch/
 ├── deploy/                        resolves a project's apps.tfvars into a deploy plan per host
 ├── catalog/                       renders the checklist from providers/*/provider.yaml
 ├── examples/backend-app/          a project that deploys one container behind a tunnel
-├── tests/cli.sh                   offline tests for init, project state and deploy
-├── docs/                          architecture, deploying a container, adding a provider
+├── tests/cli.sh                   offline tests for init, project state, deploy and domain suggest
+├── docs/                          architecture, deploying a container, free domains, adding a provider
 └── inspire/                       local research corpus (git-ignored, not published)
 ```
 
