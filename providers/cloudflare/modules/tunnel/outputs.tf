@@ -24,3 +24,15 @@ output "urls" {
   description = "Public URLs."
   value       = [for hostname in keys(var.routes) : "https://${hostname}"]
 }
+
+output "service_tokens" {
+  description = "Client ID, secret and expiry per service token. Clients send the ID and secret as the CF-Access-Client-Id and CF-Access-Client-Secret headers."
+  value = {
+    for name, t in cloudflare_zero_trust_access_service_token.this : name => {
+      client_id     = t.client_id
+      client_secret = t.client_secret
+      expires_at    = t.expires_at
+    }
+  }
+  sensitive = true
+}

@@ -20,17 +20,26 @@ variable "routes" {
     Public hostname -> inventory host and local port, e.g.
     { "api.example.com" = { host = "oci-main", port = 8080 } }.
     host is <provider>-<instance> from `freelunch inventory`. Add
-    access = { emails = ["you@example.com"] } to require an email login.
+    access = { emails = ["you@example.com"] } to require an email login, or
+    access = { service_tokens = ["backend"] } to let only clients with that
+    token through.
   EOT
   type = map(object({
     host   = string
     port   = number
     scheme = optional(string, "http")
     access = optional(object({
-      emails        = optional(list(string), [])
-      email_domains = optional(list(string), [])
+      emails         = optional(list(string), [])
+      email_domains  = optional(list(string), [])
+      service_tokens = optional(list(string), [])
     }))
   }))
+}
+
+variable "service_token_duration" {
+  description = "How long a service token is valid: 8760h (a year, Cloudflare's default) or forever."
+  type        = string
+  default     = "8760h"
 }
 
 variable "inventory_state_path" {

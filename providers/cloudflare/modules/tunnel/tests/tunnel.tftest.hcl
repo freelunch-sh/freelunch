@@ -8,6 +8,14 @@ mock_provider "cloudflare" {
   mock_data "cloudflare_zero_trust_tunnel_cloudflared_token" {
     defaults = { token = "mock-tunnel-token" }
   }
+
+  mock_resource "cloudflare_zero_trust_access_service_token" {
+    defaults = {
+      id            = "3537a672-e4d8-4d89-aab9-26cb622918a1"
+      client_id     = "mock-client-id.access"
+      client_secret = "mock-client-secret"
+    }
+  }
 }
 
 variables {
@@ -145,6 +153,63 @@ run "email_domains_are_allowed_too" {
   }
 }
 
+run "service_tokens_get_a_service_auth_policy" {
+  command = apply
+
+  variables {
+    routes = {
+      "api.example.com"   = { host = "oci-main", port = 8080, access = { service_tokens = ["backend"] } }
+      "admin.example.com" = { host = "oci-main", port = 9000, access = { emails = ["me@example.com"], service_tokens = ["backend", "ci"] } }
+    }
+  }
+
+  assert {
+    condition = (
+      keys(cloudflare_zero_trust_access_service_token.this) == ["backend", "ci"] &&
+      cloudflare_zero_trust_access_service_token.this["backend"].name == "freelunch-backend"
+    )
+    error_message = "Each token name should become one service token, shared by the routes that list it."
+  }
+
+  assert {
+    condition = (
+      cloudflare_zero_trust_access_policy.service["api.example.com"].decision == "non_identity" &&
+      one(cloudflare_zero_trust_access_policy.service["api.example.com"].include).service_token.token_id == "3537a672-e4d8-4d89-aab9-26cb622918a1"
+    )
+    error_message = "Service tokens need a Service Auth (non_identity) policy that includes them; an allow policy would ask for a login."
+  }
+
+  assert {
+    condition     = keys(cloudflare_zero_trust_access_policy.route) == ["admin.example.com"]
+    error_message = "A route with only service tokens should get no email login policy."
+  }
+
+  assert {
+    condition = (
+      length(cloudflare_zero_trust_access_application.route["api.example.com"].policies) == 1 &&
+      cloudflare_zero_trust_access_application.route["api.example.com"].service_auth_401_redirect == true
+    )
+    error_message = "A token-only route should answer 401 instead of redirecting to a login page."
+  }
+
+  assert {
+    condition = (
+      [for p in cloudflare_zero_trust_access_application.route["admin.example.com"].policies : p.id] == [
+        cloudflare_zero_trust_access_policy.service["admin.example.com"].id,
+        cloudflare_zero_trust_access_policy.route["admin.example.com"].id,
+      ] &&
+      [for p in cloudflare_zero_trust_access_application.route["admin.example.com"].policies : p.precedence] == [1, 2] &&
+      cloudflare_zero_trust_access_application.route["admin.example.com"].service_auth_401_redirect != true
+    )
+    error_message = "A route with logins and tokens should get both policies, and keep the login page."
+  }
+
+  assert {
+    condition     = nonsensitive(output.service_tokens["backend"].client_id) == "mock-client-id.access" && nonsensitive(output.service_tokens["backend"].client_secret) == "mock-client-secret"
+    error_message = "service_tokens should expose each token's client ID and secret."
+  }
+}
+
 run "hostnames_must_be_full_names" {
   command = plan
 
@@ -170,6 +235,16 @@ run "access_needs_someone_to_allow" {
 
   variables {
     routes = { "api.example.com" = { host = "oci-main", port = 8080, access = {} } }
+  }
+
+  expect_failures = [var.routes]
+}
+
+run "service_token_names_must_be_simple" {
+  command = plan
+
+  variables {
+    routes = { "api.example.com" = { host = "oci-main", port = 8080, access = { service_tokens = ["My Token"] } } }
   }
 
   expect_failures = [var.routes]

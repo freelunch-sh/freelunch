@@ -40,10 +40,11 @@ resource "terraform_data" "checks" {
 module "tunnel" {
   source = "../modules/tunnel"
 
-  account_id  = coalesce(var.account_id, data.cloudflare_zone.this.account.id)
-  zone_id     = data.cloudflare_zone.this.id
-  name_prefix = var.name_prefix
-  routes      = var.routes
+  account_id             = coalesce(var.account_id, data.cloudflare_zone.this.account.id)
+  zone_id                = data.cloudflare_zone.this.id
+  name_prefix            = var.name_prefix
+  routes                 = var.routes
+  service_token_duration = var.service_token_duration
 
   depends_on = [terraform_data.checks]
 }
