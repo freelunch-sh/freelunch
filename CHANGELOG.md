@@ -120,7 +120,10 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
   ask for a one-off auth key.
 - `deploy` logs out of registries when it finishes, prints the digest each image tag
   resolved to, and shows the host key it trusts on first contact.
-  `docs/deploy-a-container.md` shows how to pin the keys from the OCI console beforehand.
+  `freelunch trust <host>` pins an OCI host's keys from its serial console beforehand: it
+  captures the console through the OCI CLI, writes the keys for the address `deploy` uses,
+  never replaces keys `known_hosts` has already, and stops when the host answers with
+  another key.
 - `cloudflared` is pinned by digest and runs without capabilities, privilege escalation or
   a writable filesystem.
 - The host stacks' project examples explain who can reach SSH and how to close it with
