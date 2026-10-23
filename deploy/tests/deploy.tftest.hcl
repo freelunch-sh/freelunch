@@ -22,9 +22,10 @@ run "apps_and_tunnel_resolve_to_one_target_per_host" {
     condition = (
       output.targets["oci-main"].address == "203.0.113.10" &&
       output.targets["oci-main"].user == "ubuntu" &&
-      output.targets["oci-main"].provider == "oci"
+      output.targets["oci-main"].provider == "oci" &&
+      output.targets["oci-main"].arch == "arm64"
     )
-    error_message = "SSH address and user come from the inventory."
+    error_message = "SSH address, user and architecture come from the inventory."
   }
 
   assert {

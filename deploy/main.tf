@@ -51,6 +51,7 @@ locals {
       provider = try(local.inventory[h].provider, null)
       address  = try(coalesce(try(var.hosts[h].address, null), try(local.inventory[h].public_ip, null), try(local.inventory[h].private_ip, null)), null)
       user     = try(coalesce(try(var.hosts[h].user, null), try(local.inventory[h].ssh_user, null)), "ubuntu")
+      arch     = try(local.inventory[h].arch, null)
       apps     = { for name, a in local.apps : name => { compose = a.compose, env_file = a.env_file } if a.host == h }
       tunnel   = contains(keys(local.tunnels), h)
       urls     = sort([for hostname, r in local.routes : "https://${hostname}" if r.host == h])

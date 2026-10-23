@@ -23,6 +23,11 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
   logs in to private registries, runs `docker compose up --wait` and fails when a container
   stays unhealthy, then starts `cloudflared` and prunes unused images. Targets a host, a
   provider or everything; `--dry-run` prints the remote script with secrets left out.
+  Before it connects, it asks each registry which platforms the images have, with the
+  logins from `apps.tfvars`, and stops when one has no build for its host's architecture,
+  is missing, or can't be read.
+- `freelunch init --image-workflow` adds a GitHub Actions workflow that builds the project's
+  image for its hosts (`linux/arm64` for OCI) and pushes it to `ghcr.io`.
 - **Cloudflare glue stack** (`providers/cloudflare`): a remotely managed tunnel per host,
   proxied DNS records, optional Access email login per hostname, zone looked up by name.
   The tunnel token reaches the host through `deploy`, never through cloud-init.

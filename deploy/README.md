@@ -41,7 +41,7 @@ App names follow the same rule as cloud-init apps (lowercase letters, digits, `-
 
 | Output | Description |
 |---|---|
-| `targets` | Host → `{ provider, address, user, apps = { name → { compose, env_file } }, tunnel, urls }`, with absolute paths |
+| `targets` | Host → `{ provider, address, user, arch, apps = { name → { compose, env_file } }, tunnel, urls }`, with absolute paths; `arch` is null for a host outside the inventory |
 | `tunnel_tokens` | Host → cloudflared token (sensitive) |
 | `registries` | As given |
 
