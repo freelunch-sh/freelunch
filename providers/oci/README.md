@@ -140,12 +140,17 @@ minutes, plus up to 20% so that retries don't line up, and tries again until the
 exists. Whatever the first attempt created stays, and each retry plans again and creates
 the rest. When OCI answers `TooManyRequests`, the wait doubles each time, up to 30 minutes.
 
+**Every availability domain.** In a region with several ADs (London, Frankfurt and Ashburn
+have three), each retry tries the next AD that offers the shape, round and round. Once the
+host exists it stays in its AD: `availability_domain` is in `ignore_changes`, so a later
+`apply` never moves or replaces it. An instance with `availability_domain_index` set is
+not moved.
+
 A retry applies its plan without asking, so it is careful about what it applies:
 
 - Only "out of capacity" and `TooManyRequests` are retried. Any other error stops it.
 - A plan that would destroy or replace anything stops it too. That can happen when the
-  tfvars change while it waits. Changing an instance's `availability_domain_index`, to try
-  another AD in a multi-AD region, is fine: the next attempt picks it up.
+  tfvars change while it waits.
 - Ctrl-C stops it. When you press it during an attempt, tofu/terraform still stop
   cleanly and save the state.
 
@@ -153,6 +158,39 @@ Getting the host can take hours or days. `FREELUNCH_CAPACITY_INTERVAL` sets the 
 seconds (default 120) and `FREELUNCH_CAPACITY_TIMEOUT` gives up after that many seconds.
 Keep the interval at a minute or more: OCI answers faster retries with `TooManyRequests`.
 This is for getting one account its free host, not for collecting hosts across accounts.
+
+#### Review once, wait unattended
+
+Someone has to approve the first attempt, which stops a wait in CI, a cron job or an agent
+at the prompt. Review the plan once and save it instead:
+
+```bash
+freelunch plan oci --out .freelunch/oci/reviewed.tfplan
+freelunch apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity
+```
+
+The first attempt applies exactly that plan, without a prompt. A retry is applied only when
+every change it makes is one the reviewed plan makes too: the same resources with the same
+actions. Anything else stops the wait, which then needs a new review. The plan file holds
+the stack's variables and state, secrets included. `.freelunch/` ignores `*.tfplan`, and
+the CLI warns about a plan file git would pick up.
+
+`--detach` runs the wait in the background and returns at once:
+
+```bash
+freelunch apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity --detach
+freelunch status     # oci: waiting for capacity for 5h 12m, 141 attempts so far (pid 4242) ...
+```
+
+Its output goes to `.freelunch/oci/wait.log`, and `kill <pid>` stops it. `--detach` needs a
+reviewed plan (or `FREELUNCH_AUTO_APPROVE=1`), since nobody would be at the prompt. A
+laptop that sleeps pauses the wait until it wakes.
+
+When a wait in the background ends, or a wait that had to retry, freelunch sends a desktop
+notification (macOS, or Linux with `notify-send`). Set `FREELUNCH_NOTIFY` in `.freelunch/.env`
+to get it on your phone too: an [ntfy](https://ntfy.sh) topic URL
+(`https://ntfy.sh/<a-topic-only-you-know>`), or a Discord or Slack webhook URL.
+`FREELUNCH_NOTIFY=off` turns notifications off.
 
 **With a session token** (`oci_auth = "SecurityToken"`), freelunch runs
 `oci session refresh --profile <oci_config_profile>` before every attempt, so it needs the
@@ -182,8 +220,9 @@ The stack outputs `hosts` (the [host contract](../../docs/architecture.md#host-c
   `/etc/iptables/rules.v4`, without `netfilter-persistent save`, which would also capture
   Docker's chains and break container networking after a reboot.
 - **Availability domains.** The micro shape exists in only one AD in multi-AD regions.
-  The compute module finds an AD that offers each shape. Set `availability_domain_index`
-  to pin one, for example to try a different AD when A1 capacity is short.
+  The compute module finds an AD that offers each shape, and `apply --wait-for-capacity`
+  moves to the next one on each retry (`availability_domain_offset`). Set
+  `availability_domain_index` to pin one. A created instance never changes AD.
 - **No surprise replacement.** Platform-image updates and edits to cloud-init/SSH keys are
   ignored after creation. Recreating an A1 instance can fail for days on capacity, so a
   rebuild has to be deliberate: `terraform apply -replace='module.docker_host.module.compute.oci_core_instance.this["main"]'`.
@@ -216,7 +255,7 @@ bin/freelunch test     # or: cd providers/oci/modules/compute && terraform test
 
 | Suite | Covers |
 |---|---|
-| `modules/compute/tests/guardrails.tftest.hcl` | Maximum free layout passes; legacy 4/24, 3rd micro, over-200 GB, paid shapes and non-home region are blocked; opt-in allows overage; AD auto-placement |
+| `modules/compute/tests/guardrails.tftest.hcl` | Maximum free layout passes; legacy 4/24, 3rd micro, over-200 GB, paid shapes and non-home region are blocked; opt-in allows overage; AD auto-placement, and the offset that moves to the next AD |
 | `modules/docker-host/tests/firewall.tftest.hcl` | Every ingress port reaches the host firewall; no `netfilter-persistent save`; valid YAML |
 | `modules/network/tests/ingress.tftest.hcl` | With no ingress ports (Tunnel layout) only SSH and path-MTU ICMP are allowed in; default ports open |
 | `stack/tests/plan.tftest.hcl` | Full stack plans; host contract output; arch per shape |

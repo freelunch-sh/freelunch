@@ -66,7 +66,7 @@ freelunch init           # same as: freelunch init oci cloudflare
 
 ```
 .freelunch/
-├── .gitignore                          state, tfvars, *.env, inventory.json, known_hosts
+├── .gitignore                          state, tfvars, *.env, saved plans, wait logs, ...
 ├── apps.tfvars                         which app runs on which host (commit this)
 ├── .env.example                        credentials for the CLI
 ├── oci/terraform.tfvars.example
@@ -112,10 +112,19 @@ The plan shows the VM's user data only as `metadata = (sensitive value)`. With
 Tailscale key and app secrets left out.
 
 Free Arm capacity is often short, and OCI then answers "Out of host capacity". Run
-`freelunch apply oci --wait-for-capacity` instead. It tries again every two minutes until
-the VM exists, and a retry never applies a plan that destroys something. With a session
-token it refreshes the session before each attempt, but a session lasts 24 hours at most,
-so for a longer wait use an API key. See
+`freelunch apply oci --wait-for-capacity` instead. It tries again every two minutes, in the
+next availability domain each time, until the VM exists, and a retry never applies a plan
+that destroys something. To leave it waiting without you, review the plan once and let the
+wait run in the background; it notifies you when the VM exists:
+
+```bash
+freelunch plan oci --out .freelunch/oci/reviewed.tfplan
+freelunch apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity --detach
+freelunch status
+```
+
+With a session token it refreshes the session before each attempt, but a session lasts 24
+hours at most, so for a longer wait use an API key. See
 [Waiting for capacity](../providers/oci/README.md#waiting-for-capacity).
 
 When it finishes, `apply` prints the VM's address and the steps left before your app runs

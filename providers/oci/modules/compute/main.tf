@@ -22,11 +22,12 @@ locals {
   shapes_by_ad  = { for ad, d in data.oci_core_shapes.by_ad : ad => [for s in d.shapes : s.name] }
   ads_for_shape = { for shape in local.shapes : shape => [for ad in local.ad_names : ad if contains(local.shapes_by_ad[ad], shape)] }
 
+  # element() wraps around, so any offset lands on an AD that offers the shape.
   instance_ad = {
     for k, v in var.instances : k => (
       v.availability_domain_index != null
       ? local.ad_names[v.availability_domain_index]
-      : try(local.ads_for_shape[v.shape][0], local.ad_names[0])
+      : try(element(local.ads_for_shape[v.shape], var.availability_domain_offset), local.ad_names[0])
     )
   }
 
@@ -145,10 +146,11 @@ resource "oci_core_instance" "this" {
   preserve_boot_volume = var.preserve_boot_volume
 
   lifecycle {
-    # A newer platform image or edited cloud-init must not replace a running host:
-    # recreating an A1 instance can fail for weeks on "Out of host capacity".
-    # Rebuild deliberately with `-replace` instead.
-    ignore_changes = [source_details[0].source_id, metadata]
+    # A newer platform image, edited cloud-init or another availability domain (the next
+    # capacity retry, or a new index) must not replace a running host: recreating an A1
+    # instance can fail for weeks on "Out of host capacity". Rebuild deliberately with
+    # `-replace` instead.
+    ignore_changes = [source_details[0].source_id, metadata, availability_domain]
 
     precondition {
       condition     = length(data.oci_core_images.this[each.value.shape].images) > 0

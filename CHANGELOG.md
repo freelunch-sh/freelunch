@@ -41,6 +41,16 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
   `oci session refresh` before each attempt and stops with the sign-in command once the
   session's 24 hours are up. `FREELUNCH_CAPACITY_INTERVAL` and `FREELUNCH_CAPACITY_TIMEOUT`
   tune it.
+- **Unattended capacity waits.** `freelunch plan <stack> --out <file>` saves a plan to
+  review, and `apply --plan <file>` applies exactly that plan without a prompt. With
+  `--wait-for-capacity`, a retry after a reviewed plan is applied only when it changes
+  nothing the reviewed plan doesn't, so CI, a cron job or an agent can do the waiting. Each
+  retry tries the next availability domain that offers the shape
+  (`availability_domain_offset`), and a created instance never changes domain
+  (`availability_domain` is in `ignore_changes`). `--detach` waits in the background with
+  its output in `.freelunch/<stack>/wait.log`, `freelunch status` shows the attempts and
+  the next try, and a desktop notification, plus `FREELUNCH_NOTIFY` (ntfy, Discord or
+  Slack), says when the wait ends.
 - **OCI sign-in check.** Every plan, apply and destroy of the oci stack refreshes a session
   token first (without the OCI CLI, it reads the expiry from the token), and an expired
   session stops the run with the command to sign in again, instead of a half plan between
