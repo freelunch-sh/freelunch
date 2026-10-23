@@ -133,6 +133,8 @@ The stack outputs `hosts` (the [host contract](../../docs/architecture.md#host-c
   ignored after creation. Recreating an A1 instance can fail for days on capacity, so a
   rebuild has to be deliberate: `terraform apply -replace='module.docker_host.module.compute.oci_core_instance.this["main"]'`.
 - **IMDSv1 disabled** (`are_legacy_imds_endpoints_disabled = true`).
+- **Host hardening** comes from the shared bootstrap: SSH keys only, rotated Docker logs,
+  and a 04:00 UTC reboot when a security update needs one.
 
 ## Caveats
 
@@ -144,7 +146,8 @@ The stack outputs `hosts` (the [host contract](../../docs/architecture.md#host-c
   memory stay under ~20% at the 95th percentile for 7 days. Run real workloads. Synthetic load
   generators break the spirit of the free tier.
 - **Secrets in user data.** cloud-init content, including app `env` and the Tailscale key,
-  is readable from instance metadata. Keep real secrets in a secrets manager.
+  is readable from instance metadata. Keep real secrets out of it: `freelunch deploy`
+  copies app secrets over SSH, and a one-off Tailscale key is worthless once used.
 - **Home region check.** The precondition compares `region` with the tenancy's home region,
   so the API key needs permission to list region subscriptions.
 

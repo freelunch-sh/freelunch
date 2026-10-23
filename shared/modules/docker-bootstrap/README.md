@@ -8,12 +8,17 @@ It renders text only. It creates no resources and needs no provider.
 
 ## What it does on first boot
 
-1. Installs `docker.io` and `docker-compose-v2` from the Ubuntu archive (amd64 and arm64).
-2. Optionally creates a swap file. This helps a lot on 1 GB micro instances.
-3. Runs provider-specific commands (`extra_runcmd`), such as OCI's host firewall fix.
-4. Optionally joins the host to your Tailscale tailnet.
-5. Writes each app to `/opt/freelunch/apps/<name>/` and runs `docker compose up -d`.
-6. Writes `/var/lib/freelunch/bootstrap-done` when finished.
+1. Hardens the host: SSH takes keys only and no root login, Docker rotates container logs
+   (3 files of 10 MB per container), and when a security update needs a reboot (Ubuntu
+   installs them every day), the host reboots at `reboot_time`.
+2. Installs `docker.io` and `docker-compose-v2` from the Ubuntu archive (amd64 and arm64).
+3. Optionally creates a swap file. This helps a lot on 1 GB micro instances.
+4. Runs provider-specific commands (`extra_runcmd`), such as OCI's host firewall fix.
+5. Optionally joins the host to your Tailscale tailnet. Tailscale comes from its apt
+   repository, checked against the signing key in [`files/`](files/) (fingerprint
+   `2596 A99E AAB3 3821 893C 0A79 458C A832 957F 5868`).
+6. Writes each app to `/opt/freelunch/apps/<name>/` and runs `docker compose up -d`.
+7. Writes `/var/lib/freelunch/bootstrap-done` when finished.
 
 ## Usage
 
@@ -47,6 +52,7 @@ module "bootstrap" {
 | `swap_size_gb` | number | `0` | Swap file size; 0 disables |
 | `timezone` | string | `UTC` | System timezone |
 | `package_upgrade` | bool | `true` | Full upgrade on first boot |
+| `reboot_time` | string | `04:00` | When to reboot for a security update that needs it (in `timezone`); `null` leaves reboots to you |
 | `ssh_authorized_keys` | list(string) | `[]` | SSH keys for the default user (used where the provider takes only one key) |
 | `extra_packages` | list(string) | `[]` | Extra apt packages |
 | `extra_runcmd` | list(string) | `[]` | Provider-specific commands run before apps start |
@@ -69,6 +75,10 @@ module "bootstrap" {
   SSH ([walkthrough](../../../docs/deploy-a-container.md)), or rebuild the host with `-replace`.
 - **Secrets in user data are readable** from the instance metadata service and the
   provider console. Keep real secrets out of `env`: give them to `freelunch deploy` as an
-  `env_file` instead, or pull them at runtime from a secrets manager.
+  `env_file` instead, or pull them at runtime from a secrets manager. The Tailscale key
+  has to be there, so use one that stops working: one-off for a single host, reusable
+  with a short expiry for several.
+- **Restart policy.** With `reboot_time` set, give every service `restart: unless-stopped`
+  so it comes back after the reboot.
 - **Size limits:** user data limits differ by provider (AWS 16 KB, OCI 32 KB of metadata
   in total). Large compose files belong in a git repo that the host pulls.

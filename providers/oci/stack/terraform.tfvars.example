@@ -56,4 +56,7 @@ instances = {
 # }
 
 # Optional: join every host to your tailnet on first boot.
+# User data stays readable on the host, so use a key that stops working: one-off for one
+# host, reusable with a short expiry for several. Not ephemeral: Tailscale removes those
+# nodes after half an hour offline.
 # tailscale_auth_key = "tskey-auth-..."

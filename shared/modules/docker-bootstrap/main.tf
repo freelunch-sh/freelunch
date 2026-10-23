@@ -22,9 +22,13 @@ locals {
     timezone            = var.timezone
     ssh_authorized_keys = var.ssh_authorized_keys
     package_upgrade     = var.package_upgrade
+    reboot_time         = var.reboot_time
     extra_packages      = var.extra_packages
     extra_runcmd        = var.extra_runcmd
     tailscale_auth_key  = var.tailscale_auth_key
     tailscale_hostname  = var.tailscale_hostname
+    # Tailscale's package signing key, fingerprint 2596A99EAAB33821893C0A79458CA832957F5868,
+    # from https://pkgs.tailscale.com/stable/ubuntu/noble.gpg (the same key for every release).
+    tailscale_apt_key = file("${path.module}/files/tailscale-archive-keyring.asc")
   })
 }
