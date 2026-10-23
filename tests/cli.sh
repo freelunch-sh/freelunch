@@ -39,6 +39,9 @@ case "$1 ${2:-}" in
   "login "*)   echo "stdin: $(cat)" >> "$FAKE_LOG" ;;
   "compose up") [[ "$(basename "$PWD")" != "${FAKE_UNHEALTHY:-}" ]] || exit 1 ;;
   "compose config") echo "example/$(basename "$PWD"):1.0" ;;
+  # One container per app, stopped when the app is in FAKE_STOPPED.
+  "compose ps")
+    if [[ " ${FAKE_STOPPED:-} " == *" $(basename "$PWD") "* ]]; then echo "$(basename "$PWD")|exited|"; else echo "$(basename "$PWD")|running|healthy"; fi ;;
   "image inspect") echo "${last%%:*}@sha256:digest-of-$(basename "${last%%:*}")" ;;
 esac
 exit 0
@@ -248,6 +251,8 @@ case "$url" in
         if [[ -n "$status" ]]; then jq -nc --argjson z "$(zone "$name" "$status")" '{success: true, result: [$z]}'
         else echo '{"success":true,"result":[]}'; fi ;;
       "GET /zones/"*/dns_records*) allowed dns ;;
+      "GET /accounts/"*/cfd_tunnel/*)
+        jq -nc --arg s "${FAKE_TUNNEL_STATUS:-healthy}" '{success: true, result: {status: $s, connections: (if $s == "healthy" then [1, 2, 3, 4] else [] end)}}' ;;
       "GET /accounts/"*/cfd_tunnel*) allowed tunnel ;;
       "GET /accounts/"*/access/apps*) allowed access ;;
       "GET /accounts/"*/access/service_tokens*) allowed service_tokens ;;
@@ -339,6 +344,25 @@ doctor_in() {
   local dir="$1"; shift
   (cd "$dir" && HOME="$dir/home" SSH_AUTH_SOCK="" PATH="${TEST_PATH:-$WORK/doctor-bin:$WORK/bin:$PATH}" FAKE_LOG="$dir/fake.log" \
     CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN:-}" FREELUNCH_SSH_KEY="${TEST_SSH_KEY:-}" GHCR_TOKEN="${GHCR_TOKEN:-}" "$CLI" doctor "$@")
+}
+
+# status_in <dir>: run status with the fake ssh, docker and internet, and the Cloudflare
+# token of TEST_CF_TOKEN
+status_in() {
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" \
+    CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN:-}" "$CLI" status "$@")
+}
+
+# with_service_tokens <dir> <name>=<days>...: give the project's cloudflare state service
+# tokens that expire that many days from now
+with_service_tokens() {
+  local dir="$1" t tokens="{}"; shift
+  for t in "$@"; do
+    tokens="$(jq -c --arg n "${t%%=*}" --argjson d "${t#*=}" '. + {($n): {client_id: "id", client_secret: "secret", expires_at: (now + $d * 86400 + 3600 | floor | todate)}}' <<< "$tokens")"
+  done
+  jq --argjson t "$tokens" '.outputs.service_tokens = {value: $t, type: ["map", ["object", {client_id: "string", client_secret: "string", expires_at: "string"}]], sensitive: true}' \
+    "$ROOT/deploy/tests/fixtures/cloudflare.tfstate" > "$dir/.freelunch/cloudflare/terraform.tfstate"
 }
 
 # trust_in <dir> <host>: run trust with the fake OCI CLI and ssh-keyscan
@@ -924,7 +948,7 @@ test_status_shows_each_wait() {
   local p="$WORK/status" now pid out
   capacity_project "$p"
   out="$(freelunch_in "$p" status)"
-  contains "$out" "No capacity wait has run here"
+  lacks "$out" "Capacity waits"
   now="$(date +%s)"
   /bin/sleep 30 & pid=$!
   printf 'state=waiting\npid=%s\nstarted=%s\nupdated=%s\nattempt=14\nlast=out of host capacity in UK-LONDON-1-AD-2\nnext=%s\nlog=\n' \
@@ -944,6 +968,49 @@ test_status_shows_each_wait() {
 }
 
 # A wait that had to retry says when it ends: on the desktop, and at FREELUNCH_NOTIFY.
+# status: the hosts, what runs on them, the tunnels and their URLs, and the service tokens.
+test_status_shows_the_project() {
+  local p="$WORK/status-all" out key
+  new_project "$p"
+  printf 'zone   = "example.com"\nroutes = { "api.example.com" = { host = "oci-main", port = 8080 } }\n' > "$p/.freelunch/cloudflare/terraform.tfvars"
+  with_service_tokens "$p" backend=365 cron=10 old=-2
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" status_in "$p")"
+  contains "$out" "$(printf 'Hosts\n  oci-main      203.0.113.10  arm64  VM.Standard.A1.Flex\n  oci-edge-1    203.0.113.11  amd64  VM.Standard.E2.1.Micro')"
+  # Status doesn't pin a host key: before trust or a deploy it leaves the host alone.
+  contains "$out" "  not asked: its host key isn't pinned yet (freelunch trust oci-main, or the first freelunch deploy)"
+  fails grep -q '^ssh ' "$p/fake.log"
+  # After a deploy it asks the host what runs there.
+  GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$p" >/dev/null 2>&1
+  out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" FAKE_STOPPED=api status_in "$p")"
+  contains "$out" "$(printf 'Apps on oci-main\n  api                  exited\n  cloudflared          running, healthy')"
+  contains "$out" "$(printf 'Tunnels\n  oci-main       connected (4 connections)\n                 https://api.example.com')"
+  grep -qx 'api GET /accounts/acc1/cfd_tunnel/f70ff985-a4ef-4643-bbbc-4a0ed4fc8415 token=cf-token' "$p/fake.log"
+  contains "$out" "Service tokens"
+  grep -qE '^  backend +expires on [0-9-]+ [0-9:]+, in 365 days$' <<< "$out"
+  grep -qE "^  cron +expires in 10 days, on [0-9-]+ [0-9:]+: renew it with freelunch apply cloudflare -- -replace='module.tunnel.cloudflare_zero_trust_access_service_token.this\[\"cron\"\]'$" <<< "$out"
+  grep -qE '^  old +expired on [0-9-]+ [0-9:]+: renew it with ' <<< "$out"
+  # An app apps.tfvars lists that isn't on the host yet, a tunnel that never connected, and
+  # no token to ask Cloudflare with.
+  printf 'apps = {\n  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env" }\n  web = { host = "oci-main", compose = "../compose.yaml" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" FAKE_TUNNEL_STATUS=inactive status_in "$p")"
+  contains "$out" "  web                  not deployed yet (freelunch deploy)"
+  contains "$out" "  oci-main       never connected: freelunch deploy starts cloudflared"
+  out="$(status_in "$p")"
+  contains "$out" "  oci-main       not checked without CLOUDFLARE_API_TOKEN"
+  # deploy and doctor remind of tokens that expire soon.
+  out="$(GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$p" --dry-run 2>&1)"
+  contains "$out" "the service token cron expires in 10 days"
+  contains "$out" "the service token old expired on"
+  lacks "$out" "the service token backend"
+}
+
+test_status_before_anything_is_deployed() {
+  local p="$WORK/status-empty"
+  mkdir -p "$p" && (cd "$p" && "$CLI" init >/dev/null 2>&1)
+  equals "$(status_in "$p")" "Nothing is deployed here yet."
+}
+
 test_wait_notifies_when_it_ends() {
   local p="$WORK/notify" message="oci: got the host on attempt 2: oci-main at 203.0.113.10, oci-edge-1 at 203.0.113.11"
   capacity_project "$p"
@@ -1199,6 +1266,11 @@ test_doctor_finds_nothing_wrong_with_a_good_project() {
   contains "$out" "No problems found, 1 warning(s)."
   grep -qx 'api GET /user/tokens/verify token=cf-token' "$p/fake.log"
   grep -q '^oci iam region-subscription list --tenancy-id ocid1.tenancy.oc1..aaaaaaaa... --profile DEFAULT$' "$p/fake.log"
+  # A service token that expires soon is a warning, one that has expired a problem.
+  with_service_tokens "$p" cron=5 old=-1
+  out="$(GHCR_TOKEN=x TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  warn  the service token cron expires in 5 days; renew it: freelunch apply cloudflare -- -replace="
+  contains "$out" "  fail  the service token old expired on "
 }
 
 test_doctor_reports_every_problem() {
