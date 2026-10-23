@@ -74,8 +74,8 @@ freelunch init           # same as: freelunch init oci cloudflare
 ```
 
 Commit `.freelunch/` except what its `.gitignore` excludes. State, tfvars and secrets stay
-on your machine (remote state is on the roadmap). The first `apply` of a stack also writes
-`.freelunch/<stack>/.terraform.lock.hcl` with the provider versions and their checksums.
+on your machine (remote state is on the roadmap). The first `plan` or `apply` of a stack also
+writes `.freelunch/<stack>/.terraform.lock.hcl` with the provider versions and their checksums.
 Commit it too: every machine and CI run then installs the same provider builds, and refuses
 a download that doesn't match.
 
@@ -103,8 +103,13 @@ scanner on the internet. Close it if you can:
 - **Your own IP**, if it doesn't change: `ssh_source_cidrs = ["203.0.113.7/32"]`.
 
 ```bash
+freelunch plan oci --show-user-data   # optional: the plan, plus the VM's cloud-init
 freelunch apply oci
 ```
+
+The plan shows the VM's user data only as `metadata = (sensitive value)`. With
+`--show-user-data` it also prints the cloud-init the VM boots with, decoded, with the
+Tailscale key and app secrets left out.
 
 Free Arm capacity is often short, and OCI then answers "Out of host capacity". Run
 `freelunch apply oci --wait-for-capacity` instead. It tries again every two minutes until
@@ -113,7 +118,8 @@ token it refreshes the session before each attempt, but a session lasts 24 hours
 so for a longer wait use an API key. See
 [Waiting for capacity](../providers/oci/README.md#waiting-for-capacity).
 
-When it finishes, `freelunch inventory` lists the host as `oci-main`.
+When it finishes, `apply` prints the VM's address and the steps left before your app runs
+on it, and `freelunch inventory` lists the host as `oci-main`.
 
 ### Check the host key
 
