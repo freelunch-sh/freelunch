@@ -32,7 +32,8 @@ Project:
 Infrastructure:
   list                    Show every provider with status, layer and deployment state
   plan    <p...|all>      Plan provider stacks
-  apply   <p...|all>      Apply provider stacks (hosts, then services), refresh hybrid, then glue
+  apply   <p...|all>      Apply provider stacks (hosts, then services), refresh hybrid, then glue.
+                          --wait-for-capacity retries hosts until OCI has the capacity for them
   destroy <p...|all>      Destroy provider stacks in reverse layer order, then refresh hybrid
   hybrid                  Re-aggregate deployed host stacks into the hybrid inventory
   inventory               Write inventory.json (all hosts across providers)
@@ -53,6 +54,8 @@ Inside the freelunch checkout, each stack keeps them in providers/<name>/stack/ 
 FREELUNCH_AUTO_APPROVE=1 skips apply/destroy prompts. FREELUNCH_TF picks tofu or terraform.
 FREELUNCH_SSH_KEY sets the key deploy uses, FREELUNCH_SSH replaces the ssh command, and
 FREELUNCH_DEPLOY_TIMEOUT (seconds, default 180) limits the wait for healthy containers.
+FREELUNCH_CAPACITY_INTERVAL (seconds, default 120) spaces out capacity retries, and
+FREELUNCH_CAPACITY_TIMEOUT (seconds) stops them after that long.
 EOF
 }
 
@@ -182,19 +185,136 @@ resolve() { # resolve <names...> -> validated provider list
   done
 }
 
-run_stack() { # run_stack <action> <provider> [extra args]
-  local action="$1" p="$2"; shift 2
-  local dir args=() a
+prepare_stack() { # prepare_stack <action> <provider>: check the config, then init the stack
+  local p="$2" dir
   dir="$(stack_dir "$p")"
   is_configured "$p" || die "$p: missing $(rel "$(config_dir "$p")")/terraform.tfvars (copy terraform.tfvars.example)"
   check_checkout_tfvars "$dir"
-  log "$action $p${PROJECT:+ ($(rel "$PROJECT")/$p)}"
+  log "$1 $p${PROJECT:+ ($(rel "$PROJECT")/$p)}"
   lock_in "$p" "$dir"
   tf_for "$p" "$dir" init -input=false -upgrade=false >/dev/null
   lock_out "$p" "$dir"
+}
+
+run_stack() { # run_stack <action> <provider> [extra args]
+  local action="$1" p="$2"; shift 2
+  local args=() a
+  prepare_stack "$action" "$p"
   while IFS= read -r a; do args+=("$a"); done < <(project_args "$p")
   [[ "${FREELUNCH_AUTO_APPROVE:-0}" == "1" && "$action" != "plan" ]] && args+=(-auto-approve)
-  tf_for "$p" "$dir" "$action" -input=false ${args[@]+"${args[@]}"} "$@"
+  tf_for "$p" "$(stack_dir "$p")" "$action" -input=false ${args[@]+"${args[@]}"} "$@"
+}
+
+# --- waiting for capacity -------------------------------------------------------------
+
+# Free Arm capacity on OCI comes and goes, so creating an A1 host can fail with "Out of
+# host capacity" for hours or days. apply --wait-for-capacity tries again until it works,
+# and only retries that error and OCI's rate limit. You approve the first attempt as
+# usual. Each retry plans again and applies that plan only if it destroys nothing, so a
+# change made while it waits can't remove anything without you.
+CAPACITY_ERRORS='out of (host )?capacity|TooManyRequests'
+MAX_CAPACITY_DELAY=1800 # backing off from rate limits stops here; a session token lasts an hour
+
+# tee that ignores Ctrl-C. tofu/terraform keep printing while they stop and save the
+# state; with tee gone, their next line would kill them (SIGPIPE).
+keep() { (trap '' INT; exec tee "$1"); }
+
+# retry_reason <output>: capacity or busy when every error in it is one of those
+retry_reason() {
+  local errors
+  errors="$(grep 'Error: ' "$1")" || return 0
+  if grep -qviE "$CAPACITY_ERRORS" <<< "$errors"; then return 0; fi
+  if grep -q 'TooManyRequests' <<< "$errors"; then echo busy; else echo capacity; fi
+}
+
+destroys_nothing() { # destroys_nothing <provider> <saved plan>
+  tf_for "$1" "$(stack_dir "$1")" show -json "$2" | jq -e 'any(.resource_changes[]?.change.actions[]; . == "delete") | not' >/dev/null
+}
+
+tfvar() { # tfvar <file> <name>: a string variable set on one line of a tfvars file
+  sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -1
+}
+
+# The profile to refresh before each attempt when the oci stack signs in with a session
+# token, which expires an hour after its last refresh. Nothing for an API key.
+oci_session_profile() { # oci_session_profile <tfvars>
+  local auth profile
+  auth="$(tfvar "$1" oci_auth)"
+  auth="$(printf '%s' "${auth:-${TF_VAR_oci_auth:-}}" | tr '[:upper:]' '[:lower:]')"
+  [[ "$auth" == "securitytoken" ]] || return 0
+  profile="$(tfvar "$1" oci_config_profile)"
+  echo "${profile:-${TF_VAR_oci_config_profile:-DEFAULT}}"
+}
+
+refresh_oci_session() { # refresh_oci_session <profile>
+  local out
+  out="$(oci session refresh --profile "$1" 2>&1)" && return 0
+  echo "$out" >&2
+  die "oci: can't refresh the session of profile $1. A session ends 24 hours after you sign in, or an hour after its last refresh. Sign in again with oci session authenticate --profile-name $1, then run this again"
+}
+
+apply_until_capacity() { # apply_until_capacity <provider> [extra args]
+  local p="$1"; shift
+  local dir out plan profile="" interval delay pause cap deadline="" attempt=1 summary why a
+  local args=() state=() approve=()
+  dir="$(stack_dir "$p")"
+  interval="${FREELUNCH_CAPACITY_INTERVAL:-120}"
+  [[ "$interval" =~ ^[0-9]+$ ]] || die "FREELUNCH_CAPACITY_INTERVAL is a number of seconds, not '$interval'"
+  if [[ -n "${FREELUNCH_CAPACITY_TIMEOUT:-}" ]]; then
+    [[ "$FREELUNCH_CAPACITY_TIMEOUT" =~ ^[0-9]+$ ]] || die "FREELUNCH_CAPACITY_TIMEOUT is a number of seconds, not '$FREELUNCH_CAPACITY_TIMEOUT'"
+    deadline=$((SECONDS + FREELUNCH_CAPACITY_TIMEOUT))
+  fi
+  cap=$((interval > MAX_CAPACITY_DELAY ? interval : MAX_CAPACITY_DELAY))
+  command -v jq >/dev/null || die "jq is required for --wait-for-capacity"
+  if [[ "$p" == "oci" ]] && is_configured oci; then profile="$(oci_session_profile "$(config_dir oci)/terraform.tfvars")"; fi
+  if [[ -n "$profile" ]] && ! command -v oci >/dev/null; then
+    die "oci: a session token (oci_auth = \"SecurityToken\") expires within the hour, and --wait-for-capacity needs the OCI CLI to refresh it. Install the OCI CLI, or sign in with an API key"
+  fi
+
+  prepare_stack apply "$p"
+  while IFS= read -r a; do
+    args+=("$a")
+    if [[ "$a" == -state=* ]]; then state=("$a"); fi
+  done < <(project_args "$p")
+  if [[ "${FREELUNCH_AUTO_APPROVE:-0}" == "1" ]]; then approve=(-auto-approve); fi
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  out="$TMP/$p.out"
+  plan="$TMP/$p.tfplan"
+  trap 'die "$p: stopped waiting for capacity"' INT
+
+  delay="$interval"
+  while :; do
+    [[ -z "$profile" ]] || refresh_oci_session "$profile"
+    if [[ $attempt -eq 1 ]]; then
+      if tf_for "$p" "$dir" apply -input=false ${args[@]+"${args[@]}"} ${approve[@]+"${approve[@]}"} "$@" 2>&1 | keep "$out"; then break; fi
+    # A retry shows only the summary of its plan, unless the plan fails or is refused.
+    elif tf_for "$p" "$dir" plan -input=false -no-color -out="$plan" ${args[@]+"${args[@]}"} "$@" > "$out" 2>&1; then
+      summary="$(grep -m1 -E '^(Plan:|No changes)' "$out" || true)"
+      if ! destroys_nothing "$p" "$plan"; then
+        cat "$out" >&2
+        die "$p: the plan for attempt $attempt destroys or replaces something, so it is not applied without you. Run freelunch apply $p to review it"
+      fi
+      [[ -z "$summary" ]] || log "$p: attempt $attempt: $summary"
+      # A saved plan already holds the variables; only the state has to be pointed at.
+      if tf_for "$p" "$dir" apply -input=false ${state[@]+"${state[@]}"} "$plan" 2>&1 | keep "$out"; then break; fi
+    else
+      cat "$out" >&2
+    fi
+    case "$(retry_reason "$out")" in
+      capacity) delay="$interval"; why="out of host capacity" ;;
+      busy)     delay=$((delay * 2 > cap ? cap : delay * 2)); why="OCI asks for fewer requests (TooManyRequests)" ;;
+      *)        die "$p: apply failed, and not for lack of capacity, so it is not retried (see the output above)" ;;
+    esac
+    pause=$((delay + RANDOM % (delay / 5 + 1)))
+    if [[ -n "$deadline" && $((SECONDS + pause)) -gt $deadline ]]; then
+      die "$p: still out of capacity after $attempt attempt(s), and FREELUNCH_CAPACITY_TIMEOUT=$FREELUNCH_CAPACITY_TIMEOUT ends the wait here"
+    fi
+    attempt=$((attempt + 1))
+    log "$p: $why; attempt $attempt in ${pause}s (Ctrl-C stops waiting)"
+    sleep "$pause"
+  done
+  trap - INT
+  [[ $attempt -eq 1 ]] || log "$p: applied on attempt $attempt"
 }
 
 deployed_hosts_json() {
@@ -251,10 +371,16 @@ cmd_output() { # cmd_output <stack|hybrid> [tofu/terraform output args]
 cmd_lifecycle() { # plan|apply|destroy
   need_tf
   local action="$1"; shift
-  local names=() extra=() seen_dashes=0 a
+  local names=() extra=() seen_dashes=0 wait_for_capacity=0 a
   for a in "$@"; do
-    if [[ $seen_dashes -eq 1 ]]; then extra+=("$a"); elif [[ "$a" == "--" ]]; then seen_dashes=1; else names+=("$a"); fi
+    if [[ $seen_dashes -eq 1 ]]; then extra+=("$a"); continue; fi
+    case "$a" in
+      --)                  seen_dashes=1 ;;
+      --wait-for-capacity) wait_for_capacity=1 ;;
+      *)                   names+=("$a") ;;
+    esac
   done
+  [[ $wait_for_capacity -eq 0 || "$action" == "apply" ]] || die "$action: only apply takes --wait-for-capacity"
   local resolved providers=()
   resolved="$(resolve ${names[@]+"${names[@]}"})" || exit 1
   while IFS= read -r a; do [[ -n "$a" ]] && providers+=("$a"); done <<< "$resolved"
@@ -273,7 +399,10 @@ cmd_lifecycle() { # plan|apply|destroy
     plan)
       for a in ${hosts[@]+"${hosts[@]}"} ${services[@]+"${services[@]}"} ${glue[@]+"${glue[@]}"}; do run_stack plan "$a" ${extra[@]+"${extra[@]}"}; done ;;
     apply)
-      for a in ${hosts[@]+"${hosts[@]}"} ${services[@]+"${services[@]}"}; do run_stack apply "$a" ${extra[@]+"${extra[@]}"}; done
+      for a in ${hosts[@]+"${hosts[@]}"}; do
+        if [[ $wait_for_capacity -eq 1 ]]; then apply_until_capacity "$a" ${extra[@]+"${extra[@]}"}; else run_stack apply "$a" ${extra[@]+"${extra[@]}"}; fi
+      done
+      for a in ${services[@]+"${services[@]}"}; do run_stack apply "$a" ${extra[@]+"${extra[@]}"}; done
       [[ ${#hosts[@]} -gt 0 ]] && cmd_hybrid
       for a in ${glue[@]+"${glue[@]}"}; do run_stack apply "$a" ${extra[@]+"${extra[@]}"}; done ;;
     destroy)

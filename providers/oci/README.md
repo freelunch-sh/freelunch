@@ -47,9 +47,11 @@ update that file; the modules read it at plan time.
 `oci_config_profile` picks the profile in `~/.oci/config` (default `DEFAULT`). A session
 token works instead of an API key: run `oci session authenticate`, then set
 `oci_auth = "SecurityToken"` and `oci_config_profile` to the profile the session was saved
-under. A session lasts an hour; `oci session refresh --profile <name>` extends it, up to
-24 hours. With the Docker runner, change the absolute `key_file` and `security_token_file`
-paths the session wrote into `~` paths as well.
+under. A session expires after an hour. `oci session refresh --profile <name>` gives it
+another hour, but only while it is still valid, and for 24 hours after you signed in at
+most. Then sign in again; until you do, every plan and apply fails with
+`401-NotAuthenticated`. With the Docker runner, change the absolute `key_file` and
+`security_token_file` paths the session wrote into `~` paths as well.
 
 ## Usage
 
@@ -109,6 +111,44 @@ instances = {
 For a full self-hosting platform, run Dokploy or Coolify as an app and deploy everything
 else through its UI (see `inspire/repos/oci-vm/statickidz-*` for reference).
 
+### Waiting for capacity
+
+Free A1 capacity comes and goes, and creating the host often fails with
+`500-InternalError, Out of host capacity`. Instead of running `apply` until it works:
+
+```bash
+bin/freelunch apply oci --wait-for-capacity
+```
+
+You review and approve the plan as usual. While OCI is out of capacity, freelunch waits two
+minutes, plus up to 20% so that retries don't line up, and tries again until the host
+exists. Whatever the first attempt created stays, and each retry plans again and creates
+the rest. When OCI answers `TooManyRequests`, the wait doubles each time, up to 30 minutes.
+
+A retry applies its plan without asking, so it is careful about what it applies:
+
+- Only "out of capacity" and `TooManyRequests` are retried. Any other error stops it.
+- A plan that would destroy or replace anything stops it too. That can happen when the
+  tfvars change while it waits. Changing an instance's `availability_domain_index`, to try
+  another AD in a multi-AD region, is fine: the next attempt picks it up.
+- Ctrl-C stops it. When you press it during an attempt, tofu/terraform still stop
+  cleanly and save the state.
+
+Getting the host can take hours or days. `FREELUNCH_CAPACITY_INTERVAL` sets the wait in
+seconds (default 120) and `FREELUNCH_CAPACITY_TIMEOUT` gives up after that many seconds.
+Keep the interval at a minute or more: OCI answers faster retries with `TooManyRequests`.
+This is for getting one account its free host, not for collecting hosts across accounts.
+
+**With a session token** (`oci_auth = "SecurityToken"`), freelunch runs
+`oci session refresh --profile <oci_config_profile>` before every attempt, so it needs the
+[OCI CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm). That
+keeps the session going for its 24 hours, measured from when you signed in. When a refresh
+fails, the retries stop and print the command to sign in again
+(`oci session authenticate --profile-name <name>`); run `apply` again after it. A session
+that has already expired can't be refreshed, so sign in again before you start. For a
+longer wait, use an API key, which doesn't expire. The runner image has no OCI CLI, so
+there it takes an API key.
+
 ## What gets created
 
 | Module | Resources |
@@ -138,8 +178,8 @@ The stack outputs `hosts` (the [host contract](../../docs/architecture.md#host-c
 
 ## Caveats
 
-- **"Out of host capacity"** on A1 creation is common. Retry automatically with
-  [`scripts/retry-apply.sh`](scripts/retry-apply.sh) (it only retries capacity errors).
+- **"Out of host capacity"** on A1 creation is common. `apply oci --wait-for-capacity`
+  keeps trying until the host exists (see [Waiting for capacity](#waiting-for-capacity)).
   Upgrading to Pay-As-You-Go improves capacity, but then anything over the caps is billed,
   so set a $1 budget alert first.
 - **Idle reclamation.** Oracle may reclaim Always Free instances whose CPU, network and (for A1)

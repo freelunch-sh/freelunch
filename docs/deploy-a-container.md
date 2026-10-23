@@ -102,7 +102,13 @@ scanner on the internet. Close it if you can:
 freelunch apply oci
 ```
 
-If OCI answers "Out of host capacity", see [providers/oci](../providers/oci/README.md#caveats).
+Free Arm capacity is often short, and OCI then answers "Out of host capacity". Run
+`freelunch apply oci --wait-for-capacity` instead. It tries again every two minutes until
+the VM exists, and a retry never applies a plan that destroys something. With a session
+token it refreshes the session before each attempt, but a session lasts 24 hours at most,
+so for a longer wait use an API key. See
+[Waiting for capacity](../providers/oci/README.md#waiting-for-capacity).
+
 When it finishes, `freelunch inventory` lists the host as `oci-main`.
 
 ### Check the host key
@@ -303,6 +309,8 @@ as `freelunch-oci-main`. The machine you deploy from has to be on the same tailn
 
 | Symptom | Look at |
 |---|---|
+| `500-InternalError, Out of host capacity` | OCI has no free Arm capacity right now. `freelunch apply oci --wait-for-capacity` keeps trying |
+| `401-NotAuthenticated` from OCI | With a session token, the session has expired: sign in again with `oci session authenticate --profile-name <oci_config_profile>` (a refresh only works while it is still valid). With an API key, check `user`, `fingerprint` and `key_file` in `~/.oci/config` |
 | `deploy` waits for SSH and gives up | The VM's public IP in `freelunch inventory`, `ssh_source_cidrs`, and your key (`FREELUNCH_SSH_KEY`) |
 | `Permission denied (publickey)` | The key in `ssh_public_keys` must match the one `deploy` uses |
 | `REMOTE HOST IDENTIFICATION HAS CHANGED` | If you recreated the VM with the same IP, remove its line from `.freelunch/known_hosts`. If you didn't, stop: something else answers at that address |

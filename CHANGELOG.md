@@ -28,6 +28,13 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
   requests without the token's headers and they never reach the host.
 - `freelunch output <stack> [name]` prints a stack's outputs from its state, e.g.
   `output cloudflare -json service_tokens` or `output hybrid -raw ssh_config`.
+- **`freelunch apply --wait-for-capacity`** keeps retrying a host stack while OCI is out of
+  capacity, with the project's tfvars, state and plugins like any other run. You approve
+  the first attempt; each retry plans again and applies that plan only if it destroys
+  nothing. Rate limits double the wait, up to 30 minutes. With a session token it runs
+  `oci session refresh` before each attempt and stops with the sign-in command once the
+  session's 24 hours are up. `FREELUNCH_CAPACITY_INTERVAL` and `FREELUNCH_CAPACITY_TIMEOUT`
+  tune it.
 - `deploy/`, a read-only root module that resolves `apps.tfvars` against the inventory and
   the tunnels, with checks for unknown hosts and missing files.
 - `hybrid/` takes `state_dir` to read host state from a project.
@@ -46,6 +53,11 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
   already set in the shell win.
 - `freelunch fmt` takes `-check`.
 - `freelunch list` no longer reports a destroyed stack as deployed.
+
+### Removed
+
+- `providers/oci/scripts/retry-apply.sh`. It ran against the checkout instead of the
+  project and stopped at the first expired session; `apply --wait-for-capacity` replaces it.
 
 ### Security
 

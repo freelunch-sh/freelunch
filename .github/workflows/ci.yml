@@ -58,7 +58,7 @@ jobs:
       - name: fmt
         run: bin/freelunch fmt -check
       - name: shellcheck
-        run: shellcheck bin/freelunch tests/cli.sh providers/*/scripts/*.sh
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck bin/freelunch
       - name: README checklist matches provider.yaml
         run: |
           bin/freelunch catalog

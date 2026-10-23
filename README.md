@@ -64,8 +64,9 @@ freelunch apply cloudflare     # tunnel + DNS record
 freelunch deploy               # copy compose files and secrets, start, wait until healthy
 ```
 
-To ship a new version, change the image tag and run `freelunch deploy` again; the VM stays.
-Without installing anything but Docker:
+If OCI is out of Arm capacity, `freelunch apply oci --wait-for-capacity` keeps trying until
+the VM exists. To ship a new version, change the image tag and run `freelunch deploy` again;
+the VM stays. Without installing anything but Docker:
 
 ```bash
 docker run --rm -it -v "$PWD:/project" -v ~/.oci:/root/.oci:ro \
@@ -129,7 +130,7 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 | `freelunch init [stack...]` | Create `.freelunch/` in your project (default stacks: `oci cloudflare`) |
 | `freelunch deploy [host\|provider]` | Copy Compose apps and their secrets to the hosts over SSH, start them, wait until healthy, start `cloudflared` (`--dry-run` to preview) |
 | `freelunch list` | Every provider with category, status, layer, IaC support and deployment state |
-| `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts → services → hybrid → glue) |
+| `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts → services → hybrid → glue). `apply --wait-for-capacity` retries hosts while OCI is out of capacity ([how](providers/oci/README.md#waiting-for-capacity)) |
 | `freelunch hybrid` | Re-aggregate deployed host stacks |
 | `freelunch inventory` | Write `inventory.json` |
 | `freelunch output <stack> [name]` | Print a stack's outputs from its state, e.g. `output cloudflare -json service_tokens` or `output hybrid -raw ssh_config` |
@@ -153,8 +154,7 @@ freelunch/
 │   │   ├── README.md              provider guide
 │   │   ├── provider.yaml          metadata + free-tier limits (enforced)
 │   │   ├── modules/               network, compute, docker-host
-│   │   ├── stack/                 deployable root module (+ tests)
-│   │   └── scripts/               provider helpers (capacity retry)
+│   │   └── stack/                 deployable root module (+ tests)
 │   ├── gcp/, aws/, azure/         ✅ implemented, same layout as oci/
 │   ├── cloudflare/                ✅ glue: tunnel, DNS and Access per host, plus the cloudflared app
 │   └── <provider>/                provider.yaml + README for every catalogued provider
@@ -183,7 +183,8 @@ Releases are small: every usable feature gets its own tag.
   3. **$0 guardrails:** a budget alert on every provider and a cost summary after each plan.
   4. **Health alerts** for hosts and apps.
   5. **Backups** to R2 or B2, with restore.
-  6. **OCI capacity retry** built into `apply`.
+  6. **OCI capacity, continued:** try each availability domain in turn while waiting, and
+     send a notification when the host exists.
   7. **`freelunch doctor`:** credentials, billable leftovers, expiring trials.
 - **Later:** more menus (self-hosted PaaS, homelab, k3s, VPN, n8n, CI runners, game
   servers), moving a host to another cloud with its data, encrypted remote state, secrets

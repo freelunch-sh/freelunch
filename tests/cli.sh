@@ -47,16 +47,59 @@ ssh-keygen -q -t ed25519 -N '' -C fake-host -f "$WORK/hostkey"
 printf '#!/bin/sh\nexit 0\n' > "$WORK/bin/cloud-init"
 # Records the arguments a stack run gets instead of running tofu/terraform. Like them, init
 # writes the dependency lock file next to the code (FAKE_LOCK is its content).
+# FAKE_APPLY says how each apply in turn ends: ok, or the OCI errors it prints, e.g.
+# "capacity busy ok" or "capacity+limit". show -json prints FAKE_PLAN, a plan that only
+# creates by default.
 cat > "$WORK/bin/fake-tf" <<'EOF'
 #!/usr/bin/env bash
 echo "TF_DATA_DIR=${TF_DATA_DIR:-} $*" >> "$FAKE_LOG"
 dir="${1#-chdir=}"
-if [[ "${2:-}" == "init" ]]; then
-  echo "lock before init: $(cat "$dir/.terraform.lock.hcl" 2>/dev/null || echo none)" >> "$FAKE_LOG"
-  echo "${FAKE_LOCK:-# lock}" > "$dir/.terraform.lock.hcl"
-fi
+case "${2:-}" in
+  init)
+    echo "lock before init: $(cat "$dir/.terraform.lock.hcl" 2>/dev/null || echo none)" >> "$FAKE_LOG"
+    echo "${FAKE_LOCK:-# lock}" > "$dir/.terraform.lock.hcl" ;;
+  apply)
+    n=$(( $(cat "$FAKE_LOG.applies" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$FAKE_LOG.applies"
+    read -ra ends <<< "${FAKE_APPLY:-ok}"
+    end="${ends[n-1]:-ok}"
+    [[ "$end" != "ok" ]] || exit 0
+    IFS=+ read -ra errors <<< "$end"
+    for e in "${errors[@]}"; do
+      case "$e" in
+        capacity) echo "│ Error: 500-InternalError, Out of host capacity." ;;
+        busy)     echo "│ Error: 429-TooManyRequests, Too many requests for the user" ;;
+        auth)     echo "│ Error: 401-NotAuthenticated, The required information to complete authentication was not provided or was incorrect." ;;
+        limit)    echo "│ Error: 400-LimitExceeded, The following service limits were exceeded: standard-a1-core-count" ;;
+      esac
+    done
+    exit 1 ;;
+  plan)
+    echo "Plan: 1 to add, 0 to change, 0 to destroy." ;;
+  show)
+    creates='{"resource_changes":[{"address":"oci_core_instance.this","change":{"actions":["create"]}}]}'
+    echo "${FAKE_PLAN:-$creates}" ;;
+esac
 EOF
 chmod +x "$WORK/bin/"*
+
+# For apply --wait-for-capacity: an OCI CLI whose session refresh works unless
+# FAKE_SESSION_EXPIRED is set, and a sleep that only records how long it was asked to wait.
+mkdir -p "$WORK/wait-bin"
+cat > "$WORK/wait-bin/oci" <<'EOF'
+#!/usr/bin/env bash
+echo "oci $*" >> "$FAKE_LOG"
+if [[ -n "${FAKE_SESSION_EXPIRED:-}" ]]; then
+  echo "Your session is no longer valid and cannot be refreshed. Please use 'oci session authenticate' to create a new session." >&2
+  exit 1
+fi
+echo "Successfully refreshed token" >&2
+EOF
+cat > "$WORK/wait-bin/sleep" <<'EOF'
+#!/bin/sh
+echo "sleep $*" >> "$FAKE_LOG"
+EOF
+chmod +x "$WORK/wait-bin/"*
 
 # Helpers -------------------------------------------------------------------------------
 
@@ -96,6 +139,21 @@ deploy_in() {
   (cd "$dir" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" "$CLI" deploy "$@")
 }
 
+# capacity_project <dir>: a project with an oci tfvars, and a scratch checkout next to it
+# (<dir>-checkout) for apply to run the fake tofu/terraform in
+capacity_project() {
+  new_project "$1"
+  scratch_checkout "$1-checkout" oci
+  mkdir -p "$1-checkout/hybrid"
+  cp "$ROOT/providers/oci/stack/project.tfvars.example" "$1/.freelunch/oci/terraform.tfvars"
+}
+
+# apply_in <dir> [args...]: run apply in a capacity_project with the fakes
+apply_in() {
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/wait-bin:$PATH" FAKE_LOG="$dir/fake.log" FREELUNCH_TF="$WORK/bin/fake-tf" "$dir-checkout/bin/freelunch" apply "$@")
+}
+
 # shellcheck disable=SC2012 # ls -l is the portable way to read permissions on macOS and Linux
 mode() { ls -l "$1" | cut -c1-10; }
 in_dir() { local d="$1"; shift; (cd "$d" && "$@"); }
@@ -108,6 +166,7 @@ contains() { case "$1" in *"$2"*) return 0 ;; esac; echo "expected to find: $2";
 lacks()    { case "$1" in *"$2"*) echo "did not expect: $2"; return 1 ;; esac; }
 exists()   { [ -e "$1" ] || { echo "missing: $1"; return 1; }; }
 absent()   { [ ! -e "$1" ] || { echo "should not exist: $1"; return 1; }; }
+between()  { { [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]; } || { echo "expected $2 to $3, got: $1"; return 1; }; }
 
 run_test() { # run_test <name>: run test_<name> in a subshell with errexit on
   local rc
@@ -234,6 +293,85 @@ test_lock_files_live_in_the_project() {
   git -C "$p" init -q
   fails git -C "$p" check-ignore -q .freelunch/oci/.terraform.lock.hcl
   for f in oci/terraform.tfstate oci/.terraform/providers .env; do git -C "$p" check-ignore -q ".freelunch/$f"; done
+}
+
+# OCI is often out of A1 capacity. Every attempt gets the project's tfvars, state and
+# plugins. You approve the first one as usual; a retry applies the plan it just made.
+test_apply_waits_for_capacity() {
+  local p="$WORK/capacity" stack out sleeps
+  capacity_project "$p"
+  stack="$p-checkout/providers/oci/stack"
+  out="$(FAKE_APPLY="capacity busy ok" FREELUNCH_CAPACITY_INTERVAL=100 apply_in "$p" oci --wait-for-capacity 2>&1)"
+  grep -qx "TF_DATA_DIR=$p/.freelunch/oci/.terraform -chdir=$stack apply -input=false -var-file=$p/.freelunch/oci/terraform.tfvars -state=$p/.freelunch/oci/terraform.tfstate" "$p/fake.log"
+  equals "$(grep -c "^TF_DATA_DIR=$p/.freelunch/oci/.terraform -chdir=$stack plan -input=false -no-color -out=.*/oci.tfplan -var-file=$p/.freelunch/oci/terraform.tfvars -state=$p/.freelunch/oci/terraform.tfstate$" "$p/fake.log")" 2
+  equals "$(grep -c -- "-chdir=$stack show -json .*/oci.tfplan$" "$p/fake.log")" 2
+  equals "$(grep -c -- "-chdir=$stack apply -input=false -state=$p/.freelunch/oci/terraform.tfstate .*/oci.tfplan$" "$p/fake.log")" 2
+  # The interval with up to 20% on top, and twice that after a rate limit.
+  sleeps="$(sed -n 's/^sleep //p' "$p/fake.log")"
+  equals "$(wc -l <<< "$sleeps" | tr -d ' ')" 2
+  between "$(sed -n 1p <<< "$sleeps")" 100 120
+  between "$(sed -n 2p <<< "$sleeps")" 200 240
+  contains "$out" "oci: out of host capacity; attempt 2 in"
+  contains "$out" "oci: attempt 2: Plan: 1 to add, 0 to change, 0 to destroy."
+  contains "$out" "oci: OCI asks for fewer requests (TooManyRequests); attempt 3 in"
+  contains "$out" "oci: applied on attempt 3"
+  # An API key needs no session refresh: oci_auth is only in a comment of the example.
+  fails grep -q '^oci ' "$p/fake.log"
+}
+
+# A session token lasts an hour. It is refreshed before each attempt, which works for up
+# to 24 hours after signing in.
+test_capacity_retries_refresh_the_oci_session() {
+  local p="$WORK/capacity-session" out
+  capacity_project "$p"
+  printf 'oci_auth           = "SecurityToken"\noci_config_profile = "freelunch"   # from oci session authenticate\n' >> "$p/.freelunch/oci/terraform.tfvars"
+  FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity
+  equals "$(grep -E '^oci |/stack (apply|plan) ' "$p/fake.log" | sed -E 's/^oci session refresh --profile freelunch$/refresh/; s/.*\/stack (apply|plan) .*/\1/')" \
+    "$(printf 'refresh\napply\nrefresh\nplan\napply')"
+  # A session that can't be refreshed any more stops it before anything is applied.
+  rm "$p/fake.log"*
+  if out="$(FAKE_SESSION_EXPIRED=1 apply_in "$p" oci --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "Your session is no longer valid"
+  contains "$out" "24 hours"
+  contains "$out" "oci session authenticate --profile-name freelunch"
+  fails grep -q '/stack apply ' "$p/fake.log"
+}
+
+test_capacity_retries_never_destroy() {
+  local p="$WORK/capacity-destroy" out replace
+  capacity_project "$p"
+  replace='{"resource_changes":[{"address":"oci_core_vcn.this","change":{"actions":["delete","create"]}}]}'
+  if out="$(FAKE_APPLY="capacity ok" FAKE_PLAN="$replace" apply_in "$p" oci --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "the plan for attempt 2 destroys or replaces something, so it is not applied without you"
+  equals "$(grep -c '/stack apply ' "$p/fake.log")" 1
+}
+
+test_capacity_retries_stop_on_other_errors() {
+  local p="$WORK/capacity-other" out
+  capacity_project "$p"
+  if out="$(FAKE_APPLY="capacity auth" apply_in "$p" oci --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "not for lack of capacity, so it is not retried"
+  equals "$(grep -c '/stack apply ' "$p/fake.log")" 2
+  equals "$(grep -c '^sleep ' "$p/fake.log")" 1
+  # Out of capacity for one instance but another error for the next: not retried either.
+  rm "$p/fake.log"*
+  FAKE_APPLY="capacity+limit" fails apply_in "$p" oci --wait-for-capacity
+  fails grep -q '^sleep ' "$p/fake.log"
+  # Without the flag, apply does not wait.
+  rm "$p/fake.log"*
+  FAKE_APPLY="capacity" fails apply_in "$p" oci
+  fails grep -q '^sleep ' "$p/fake.log"
+}
+
+test_capacity_retries_give_up_and_only_apply_waits() {
+  local p="$WORK/capacity-limits" out
+  capacity_project "$p"
+  if out="$(FAKE_APPLY="capacity" FREELUNCH_CAPACITY_INTERVAL=100 FREELUNCH_CAPACITY_TIMEOUT=50 apply_in "$p" oci --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "still out of capacity after 1 attempt(s), and FREELUNCH_CAPACITY_TIMEOUT=50 ends the wait here"
+  fails grep -q '^sleep ' "$p/fake.log"
+  FREELUNCH_CAPACITY_INTERVAL=soon fails apply_in "$p" oci --wait-for-capacity
+  fails in_dir "$p" "$p-checkout/bin/freelunch" plan oci --wait-for-capacity
+  fails in_dir "$p" "$p-checkout/bin/freelunch" destroy oci --wait-for-capacity
 }
 
 test_deploy_copies_files_and_starts_apps() {
