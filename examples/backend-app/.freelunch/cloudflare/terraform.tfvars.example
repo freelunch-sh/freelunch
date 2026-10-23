@@ -1,6 +1,10 @@
 # Copy to terraform.tfvars and fill in (it is git-ignored).
 # Needs CLOUDFLARE_API_TOKEN in .freelunch/.env (permissions: providers/cloudflare/README.md).
 
+# The names of everything this stack creates start with the project name. freelunch
+# init wrote the same one into each stack.
+name_prefix = "backend-app"
+
 zone = "example.com"   # a domain already on your Cloudflare account
 
 # https://api.example.com -> port 8080 on the OCI host, where compose.yaml publishes the app.

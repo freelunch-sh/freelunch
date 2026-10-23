@@ -132,7 +132,7 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 
 | Command | What it does |
 |---|---|
-| `freelunch init [stack...]` | Create `.freelunch/` in your project (default stacks: `oci cloudflare`) |
+| `freelunch init [--name <name>] [stack...]` | Create `.freelunch/` in your project (default stacks: `oci cloudflare`), with resources named after the project |
 | `freelunch deploy [host\|provider]` | Copy Compose apps and their secrets to the hosts over SSH, start them, wait until healthy, start `cloudflared` (`--dry-run` to preview) |
 | `freelunch domain suggest <name...>` | Free names like yours at every free domain provider, and similar ones where yours is taken ([docs/free-domains.md](docs/free-domains.md)) |
 | `freelunch list` | Every provider with category, status, layer, IaC support and deployment state |
