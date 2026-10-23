@@ -39,7 +39,8 @@ variable "instances" {
     Instances to create, keyed by short name (also used as the hostname).
     shape: VM.Standard.A1.Flex (Arm) or VM.Standard.E2.1.Micro (AMD).
     ocpus / memory_in_gbs apply to flexible shapes only.
-    availability_domain_index: null picks the first AD that offers the shape.
+    availability_domain_index: null picks the first AD that offers the shape (see
+    availability_domain_offset).
     user_data: plain-text cloud-init, applied on first boot only.
   EOT
   type = map(object({
@@ -55,6 +56,17 @@ variable "instances" {
   validation {
     condition     = alltrue([for name in keys(var.instances) : can(regex("^[a-z][a-z0-9-]{0,30}$", name))])
     error_message = "Instance names must start with a letter and contain at most 31 lowercase letters, digits or hyphens."
+  }
+}
+
+variable "availability_domain_offset" {
+  description = "Places instances without availability_domain_index in the next availability domain that offers their shape, wrapping around. freelunch apply --wait-for-capacity raises it by one on each retry. A created instance stays where it is."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.availability_domain_offset >= 0 && floor(var.availability_domain_offset) == var.availability_domain_offset
+    error_message = "availability_domain_offset must be a whole number, 0 or more."
   }
 }
 

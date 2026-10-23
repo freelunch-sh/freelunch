@@ -68,8 +68,9 @@ freelunch apply cloudflare     # tunnel + DNS record
 freelunch deploy               # copy compose files and secrets, start, wait until healthy
 ```
 
-If OCI is out of Arm capacity, `freelunch apply oci --wait-for-capacity` keeps trying until
-the VM exists. To ship a new version, change the image tag and run `freelunch deploy` again;
+If OCI is out of Arm capacity, `freelunch apply oci --wait-for-capacity` keeps trying, in
+every availability domain, until the VM exists; with a reviewed plan it can wait in the
+background and notify you. To ship a new version, change the image tag and run `freelunch deploy` again;
 the VM stays. Without installing anything but Docker:
 
 ```bash
@@ -135,7 +136,8 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 | `freelunch deploy [host\|provider]` | Copy Compose apps and their secrets to the hosts over SSH, start them, wait until healthy, start `cloudflared` (`--dry-run` to preview) |
 | `freelunch domain suggest <name...>` | Free names like yours at every free domain provider, and similar ones where yours is taken ([docs/free-domains.md](docs/free-domains.md)) |
 | `freelunch list` | Every provider with category, status, layer, IaC support and deployment state |
-| `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts → services → hybrid → glue). `plan --show-user-data` prints each host's cloud-init with secrets left out. `apply --wait-for-capacity` retries hosts while OCI is out of capacity ([how](providers/oci/README.md#waiting-for-capacity)) |
+| `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts → services → hybrid → glue). `plan --show-user-data` prints each host's cloud-init with secrets left out, `plan --out <file>` saves a plan and `apply --plan <file>` applies it without a prompt. `apply --wait-for-capacity` retries hosts while OCI is out of capacity, `--detach` in the background ([how](providers/oci/README.md#waiting-for-capacity)) |
+| `freelunch status` | How each capacity wait is going: attempts, the last result, the next try |
 | `freelunch hybrid` | Re-aggregate deployed host stacks |
 | `freelunch inventory` | Write `inventory.json` |
 | `freelunch output <stack> [name]` | Print a stack's outputs from its state, e.g. `output cloudflare -json service_tokens` or `output hybrid -raw ssh_config` |
@@ -188,9 +190,7 @@ Releases are small: every usable feature gets its own tag.
   3. **$0 guardrails:** a budget alert on every provider and a cost summary after each plan.
   4. **Health alerts** for hosts and apps.
   5. **Backups** to R2 or B2, with restore.
-  6. **OCI capacity, continued:** try each availability domain in turn while waiting, and
-     send a notification when the host exists.
-  7. **`freelunch doctor`:** credentials, billable leftovers, expiring trials.
+  6. **`freelunch doctor`:** credentials, billable leftovers, expiring trials.
 - **Later:** more menus (self-hosted PaaS, homelab, k3s, VPN, n8n, CI runners, game
   servers), moving a host to another cloud with its data, encrypted remote state, secrets
   managers, PaaS and GPU providers, and a linter that flags billable resources in any

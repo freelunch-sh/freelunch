@@ -20,9 +20,11 @@ bypassed with `acknowledge_billable_resources = true`, except the minimum boot v
 ## Behaviour
 
 - **Image:** the newest `Canonical Ubuntu 24.04` image for each shape (aarch64 for A1, x86_64 for micro).
-- **Placement:** the first availability domain that offers the shape, or `availability_domain_index`.
-- **No surprise replacement:** `source_details[0].source_id` and `metadata` (SSH keys, cloud-init)
-  are in `ignore_changes`. Rebuild deliberately with `-replace`.
+- **Placement:** the first availability domain that offers the shape, or the one
+  `availability_domain_offset` places further along (wrapping around), or
+  `availability_domain_index`.
+- **No surprise replacement:** `source_details[0].source_id`, `metadata` (SSH keys, cloud-init)
+  and `availability_domain` are in `ignore_changes`. Rebuild deliberately with `-replace`.
 - `preserve_boot_volume = false` by default, so destroy frees the storage quota.
 
 ## Inputs
@@ -35,6 +37,7 @@ bypassed with `acknowledge_billable_resources = true`, except the minimum boot v
 | `subnet_id` | string | (required) | Subnet OCID |
 | `ssh_public_keys` | list(string) | (required) | At least one key |
 | `instances` | map(object) | (required) | `shape`, `ocpus`, `memory_in_gbs`, `boot_volume_gb`, `availability_domain_index`, `assign_public_ip`, `user_data` |
+| `availability_domain_offset` | number | `0` | Moves new instances without an index to the next AD that offers their shape; capacity retries raise it |
 | `name_prefix` | string | `freelunch` | Display name prefix |
 | `operating_system` / `operating_system_version` | string | `Canonical Ubuntu` / `24.04` | Platform image |
 | `preserve_boot_volume` | bool | `false` | Keep boot volumes on destroy |

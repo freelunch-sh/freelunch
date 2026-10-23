@@ -21,6 +21,10 @@ inventory.json
 known_hosts
 .env
 
+# Capacity waits (freelunch apply --wait-for-capacity)
+wait.log
+wait.state
+
 # A project folder at the root of the checkout (examples/ keep theirs)
 /.freelunch/
 

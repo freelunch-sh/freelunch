@@ -11,8 +11,9 @@ module "docker_host" {
   ingress_tcp_ports = var.ingress_tcp_ports
   ingress_udp_ports = var.ingress_udp_ports
 
-  instances          = var.instances
-  tailscale_auth_key = var.tailscale_auth_key
+  instances                  = var.instances
+  availability_domain_offset = var.availability_domain_offset
+  tailscale_auth_key         = var.tailscale_auth_key
 
   reserved_block_storage_gb      = var.reserved_block_storage_gb
   acknowledge_billable_resources = var.acknowledge_billable_resources

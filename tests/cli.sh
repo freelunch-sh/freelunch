@@ -48,12 +48,13 @@ printf '#!/bin/sh\nexit 0\n' > "$WORK/bin/cloud-init"
 # Records the arguments a stack run gets instead of running tofu/terraform. Like them, init
 # writes the dependency lock file next to the code (FAKE_LOCK is its content).
 # FAKE_APPLY says how each apply in turn ends: ok, or the OCI errors it prints, e.g.
-# "capacity busy ok" or "capacity+limit". show -json prints FAKE_PLAN, a plan that only
-# creates by default.
+# "capacity busy ok" or "capacity+limit". plan -out=<file> saves FAKE_PLAN there, as the
+# JSON that show -json prints; by default a plan that only creates an instance.
 cat > "$WORK/bin/fake-tf" <<'EOF'
 #!/usr/bin/env bash
 echo "TF_DATA_DIR=${TF_DATA_DIR:-} $*" >> "$FAKE_LOG"
 dir="${1#-chdir=}"
+creates='{"resource_changes":[{"address":"oci_core_instance.this","change":{"actions":["create"]}}]}'
 case "${2:-}" in
   init)
     echo "lock before init: $(cat "$dir/.terraform.lock.hcl" 2>/dev/null || echo none)" >> "$FAKE_LOG"
@@ -75,10 +76,11 @@ case "${2:-}" in
     done
     exit 1 ;;
   plan)
+    for a; do [[ "$a" != -out=* ]] || echo "${FAKE_PLAN:-$creates}" > "${a#-out=}"; done
     echo "Plan: 1 to add, 0 to change, 0 to destroy." ;;
   show)
-    creates='{"resource_changes":[{"address":"oci_core_instance.this","change":{"actions":["create"]}}]}'
-    echo "${FAKE_PLAN:-$creates}" ;;
+    for a; do plan="$a"; done
+    cat "$plan" ;;
 esac
 EOF
 chmod +x "$WORK/bin/"*
@@ -102,6 +104,23 @@ EOF
 cat > "$WORK/wait-bin/sleep" <<'EOF'
 #!/bin/sh
 echo "sleep $*" >> "$FAKE_LOG"
+EOF
+# Notifications: a desktop one through osascript, and a POST through curl.
+cat > "$WORK/wait-bin/osascript" <<'EOF'
+#!/usr/bin/env bash
+for a; do last="$a"; done
+echo "desktop: $last" >> "$FAKE_LOG"
+EOF
+cat > "$WORK/wait-bin/curl" <<'EOF'
+#!/usr/bin/env bash
+for a; do
+  case "${prev:-}" in
+    -H)            [[ "$a" != Content-Type:* ]] || type="${a#Content-Type: }" ;;
+    --data-binary) body="$a" ;;
+  esac
+  prev="$a"
+done
+echo "post $a [$type] $body" >> "$FAKE_LOG"
 EOF
 chmod +x "$WORK/wait-bin/"*
 
@@ -193,6 +212,18 @@ fake_token() {
   printf 'eyJhbGciOiJSUzI1NiJ9.%s.c2lnbmF0dXJl\n' "$(printf '{"sub":"ocid1.user.oc1..me","exp":%s}' "$1" | base64 | tr '+/' '-_' | tr -d '=\n')"
 }
 
+# plan_with "<address> <actions> [availability domain]"...: a plan as show -json prints
+# it, e.g. plan_with 'oci_core_instance.this["main"] create Xyz:UK-LONDON-1-AD-2'
+plan_with() {
+  local c address actions ad changes=()
+  for c in "$@"; do
+    read -r address actions ad <<< "$c"
+    changes+=("$(jq -nc --arg a "$address" --arg act "$actions" --arg ad "$ad" \
+      '{address: $a, change: {actions: ($act | split(",")), after: (if $ad == "" then {} else {availability_domain: $ad} end)}}')")
+  done
+  jq -nc '{resource_changes: [$ARGS.positional[] | fromjson]}' --args "${changes[@]}"
+}
+
 # PATH without any oci command, like the runner image
 path_without_oci() {
   local d dirs out=""
@@ -243,6 +274,7 @@ test_init_writes_the_project_folder() {
   grep -q '^  shop-api = {' "$p/.freelunch/apps.tfvars"
   grep -q 'host    = "oci-main"' "$p/.freelunch/apps.tfvars"
   grep -q 'compose = "../docker-compose.yml"' "$p/.freelunch/apps.tfvars"
+  cmp "$p/.freelunch/.gitignore" "$ROOT/examples/backend-app/.freelunch/.gitignore"
 }
 
 # Host stacks start from their project example: only SSH open, no apps in cloud-init.
@@ -365,7 +397,9 @@ test_apply_waits_for_capacity() {
   stack="$p-checkout/providers/oci/stack"
   out="$(FAKE_APPLY="capacity busy ok" FREELUNCH_CAPACITY_INTERVAL=100 apply_in "$p" oci --wait-for-capacity 2>&1)"
   grep -qx "TF_DATA_DIR=$p/.freelunch/oci/.terraform -chdir=$stack apply -input=false -var-file=$p/.freelunch/oci/terraform.tfvars -state=$p/.freelunch/oci/terraform.tfstate" "$p/fake.log"
-  equals "$(grep -c "^TF_DATA_DIR=$p/.freelunch/oci/.terraform -chdir=$stack plan -input=false -no-color -out=.*/oci.tfplan -var-file=$p/.freelunch/oci/terraform.tfvars -state=$p/.freelunch/oci/terraform.tfstate$" "$p/fake.log")" 2
+  # Each retry tries the next availability domain.
+  grep -q "^TF_DATA_DIR=$p/.freelunch/oci/.terraform -chdir=$stack plan -input=false -no-color -out=.*/oci.tfplan -var-file=$p/.freelunch/oci/terraform.tfvars -state=$p/.freelunch/oci/terraform.tfstate -var=availability_domain_offset=1$" "$p/fake.log"
+  grep -q "^TF_DATA_DIR=$p/.freelunch/oci/.terraform -chdir=$stack plan -input=false -no-color -out=.*/oci.tfplan -var-file=$p/.freelunch/oci/terraform.tfvars -state=$p/.freelunch/oci/terraform.tfstate -var=availability_domain_offset=2$" "$p/fake.log"
   equals "$(grep -c -- "-chdir=$stack show -json .*/oci.tfplan$" "$p/fake.log")" 2
   equals "$(grep -c -- "-chdir=$stack apply -input=false -state=$p/.freelunch/oci/terraform.tfstate .*/oci.tfplan$" "$p/fake.log")" 2
   # The interval with up to 20% on top, and twice that after a rate limit.
@@ -542,6 +576,173 @@ runcmd: []" '{resource_changes: [
   lacks "$out" "cloud-init"
   fails grep -q -- '-out=' "$p/fake.log"
   fails freelunch_in "$p" apply oci --show-user-data
+}
+
+# Review once, then anyone can wait: plan --out saves the plan, apply --plan applies it.
+test_plan_out_saves_a_plan_to_review() {
+  local p="$WORK/review" out
+  capacity_project "$p"
+  scratch_checkout "$p-checkout" cloudflare
+  touch "$p/.freelunch/cloudflare/terraform.tfvars"
+  git -C "$p" init -q
+  mkdir -p "$p/plans"
+  out="$(cd "$p/plans" && PATH="$WORK/wait-bin:$PATH" FAKE_LOG="$p/fake.log" FREELUNCH_TF="$WORK/bin/fake-tf" "$p-checkout/bin/freelunch" plan oci --out reviewed.tfplan 2>&1)"
+  # tofu runs in the stack's folder, so the path it gets is absolute.
+  grep -q -- "-chdir=$p-checkout/providers/oci/stack plan -input=false -var-file=$p/.freelunch/oci/terraform.tfvars -state=$p/.freelunch/oci/terraform.tfstate -out=$p/plans/reviewed.tfplan$" "$p/fake.log"
+  equals "$(mode "$p/plans/reviewed.tfplan")" "-rw-------"
+  contains "$out" "saved the plan in reviewed.tfplan. freelunch apply oci --plan reviewed.tfplan applies exactly this plan, without a prompt; add --wait-for-capacity"
+  contains "$out" "reviewed.tfplan holds the stack's variables and state, secrets included. Keep it out of git"
+  # The project folder ignores plans already.
+  out="$(freelunch_in "$p" plan oci --out=.freelunch/oci/reviewed.tfplan 2>&1)"
+  lacks "$out" "Keep it out of git"
+  out="$(freelunch_in "$p" plan cloudflare --out .freelunch/cloudflare/reviewed.tfplan 2>&1)"
+  lacks "$out" "wait-for-capacity"
+  # One stack per plan, and only plan saves one.
+  fails freelunch_in "$p" plan oci cloudflare --out both.tfplan
+  fails freelunch_in "$p" plan oci --out
+  fails freelunch_in "$p" plan oci --out no/such/folder/x.tfplan
+  fails freelunch_in "$p" apply oci --out x.tfplan
+  fails freelunch_in "$p" plan oci --plan x.tfplan
+  fails freelunch_in "$p" plan oci --no-such-option
+}
+
+test_apply_runs_a_saved_plan() {
+  local p="$WORK/saved" out
+  capacity_project "$p"
+  freelunch_in "$p" plan oci --out .freelunch/oci/reviewed.tfplan
+  rm "$p/fake.log"*
+  out="$(freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan < /dev/null 2>&1)"
+  # The saved plan holds the variables: no tfvars, no prompt to skip.
+  grep -qx "TF_DATA_DIR=$p/.freelunch/oci/.terraform -chdir=$p-checkout/providers/oci/stack apply -input=false -state=$p/.freelunch/oci/terraform.tfstate $p/.freelunch/oci/reviewed.tfplan" "$p/fake.log"
+  contains "$out" "Next steps"
+  # Out of capacity, it points to waiting with the same plan.
+  rm "$p/fake.log"*
+  if out="$(FAKE_APPLY=capacity freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "freelunch apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity tries again until the host exists"
+  fails freelunch_in "$p" apply oci --plan nowhere.tfplan
+  fails freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan -- -target=x
+}
+
+# After a reviewed plan nobody has to be at a prompt, and a retry applies only changes
+# that plan makes too.
+test_reviewed_plan_waits_unattended() {
+  local p="$WORK/reviewed-wait" out
+  capacity_project "$p"
+  FAKE_PLAN="$(plan_with "module.network.oci_core_vcn.this create" 'oci_core_instance.this["main"] create Xyz:UK-LONDON-1-AD-1')" \
+    freelunch_in "$p" plan oci --out .freelunch/oci/reviewed.tfplan
+  rm "$p/fake.log"*
+  # The first attempt made the VCN; the retry creates the instance in the next AD.
+  out="$(FAKE_APPLY="capacity ok" FAKE_PLAN="$(plan_with 'oci_core_instance.this["main"] create Xyz:UK-LONDON-1-AD-2')" \
+    freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity < /dev/null 2>&1)"
+  grep -q -- "/stack apply -input=false -state=$p/.freelunch/oci/terraform.tfstate $p/.freelunch/oci/reviewed.tfplan$" "$p/fake.log"
+  grep -q -- "/stack plan -input=false -no-color -out=.*/oci.tfplan -var-file=.* -var=availability_domain_offset=1$" "$p/fake.log"
+  contains "$out" "oci: out of host capacity in UK-LONDON-1-AD-1; attempt 2 in"
+  contains "$out" "oci: attempt 2 in UK-LONDON-1-AD-2: Plan: 1 to add"
+  contains "$out" "oci: applied on attempt 2 in UK-LONDON-1-AD-2"
+  # A retry that changes anything the reviewed plan doesn't is not applied.
+  rm "$p/fake.log"*
+  if out="$(FAKE_APPLY="capacity ok" FAKE_PLAN="$(plan_with 'oci_core_instance.this["main"] create' 'oci_core_instance.this["extra"] create')" \
+    freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "the plan for attempt 2 changes what the reviewed plan doesn't: oci_core_instance.this[\"extra\"] (create). It is not applied"
+  equals "$(grep -c '/stack apply ' "$p/fake.log")" 1
+  rm "$p/fake.log"*
+  if out="$(FAKE_APPLY="capacity ok" FAKE_PLAN="$(plan_with 'module.network.oci_core_vcn.this update')" \
+    freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "module.network.oci_core_vcn.this (update)"
+}
+
+# Each retry tries the next availability domain, in a stack that has the variable for it.
+test_capacity_retries_rotate_availability_domains() {
+  local p="$WORK/rotate"
+  capacity_project "$p"
+  FAKE_APPLY="capacity capacity capacity ok" apply_in "$p" oci --wait-for-capacity
+  equals "$(grep -o 'availability_domain_offset=[0-9]*' "$p/fake.log" | tr '\n' ' ')" \
+    "availability_domain_offset=1 availability_domain_offset=2 availability_domain_offset=3 "
+  rm "$p/fake.log"*
+  sed -i.bak '/^variable "availability_domain_offset"/,/^}/d' "$p-checkout/providers/oci/stack/variables.tf"
+  FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity
+  fails grep -q 'availability_domain_offset' "$p/fake.log"
+}
+
+# --detach waits in the background with its output in wait.log, and status shows it.
+test_detached_wait_and_status() {
+  local p="$WORK/detach" out f
+  capacity_project "$p"
+  FAKE_PLAN="$(plan_with 'oci_core_instance.this["main"] create Xyz:UK-LONDON-1-AD-1')" freelunch_in "$p" plan oci --out .freelunch/oci/reviewed.tfplan
+  out="$(FAKE_APPLY="capacity capacity ok" FAKE_PLAN="$(plan_with 'oci_core_instance.this["main"] create Xyz:UK-LONDON-1-AD-2')" \
+    freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity --detach 2>&1)"
+  contains "$out" "oci: waiting for capacity in the background (pid"
+  contains "$out" "freelunch status shows the attempts, .freelunch/oci/wait.log the output"
+  for _ in $(seq 1 100); do
+    [[ "$(sed -n 's/^state=//p' "$p/.freelunch/oci/wait.state" 2>/dev/null)" != "done" ]] || break
+    /bin/sleep 0.1
+  done
+  out="$(freelunch_in "$p" status)"
+  contains "$out" "oci: got the host on attempt 3 in UK-LONDON-1-AD-2: oci-main at 203.0.113.10, oci-edge-1 at 203.0.113.11"
+  contains "$out" "log: .freelunch/oci/wait.log"
+  grep -q "freelunch apply oci --wait-for-capacity --plan $p/.freelunch/oci/reviewed.tfplan$" "$p/.freelunch/oci/wait.log"
+  grep -q 'oci: applied on attempt 3 in UK-LONDON-1-AD-2' "$p/.freelunch/oci/wait.log"
+  grep -q '^desktop: oci: got the host on attempt 3' "$p/fake.log"
+  # Without a reviewed plan, a wait in the background would sit at the prompt.
+  fails freelunch_in "$p" apply oci --wait-for-capacity --detach
+  fails freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --detach
+  # The wait's files stay out of git.
+  git -C "$p" init -q
+  for f in wait.log wait.state reviewed.tfplan; do git -C "$p" check-ignore -q ".freelunch/oci/$f"; done
+}
+
+test_status_shows_each_wait() {
+  local p="$WORK/status" now pid out
+  capacity_project "$p"
+  out="$(freelunch_in "$p" status)"
+  contains "$out" "No capacity wait has run here"
+  now="$(date +%s)"
+  /bin/sleep 30 & pid=$!
+  printf 'state=waiting\npid=%s\nstarted=%s\nupdated=%s\nattempt=14\nlast=out of host capacity in UK-LONDON-1-AD-2\nnext=%s\nlog=\n' \
+    "$pid" $((now - 7300)) "$now" $((now + 3700)) > "$p/.freelunch/oci/wait.state"
+  out="$(freelunch_in "$p" status)"
+  kill "$pid"
+  contains "$out" "oci: waiting for capacity for 2h 1m, 14 attempts so far (pid $pid)"
+  contains "$out" "  last: out of host capacity in UK-LONDON-1-AD-2"
+  contains "$out" ", in 1h 1m"
+  # The process is gone without saying so.
+  wait "$pid" 2>/dev/null || true
+  contains "$(freelunch_in "$p" status)" "oci: the wait for capacity ended unexpectedly after 14 attempts"
+  printf 'state=stopped\npid=1\nstarted=%s\nupdated=%s\nattempt=4\nlast=oci: the session expired after 3 attempt(s)\nnext=\nlog=\n' "$now" "$now" > "$p/.freelunch/oci/wait.state"
+  out="$(freelunch_in "$p" status)"
+  contains "$out" "oci: stopped waiting for capacity after 4 attempts"
+  contains "$out" "  last: the session expired after 3 attempt(s)"
+}
+
+# A wait that had to retry says when it ends: on the desktop, and at FREELUNCH_NOTIFY.
+test_wait_notifies_when_it_ends() {
+  local p="$WORK/notify" message="oci: got the host on attempt 2: oci-main at 203.0.113.10, oci-edge-1 at 203.0.113.11"
+  capacity_project "$p"
+  FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity
+  grep -qx "desktop: $message" "$p/fake.log"
+  fails grep -q '^post ' "$p/fake.log"
+  # ntfy gets the text, Discord and Slack get JSON.
+  rm "$p/fake.log"*
+  FREELUNCH_NOTIFY=https://ntfy.sh/my-topic FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity
+  grep -qxF "post https://ntfy.sh/my-topic [text/plain] $message" "$p/fake.log"
+  rm "$p/fake.log"*
+  FREELUNCH_NOTIFY=https://discord.com/api/webhooks/1/abc FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity
+  equals "$(sed -n 's#^post https://discord.com/api/webhooks/1/abc \[application/json\] ##p' "$p/fake.log" | jq -r .content)" "$message"
+  rm "$p/fake.log"*
+  FREELUNCH_NOTIFY=https://hooks.slack.com/services/T0/B0/x FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity
+  equals "$(sed -n 's#^post https://hooks.slack.com/services/T0/B0/x \[application/json\] ##p' "$p/fake.log" | jq -r .text)" "$message"
+  # A wait that stops on its own says why.
+  rm "$p/fake.log"*
+  session_profile "$p" freelunch
+  FAKE_APPLY="capacity capacity" FAKE_SESSION_REFRESHES=1 fails apply_in "$p" oci --wait-for-capacity
+  grep -q '^desktop: oci: the session expired after 1 attempt(s)' "$p/fake.log"
+  grep -q '^state=stopped$' "$p/.freelunch/oci/wait.state"
+  # Nothing to say when the first attempt works, and nothing at all with FREELUNCH_NOTIFY=off.
+  rm "$p/fake.log"*
+  apply_in "$p" oci --wait-for-capacity
+  fails grep -q '^desktop: ' "$p/fake.log"
+  FREELUNCH_NOTIFY=off FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity
+  fails grep -q -e '^desktop: ' -e '^post ' "$p/fake.log"
 }
 
 test_capacity_retries_give_up_and_only_apply_waits() {

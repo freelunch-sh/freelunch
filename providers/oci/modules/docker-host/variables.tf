@@ -67,6 +67,12 @@ variable "instances" {
   }
 }
 
+variable "availability_domain_offset" {
+  description = "Moves instances without availability_domain_index to the next availability domain that offers their shape. Set by freelunch apply --wait-for-capacity on each retry."
+  type        = number
+  default     = 0
+}
+
 variable "tailscale_auth_key" {
   description = "Optional Tailscale auth key; hosts join your tailnet on first boot."
   type        = string
