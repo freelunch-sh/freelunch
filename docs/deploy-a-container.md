@@ -298,6 +298,24 @@ tunnel is left as it was.
 
 Open `https://api.example.com`.
 
+`freelunch status` shows the whole setup on one screen: the hosts and their addresses, the
+apps on each host and whether they run (it asks the host over SSH, once its key is
+pinned), whether each tunnel is connected and its URLs, when the service tokens expire,
+and any capacity wait:
+
+```
+Hosts
+  oci-main      203.0.113.10  arm64  VM.Standard.A1.Flex
+Apps on oci-main
+  api                  running, healthy
+  cloudflared          running, healthy
+Tunnels
+  oci-main       connected (4 connections)
+                 https://api.example.com
+Service tokens
+  backend        expires on 2027-10-23 14:02, in 365 days
+```
+
 ## 7. Ship a new version
 
 Change the image tag in `compose.yaml` (`ghcr.io/you/api:1.4.3`), then:

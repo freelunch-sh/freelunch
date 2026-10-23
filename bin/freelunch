@@ -62,7 +62,8 @@ Infrastructure:
                           each time in the next availability domain; with --detach it waits in
                           the background, logging to .freelunch/<stack>/wait.log
   destroy <p...|all>      Destroy provider stacks in reverse layer order, then refresh hybrid
-  status                  How each capacity wait is going: attempts, the last result, the next try
+  status                  Hosts and their addresses, the apps on each host and whether they run,
+                          tunnels and their URLs, service token expiry, and capacity waits
   doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in, SSH
                           keys, images and their registry logins, the Cloudflare token and zone
   hybrid                  Re-aggregate deployed host stacks into the hybrid inventory
@@ -788,15 +789,153 @@ show_wait() { # show_wait <provider> <wait.state>
   [[ -z "$log_file" ]] || echo "  log: $(rel "$log_file")"
 }
 
-cmd_status() {
-  local p file found=0
+# Service tokens expire, a year after they are made by default, and then their clients get
+# 401s. deploy, doctor and status say so a month before.
+TOKEN_WARN_DAYS=30
+
+# service_token_expiries: name, expiry (seconds since the epoch) and days left of each
+# Access service token in the cloudflare stack's state
+service_token_expiries() {
+  local state
+  state="$(config_dir cloudflare)/terraform.tfstate"
+  [[ -s "$state" ]] || return 0
+  jq -r --argjson now "$(date +%s)" '(.outputs.service_tokens.value // {}) | to_entries[]
+    | select((.value.expires_at // "") != "")
+    | (.value.expires_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) as $e
+    | [.key, $e, ((($e - $now) / 86400) | floor)] | @tsv' "$state" 2>/dev/null || true
+}
+
+renew_token() { echo "freelunch apply cloudflare -- -replace='module.tunnel.cloudflare_zero_trust_access_service_token.this[\"$1\"]'"; }
+
+# token_reminders: a warning for each service token that expires within TOKEN_WARN_DAYS
+token_reminders() {
+  local name exp days
+  while IFS=$'\t' read -r name exp days; do
+    [[ -n "$name" && $days -le $TOKEN_WARN_DAYS ]] || continue
+    if [[ $days -lt 0 ]]; then log "the service token $name expired on $(fmt_time "$exp"): its clients get 401s. Renew it: $(renew_token "$name")"
+    else log "the service token $name expires in $days days, on $(fmt_time "$exp"), and then its clients get 401s. Renew it: $(renew_token "$name")"; fi
+  done < <(service_token_expiries)
+}
+
+# The script status runs on a host: app, service, state and health of every container.
+# shellcheck disable=SC2016 # expanded by the remote shell
+REMOTE_STATUS='for d in /opt/freelunch/apps/*/; do
+  [ -f "$d/compose.yaml" ] || continue
+  app="$(basename "$d")"
+  (cd "$d" && docker compose ps -a --format "{{.Service}}|{{.State}}|{{.Health}}") | sed "s/^/$app|/"
+done'
+
+status_hosts() {
+  local p lines=""
+  for p in $(all_providers); do
+    if [[ "$(meta "$p" layer)" != "host" || ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
+    lines="$lines$(jq -r '.outputs.hosts.value[]? | "  \("\(.provider)-\(.name)" | . + (" " * ([14 - length, 1] | max)))\(.public_ip // .private_ip // "-")  \(.arch)  \(.size)"' "$(config_dir "$p")/terraform.tfstate")"$'\n'
+  done
+  [[ -n "$lines" ]] || return 1
+  echo "Hosts"
+  printf '%s' "$lines"
+}
+
+status_apps() {
+  local apps_file tunnel_state="" host address user out app service state health expected seen
+  apps_file="$(state_root)/apps.tfvars"
+  [[ -n "$TF" ]] || return 0
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  [[ -f "$apps_file" || -n "$tunnel_state" ]] || return 0
+  if ! { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1; then
+    echo "Apps"
+    echo "  apps.tfvars doesn't resolve against the inventory yet (freelunch deploy --dry-run says why)"
+    return 0
+  fi
+  ssh_options yes
+  for host in $(jq -r 'keys[]' "$TMP/targets.json"); do
+    address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
+    user="$(jq -r --arg h "$host" '.[$h].user' "$TMP/targets.json")"
+    expected="$(jq -r --arg h "$host" '.[$h] | (.apps | keys) + (if .tunnel then ["cloudflared"] else [] end) | .[]' "$TMP/targets.json")"
+    echo "Apps on $host"
+    if ! ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1; then
+      echo "  not asked: its host key isn't pinned yet (freelunch trust $host, or the first freelunch deploy)"
+      continue
+    fi
+    # shellcheck disable=SC2016 # expanded by the remote shell
+    if ! out="$(printf '%s\n' "$REMOTE_STATUS" | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' 2>/dev/null)"; then
+      echo "  can't reach $user@$address over SSH"
+      continue
+    fi
+    seen=""
+    while IFS='|' read -r app service state health; do
+      [[ -n "$app" ]] || continue
+      seen="$seen $app "
+      [[ "$service" != "$app" ]] || service=""
+      printf '  %-20s %s\n' "$app${service:+ ($service)}" "$state${health:+, $health}"
+    done <<< "$out"
+    for app in $expected; do
+      [[ "$seen" == *" $app "* ]] || printf '  %-20s %s\n' "$app" "not deployed yet (freelunch deploy)"
+    done
+  done
+}
+
+status_tunnels() {
+  local state tfvars account zone host id out text urls token="${CLOUDFLARE_API_TOKEN:-}"
+  state="$(config_dir cloudflare)/terraform.tfstate"
+  [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare || return 0
+  tfvars="$(config_dir cloudflare)/terraform.tfvars"
+  account="$(tfvar "$tfvars" account_id 2>/dev/null)"
+  zone="$(tfvar "$tfvars" zone 2>/dev/null)"
+  if [[ -n "$token" && -z "$account" && -n "$zone" ]]; then account="$(cf_get "/zones?name=$zone" | jq -r '.result[0].account.id // empty' 2>/dev/null)"; fi
+  echo "Tunnels"
+  while IFS=$'\t' read -r host id; do
+    urls="$(jq -r --arg h "$host" '[(.outputs.routes.value // {}) | to_entries[] | select(.value.host == $h) | "https://\(.key)"] | join(" ")' "$state")"
+    text="not checked without CLOUDFLARE_API_TOKEN"
+    if [[ -n "$token" && -n "$account" ]]; then
+      out="$(cf_get "/accounts/$account/cfd_tunnel/$id")"
+      case "$(jq -r '.result.status // empty' <<< "$out" 2>/dev/null)" in
+        healthy)  text="connected ($(jq -r '.result.connections | length' <<< "$out") connections)" ;;
+        degraded) text="degraded ($(jq -r '.result.connections | length' <<< "$out") connections)" ;;
+        inactive) text="never connected: freelunch deploy starts cloudflared" ;;
+        down)     text="down: cloudflared isn't connected (freelunch deploy, or the host's logs)" ;;
+        *)        text="unknown: $(cf_errors "$out")" ;;
+      esac
+    fi
+    printf '  %-14s %s\n' "$host" "$text"
+    [[ -z "$urls" ]] || printf '  %-14s %s\n' "" "$urls"
+  done < <(jq -r '(.outputs.tunnels.value // {}) | to_entries[] | [.key, .value] | @tsv' "$state")
+}
+
+status_tokens() {
+  local name exp days lines=""
+  while IFS=$'\t' read -r name exp days; do
+    [[ -n "$name" ]] || continue
+    if [[ $days -lt 0 ]]; then lines="$lines$(printf '  %-14s expired on %s: renew it with %s' "$name" "$(fmt_time "$exp")" "$(renew_token "$name")")"$'\n'
+    elif [[ $days -le $TOKEN_WARN_DAYS ]]; then lines="$lines$(printf '  %-14s expires in %s days, on %s: renew it with %s' "$name" "$days" "$(fmt_time "$exp")" "$(renew_token "$name")")"$'\n'
+    else lines="$lines$(printf '  %-14s expires on %s, in %s days' "$name" "$(fmt_time "$exp")" "$days")"$'\n'; fi
+  done < <(service_token_expiries)
+  [[ -n "$lines" ]] || return 0
+  echo "Service tokens"
+  printf '%s' "$lines"
+}
+
+status_waits() {
+  local p file header=0
   for p in $(all_providers); do
     file="$(config_dir "$p")/wait.state"
     [[ -d "$(stack_dir "$p")" && -f "$file" ]] || continue
-    found=1
-    show_wait "$p" "$file"
+    [[ $header -eq 1 ]] || { echo "Capacity waits"; header=1; }
+    show_wait "$p" "$file" | sed 's/^/  /'
   done
-  [[ $found -eq 1 ]] || echo "No capacity wait has run here; freelunch apply <stack> --wait-for-capacity starts one."
+}
+
+cmd_status() {
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if ! status_hosts; then
+    echo "Nothing is deployed here yet."
+    status_waits
+    return 0
+  fi
+  status_apps
+  status_tunnels
+  status_tokens
+  status_waits
 }
 
 # --- init -----------------------------------------------------------------------------
@@ -1284,6 +1423,14 @@ main
 EOF
 }
 
+# ssh_options <accept-new|yes>: how deploy and status reach hosts. deploy pins a new host's
+# key on first contact; status only talks to hosts whose key is pinned.
+ssh_options() {
+  SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15
+    -o "StrictHostKeyChecking=$1" -o "UserKnownHostsFile=$(state_root)/known_hosts")
+  if [[ -n "${FREELUNCH_SSH_KEY:-}" ]]; then SSH_OPTS+=(-i "${FREELUNCH_SSH_KEY/#\~/$HOME}" -o IdentitiesOnly=yes); fi
+}
+
 # A new host takes a minute or two before it accepts SSH. Wrong keys fail right away.
 wait_for_ssh() { # wait_for_ssh <user@address>
   local i out
@@ -1367,10 +1514,8 @@ cmd_deploy() {
   done
   [[ "${FREELUNCH_CHECK_IMAGES:-1}" == "0" ]] || check_images "${hosts[@]}"
 
-  SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15
-    -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$(state_root)/known_hosts")
-  if [[ -n "${FREELUNCH_SSH_KEY:-}" ]]; then SSH_OPTS+=(-i "${FREELUNCH_SSH_KEY/#\~/$HOME}" -o IdentitiesOnly=yes); fi
-
+  ssh_options accept-new
+  token_reminders
   for h in "${hosts[@]}"; do deploy_host "$h" "$dry_run"; done
 }
 
@@ -1832,11 +1977,17 @@ cf_get() {
 cf_ok() { [[ "$(jq -r '.success' <<< "$1" 2>/dev/null)" == "true" ]]; }
 
 doctor_cloudflare() {
-  local tfvars zone out zone_id account status
+  local tfvars zone out zone_id account status name exp days
   is_configured cloudflare || return 0
   tfvars="$(config_dir cloudflare)/terraform.tfvars"
   zone="$(tfvar "$tfvars" zone)"
   echo "Cloudflare ($(rel "$tfvars"))"
+  while IFS=$'\t' read -r name exp days; do
+    [[ -n "$name" ]] || continue
+    if [[ $days -lt 0 ]]; then check fail "the service token $name expired on $(fmt_time "$exp"); renew it: $(renew_token "$name")"
+    elif [[ $days -le $TOKEN_WARN_DAYS ]]; then check warn "the service token $name expires in $days days; renew it: $(renew_token "$name")"
+    else check ok "the service token $name is valid until $(fmt_time "$exp")"; fi
+  done < <(service_token_expiries)
   if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then check fail "CLOUDFLARE_API_TOKEN is not set: export it or put it in $(rel "$(state_root)")/.env"; return 0; fi
   out="$(cf_get /user/tokens/verify)"
   if cf_ok "$out" && [[ "$(jq -r '.result.status' <<< "$out")" == "active" ]]; then
