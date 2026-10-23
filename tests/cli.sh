@@ -101,6 +101,23 @@ echo "sleep $*" >> "$FAKE_LOG"
 EOF
 chmod +x "$WORK/wait-bin/"*
 
+# A fake DNS-over-HTTPS resolver for `freelunch domain suggest`. Names in FAKE_TAKEN exist
+# (example.com always does), names in FAKE_BROKEN fail to resolve, and the rest don't exist.
+# FAKE_OFFLINE fails every lookup like a dropped connection.
+mkdir -p "$WORK/doh-bin"
+cat > "$WORK/doh-bin/curl" <<'EOF'
+#!/usr/bin/env bash
+for a; do url="$a"; done
+name="${url#*\?name=}"
+name="${name%%&*}"
+echo "lookup $url" >> "$FAKE_LOG"
+[[ -z "${FAKE_OFFLINE:-}" ]] || exit 7
+if [[ " example.com ${FAKE_TAKEN:-} " == *" $name "* ]]; then echo '{"Status":0}'
+elif [[ " ${FAKE_BROKEN:-} " == *" $name "* ]]; then echo '{"Status":2}'
+else echo '{"Status":3}'; fi
+EOF
+chmod +x "$WORK/doh-bin/curl"
+
 # Helpers -------------------------------------------------------------------------------
 
 # A project with a compose file and the oci + cloudflare stacks "deployed" from fixtures.
@@ -137,6 +154,13 @@ scratch_checkout() { # scratch_checkout <dir> <stack...>
 deploy_in() {
   local dir="$1"; shift
   (cd "$dir" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" "$CLI" deploy "$@")
+}
+
+# suggest_in <dir> [names...]: run domain suggest against the fake resolver
+suggest_in() {
+  local dir="$1"; shift
+  mkdir -p "$dir"
+  (cd "$dir" && PATH="$WORK/doh-bin:$PATH" FAKE_LOG="$dir/fake.log" "$CLI" domain suggest "$@")
 }
 
 # capacity_project <dir>: a project with an oci tfvars, and a scratch checkout next to it
@@ -480,6 +504,67 @@ test_tunnel_only_hosts_get_cloudflared() {
   deploy_in "$p"
   exists "$p/host/apps/cloudflared/.env"
   absent "$p/host/apps/api"
+}
+
+test_domain_suggest_checks_every_free_domain_provider() {
+  local d="$WORK/suggest" out s headers
+  out="$(suggest_in "$d" freelunch.sh MoneySpider.app 2>&1)"
+  for s in dpdns.org qzz.io us.kg xx.kg eu.org pp.ua; do
+    grep -q "^  freelunch\.$s  *free$" <<< "$out"
+    grep -q "^  moneyspider\.$s  *free$" <<< "$out"
+  done
+  # One block per provider, the recommended one first, each with where to register.
+  headers="$(grep -v -e '^ ' -e '^$' -e '^==>' <<< "$out" | cut -d: -f1)"
+  equals "$(head -1 <<< "$headers")" "DigitalPlat FreeDomain (recommended)"
+  contains "$headers" "EU.org"
+  contains "$headers" "pp.ua"
+  contains "$out" "register at https://dash.domain.digitalplat.org/"
+  contains "$out" "register at https://nic.eu.org/"
+  # Excluded providers, and suffixes Cloudflare won't take as zones, stay out.
+  lacks "$out" "is-a.dev"
+  lacks "$out" "qd.je"
+  # Nothing was taken, so no similar names were looked up. All lookups go to Cloudflare's resolver.
+  lacks "$out" "getmoneyspider"
+  equals "$(grep -c '^lookup https://cloudflare-dns.com/dns-query?name=.*&type=NS$' "$d/fake.log")" "$(grep -c '^lookup' "$d/fake.log")"
+  contains "$out" "the provider has the final say"
+}
+
+test_domain_suggest_offers_similar_names_where_taken() {
+  local d="$WORK/suggest-taken" out
+  out="$(FAKE_TAKEN="moneyspider.dpdns.org moneyspider-app.dpdns.org moneyspider.pp.ua" suggest_in "$d" moneyspider.app 2>&1)"
+  grep -q '^  moneyspider\.dpdns\.org  *taken$' <<< "$out"
+  grep -q '^  getmoneyspider\.dpdns\.org  *free$' <<< "$out"
+  grep -q '^  moneyspider\.pp\.ua  *taken$' <<< "$out"
+  grep -q '^  moneyspider-app\.pp\.ua  *free$' <<< "$out"
+  # Taken stand-ins are skipped, one stand-in per taken name, and none where the name is free.
+  lacks "$out" "moneyspider-app.dpdns.org"
+  lacks "$out" "moneyspiderhq"
+  lacks "$out" "getmoneyspider.eu.org"
+  # Without an extension there is no name-extension stand-in.
+  out="$(FAKE_TAKEN="moneyspider.eu.org" suggest_in "$d" moneyspider 2>&1)"
+  grep -q '^  getmoneyspider\.eu\.org  *free$' <<< "$out"
+}
+
+test_domain_suggest_reports_failed_lookups() {
+  local d="$WORK/suggest-failed" out
+  out="$(FAKE_BROKEN="moneyspider.eu.org" suggest_in "$d" moneyspider 2>&1)"
+  grep -q '^  moneyspider\.eu\.org  *unknown$' <<< "$out"
+  lacks "$out" "getmoneyspider.eu.org"
+  # Offline, it stops after the first lookup instead of timing out on every name.
+  rm "$d/fake.log"
+  if out="$(FAKE_OFFLINE=1 suggest_in "$d" moneyspider 2>&1)"; then echo "suggest should fail offline"; return 1; fi
+  contains "$out" "can't reach Cloudflare's DNS-over-HTTPS resolver"
+  equals "$(grep -c '^lookup' "$d/fake.log")" 1
+}
+
+test_domain_suggest_checks_names_first() {
+  local d="$WORK/suggest-names"
+  fails suggest_in "$d" my_app
+  fails suggest_in "$d" -app.com
+  fails suggest_in "$d" ok "$(printf 'a%.0s' {1..64})"
+  fails suggest_in "$d"
+  fails in_dir "$d" "$CLI" domain register myapp.com
+  absent "$d/fake.log"
 }
 
 echo "tests/cli.sh"

@@ -20,7 +20,8 @@ already done.
 - An OCI account with an API key in `~/.oci/config`, or a session token from
   `oci session authenticate` (uncomment `oci_auth` and `oci_config_profile` in the OCI tfvars)
 - A domain on Cloudflare and an API token for it (see
-  [providers/cloudflare](../../providers/cloudflare/README.md#api-token))
+  [providers/cloudflare](../../providers/cloudflare/README.md#api-token)). A free name works:
+  [docs/free-domains.md](../../docs/free-domains.md)
 - An SSH key pair
 
 Fill in the config:

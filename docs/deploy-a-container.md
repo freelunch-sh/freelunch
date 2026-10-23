@@ -17,7 +17,8 @@ or as a Docker image.
   `oci session authenticate`, which needs `oci_auth` and `oci_config_profile` set in step 3.
   Free resources exist only in your home region.
 - A **domain on Cloudflare** (free plan) and an **API token** with the
-  [permissions listed here](../providers/cloudflare/README.md#api-token).
+  [permissions listed here](../providers/cloudflare/README.md#api-token). The domain can be
+  a free name: see [Free domains](free-domains.md).
 - An **SSH key pair**. `freelunch deploy` connects with it.
 - Your app as a **Compose file that uses images** (from Docker Hub, GHCR or any registry).
   Images are pulled on the host; nothing is built there.
