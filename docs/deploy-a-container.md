@@ -254,6 +254,13 @@ only the `read:packages` scope, and add it to `.freelunch/.env`:
 GHCR_TOKEN=ghp_...
 ```
 
+Or keep the token out of the file: a value can name a secret instead, which freelunch reads
+when a command needs it. `GHCR_TOKEN=op://Private/GHCR/token` reads it from 1Password
+through the [op CLI](https://developer.1password.com/docs/cli/), and
+`GHCR_TOKEN=keychain:freelunch-ghcr` from the macOS keychain, where
+`security add-generic-password -s freelunch-ghcr -a "$USER" -w` puts it. The same works for
+`CLOUDFLARE_API_TOKEN` and any other variable in `.freelunch/.env`.
+
 `deploy` logs the host in to every registry in `registries` before pulling, and out again
 when it finishes, so the token doesn't stay on the host. The workflow from
 `freelunch init --image-workflow` pushes to `ghcr.io/<owner>/<repo>`, which is private when

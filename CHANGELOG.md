@@ -106,7 +106,11 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
 ### Changed
 
 - The CLI loads credentials from `.freelunch/.env` (or `.env` in the checkout); variables
-  already set in the shell win.
+  already set in the shell win. A value can name a secret instead of holding it:
+  `op://<vault>/<item>/<field>` from 1Password through the op CLI, or `keychain:<name>`
+  from the macOS keychain. Only commands that use credentials read them (plan, apply,
+  destroy, deploy, status, domain add and status; doctor reports on them), so `list` or
+  `init` never prompt.
 - `freelunch fmt` takes `-check`.
 - `freelunch list` no longer reports a destroyed stack as deployed.
 
