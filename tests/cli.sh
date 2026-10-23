@@ -83,13 +83,17 @@ esac
 EOF
 chmod +x "$WORK/bin/"*
 
-# For apply --wait-for-capacity: an OCI CLI whose session refresh works unless
-# FAKE_SESSION_EXPIRED is set, and a sleep that only records how long it was asked to wait.
+# For OCI runs: an OCI CLI whose session refresh works FAKE_SESSION_REFRESHES times
+# (always when unset, never at 0) and then finds the session expired, or fails with
+# FAKE_OCI_ERROR. And a sleep that only records how long it was asked to wait.
 mkdir -p "$WORK/wait-bin"
 cat > "$WORK/wait-bin/oci" <<'EOF'
 #!/usr/bin/env bash
 echo "oci $*" >> "$FAKE_LOG"
-if [[ -n "${FAKE_SESSION_EXPIRED:-}" ]]; then
+n=$(( $(cat "$FAKE_LOG.refreshes" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$FAKE_LOG.refreshes"
+if [[ -n "${FAKE_OCI_ERROR:-}" ]]; then echo "$FAKE_OCI_ERROR" >&2; exit 1; fi
+if [[ $n -gt ${FAKE_SESSION_REFRESHES:-1000} ]]; then
   echo "Your session is no longer valid and cannot be refreshed. Please use 'oci session authenticate' to create a new session." >&2
   exit 1
 fi
@@ -172,10 +176,29 @@ capacity_project() {
   cp "$ROOT/providers/oci/stack/project.tfvars.example" "$1/.freelunch/oci/terraform.tfvars"
 }
 
-# apply_in <dir> [args...]: run apply in a capacity_project with the fakes
-apply_in() {
+# freelunch_in <dir> <command> [args...]: run a command in a capacity_project with the fakes
+freelunch_in() {
   local dir="$1"; shift
-  (cd "$dir" && PATH="$WORK/wait-bin:$PATH" FAKE_LOG="$dir/fake.log" FREELUNCH_TF="$WORK/bin/fake-tf" "$dir-checkout/bin/freelunch" apply "$@")
+  (cd "$dir" && PATH="$WORK/wait-bin:$PATH" FAKE_LOG="$dir/fake.log" FREELUNCH_TF="$WORK/bin/fake-tf" "$dir-checkout/bin/freelunch" "$@")
+}
+apply_in() { local dir="$1"; shift; freelunch_in "$dir" apply "$@"; }
+
+# session_profile <dir> <profile>: sign the project's oci stack in with a session token
+session_profile() {
+  printf 'oci_auth           = "SecurityToken"\noci_config_profile = "%s"   # from oci session authenticate\n' "$2" >> "$1/.freelunch/oci/terraform.tfvars"
+}
+
+# fake_token <exp>: a session token (a JWT) that expires at <exp>, in seconds since the epoch
+fake_token() {
+  printf 'eyJhbGciOiJSUzI1NiJ9.%s.c2lnbmF0dXJl\n' "$(printf '{"sub":"ocid1.user.oc1..me","exp":%s}' "$1" | base64 | tr '+/' '-_' | tr -d '=\n')"
+}
+
+# PATH without any oci command, like the runner image
+path_without_oci() {
+  local d dirs out=""
+  IFS=: read -ra dirs <<< "$PATH"
+  for d in "${dirs[@]}"; do [[ -x "$d/oci" ]] || out="${out:+$out:}$d"; done
+  echo "$out"
 }
 
 # shellcheck disable=SC2012 # ls -l is the portable way to read permissions on macOS and Linux
@@ -232,6 +255,21 @@ test_init_sets_up_hosts_for_the_tunnel() {
   done
   # The walkthrough's finished example is what init writes.
   cmp "$p/.freelunch/oci/terraform.tfvars.example" "$ROOT/examples/backend-app/.freelunch/oci/terraform.tfvars.example"
+}
+
+# A session token lasts a day at most, so init points to an API key when there is none.
+test_init_points_to_an_oci_api_key() {
+  local p="$WORK/init-key" out
+  mkdir -p "$p/home" "$p/project"
+  out="$(cd "$p/project" && HOME="$p/home" "$CLI" init 2>&1)"
+  contains "$out" "oci setup bootstrap --profile-name freelunch"
+  mkdir -p "$p/home/.oci" && printf '[freelunch]\nuser=ocid1.user.oc1..me\nfingerprint=aa:bb\n' > "$p/home/.oci/config"
+  rm -rf "$p/project/.freelunch"
+  out="$(cd "$p/project" && HOME="$p/home" "$CLI" init 2>&1)"
+  lacks "$out" "oci setup bootstrap"
+  rm -rf "$p/home/.oci" "$p/project/.freelunch"
+  out="$(cd "$p/project" && HOME="$p/home" "$CLI" init cloudflare 2>&1)"
+  lacks "$out" "oci setup bootstrap"
 }
 
 test_init_never_overwrites() {
@@ -348,17 +386,57 @@ test_apply_waits_for_capacity() {
 test_capacity_retries_refresh_the_oci_session() {
   local p="$WORK/capacity-session" out
   capacity_project "$p"
-  printf 'oci_auth           = "SecurityToken"\noci_config_profile = "freelunch"   # from oci session authenticate\n' >> "$p/.freelunch/oci/terraform.tfvars"
+  session_profile "$p" freelunch
   FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity
   equals "$(grep -E '^oci |/stack (apply|plan) ' "$p/fake.log" | sed -E 's/^oci session refresh --profile freelunch$/refresh/; s/.*\/stack (apply|plan) .*/\1/')" \
     "$(printf 'refresh\napply\nrefresh\nplan\napply')"
-  # A session that can't be refreshed any more stops it before anything is applied.
+  # When the session ends during the wait, it stops there and says why.
   rm "$p/fake.log"*
-  if out="$(FAKE_SESSION_EXPIRED=1 apply_in "$p" oci --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
-  contains "$out" "Your session is no longer valid"
-  contains "$out" "24 hours"
-  contains "$out" "oci session authenticate --profile-name freelunch"
-  fails grep -q '/stack apply ' "$p/fake.log"
+  if out="$(FAKE_APPLY="capacity capacity ok" FAKE_SESSION_REFRESHES=1 apply_in "$p" oci --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "freelunch: oci: the session expired after 1 attempt(s). A session lasts 24 hours at most, so for a longer wait use an API key (oci setup bootstrap). Sign in again: oci session authenticate --profile-name freelunch"
+  equals "$(grep -c '/stack apply ' "$p/fake.log")" 1
+}
+
+# Every OCI run refreshes the session first. Once that fails, it stops before init and
+# plan, with one line instead of a half plan between 401 errors.
+test_oci_runs_check_the_session_first() {
+  local p="$WORK/session" out
+  capacity_project "$p"
+  session_profile "$p" tradio
+  freelunch_in "$p" plan oci
+  equals "$(grep -E '^oci |/stack (init|plan) ' "$p/fake.log" | sed -E 's/^oci session refresh --profile tradio$/refresh/; s/.*\/stack (init|plan) .*/\1/')" \
+    "$(printf 'refresh\ninit\nplan')"
+  rm "$p/fake.log"*
+  if out="$(FAKE_SESSION_REFRESHES=0 freelunch_in "$p" plan oci 2>&1)"; then echo "plan should have failed"; return 1; fi
+  equals "$(grep -v '^==>' <<< "$out")" "freelunch: oci: session expired. Sign in again: oci session authenticate --profile-name tradio"
+  fails grep -q '/stack ' "$p/fake.log"
+  FAKE_SESSION_REFRESHES=0 fails freelunch_in "$p" destroy oci
+  fails grep -q '/stack ' "$p/fake.log"
+  # Other failures show what the OCI CLI said.
+  if out="$(FAKE_OCI_ERROR="ERROR: Profile 'tradio' not found in config file" freelunch_in "$p" plan oci 2>&1)"; then echo "plan should have failed"; return 1; fi
+  contains "$out" "Profile 'tradio' not found"
+  contains "$out" "can't refresh the session of profile tradio"
+  # An API key has nothing to refresh.
+  capacity_project "$p-key"
+  freelunch_in "$p-key" plan oci
+  fails grep -q '^oci ' "$p-key/fake.log"
+}
+
+# Without the OCI CLI (the runner image), the token's own expiry is checked instead.
+test_oci_session_expiry_without_the_oci_cli() {
+  local p="$WORK/session-local" out
+  capacity_project "$p"
+  session_profile "$p" tradio
+  mkdir -p "$p/home/.oci/sessions/tradio"
+  printf '[DEFAULT]\nregion=uk-london-1\n\n[tradio]\nsecurity_token_file=~/.oci/sessions/tradio/token\nregion=uk-london-1\n' > "$p/home/.oci/config"
+  fake_token $(( $(date +%s) + 600 )) > "$p/home/.oci/sessions/tradio/token"
+  (cd "$p" && HOME="$p/home" PATH="$(path_without_oci)" FAKE_LOG="$p/fake.log" FREELUNCH_TF="$WORK/bin/fake-tf" "$p-checkout/bin/freelunch" plan oci)
+  grep -q '/stack plan ' "$p/fake.log"
+  rm "$p/fake.log"*
+  fake_token $(( $(date +%s) - 60 )) > "$p/home/.oci/sessions/tradio/token"
+  if out="$(cd "$p" && HOME="$p/home" PATH="$(path_without_oci)" FAKE_LOG="$p/fake.log" FREELUNCH_TF="$WORK/bin/fake-tf" "$p-checkout/bin/freelunch" plan oci 2>&1)"; then echo "plan should have failed"; return 1; fi
+  contains "$out" "freelunch: oci: session expired. Sign in again: oci session authenticate --profile-name tradio"
+  fails grep -q '/stack ' "$p/fake.log"
 }
 
 test_capacity_retries_never_destroy() {
