@@ -21,7 +21,7 @@ output "ansible_inventory" {
 }
 
 output "ssh_config" {
-  description = "OpenSSH config snippet: `freelunch output -raw ssh_config >> ~/.ssh/config`. Private-only hosts use their private IP (reach them over Tailscale or a VPN)."
+  description = "OpenSSH config snippet: `freelunch output hybrid -raw ssh_config >> ~/.ssh/config`. Private-only hosts use their private IP (reach them over Tailscale or a VPN)."
   value = join("\n", [
     for h in local.hosts : <<-EOT
       Host ${h.provider}-${h.name}

@@ -36,6 +36,8 @@ Infrastructure:
   destroy <p...|all>      Destroy provider stacks in reverse layer order, then refresh hybrid
   hybrid                  Re-aggregate deployed host stacks into the hybrid inventory
   inventory               Write inventory.json (all hosts across providers)
+  output <stack> [args]   Print a stack's outputs from its state, e.g. output cloudflare -json
+                          service_tokens, or output hybrid -raw ssh_config
 
 Development:
   catalog                 Regenerate the README provider checklist and stub provider READMEs
@@ -148,6 +150,22 @@ tf_for() {
 
 init_dir() { tf_in "$1" init -input=false -upgrade=false >/dev/null; }
 
+# tofu/terraform keep the dependency lock file (provider versions and checksums) next to the
+# code, never in TF_DATA_DIR. In project mode it belongs in .freelunch/<stack>/, where the
+# project can commit it, so it is copied next to the code for init and back afterwards.
+lock_in() { # lock_in <provider> <dir>
+  [[ -n "$PROJECT" ]] || return 0
+  if [[ -f "$PROJECT/$1/.terraform.lock.hcl" ]]; then cp "$PROJECT/$1/.terraform.lock.hcl" "$2/"; else rm -f "$2/.terraform.lock.hcl"; fi
+}
+
+lock_out() { # lock_out <provider> <dir>
+  local lock="$PROJECT/$1/.terraform.lock.hcl"
+  [[ -n "$PROJECT" && -f "$2/.terraform.lock.hcl" ]] || return 0
+  cmp -s "$2/.terraform.lock.hcl" "$lock" && return 0
+  cp "$2/.terraform.lock.hcl" "$lock"
+  log "wrote $(rel "$lock"): provider versions and checksums, commit it"
+}
+
 resolve() { # resolve <names...> -> validated provider list
   local p
   if [[ "${1:-}" == "all" ]]; then
@@ -171,7 +189,9 @@ run_stack() { # run_stack <action> <provider> [extra args]
   is_configured "$p" || die "$p: missing $(rel "$(config_dir "$p")")/terraform.tfvars (copy terraform.tfvars.example)"
   check_checkout_tfvars "$dir"
   log "$action $p${PROJECT:+ ($(rel "$PROJECT")/$p)}"
+  lock_in "$p" "$dir"
   tf_for "$p" "$dir" init -input=false -upgrade=false >/dev/null
+  lock_out "$p" "$dir"
   while IFS= read -r a; do args+=("$a"); done < <(project_args "$p")
   [[ "${FREELUNCH_AUTO_APPROVE:-0}" == "1" && "$action" != "plan" ]] && args+=(-auto-approve)
   tf_for "$p" "$dir" "$action" -input=false ${args[@]+"${args[@]}"} "$@"
@@ -208,6 +228,24 @@ cmd_inventory() {
   [[ -s "$(hybrid_state)" ]] || cmd_hybrid >/dev/null
   tf_for hybrid "$ROOT/hybrid" output ${state[@]+"${state[@]}"} -json hosts > "$out"
   log "wrote $(rel "$out") ($(jq length "$out" 2>/dev/null || echo '?') hosts)"
+}
+
+cmd_output() { # cmd_output <stack|hybrid> [tofu/terraform output args]
+  need_tf
+  local name="${1:-}" state
+  [[ -n "$name" ]] || die "output: name a stack, e.g. freelunch output cloudflare -json service_tokens"
+  shift
+  if [[ "$name" == "hybrid" ]]; then
+    state="$(hybrid_state)"
+  else
+    [[ -d "$(stack_dir "$name")" ]] || die "output: no stack named '$name' (stacks: $(ready_stacks)hybrid)"
+    state="$(config_dir "$name")/terraform.tfstate"
+  fi
+  [[ -s "$state" ]] || die "output: $name has no state yet ($(rel "$state"))"
+  # Outputs come straight from the state file, so an empty folder will do: no providers,
+  # no init, and nothing written next to the stack code.
+  TMP="$(mktemp -d)"
+  tf_in "$TMP" output -state="$state" "$@"
 }
 
 cmd_lifecycle() { # plan|apply|destroy
@@ -419,7 +457,8 @@ put() {
 }
 
 # up <app>: pull and start the app, then wait until every container is running, and
-# healthy when it has a healthcheck
+# healthy when it has a healthcheck. Prints the digest each image tag resolved to, so a
+# deploy can be traced to (or pinned at) the exact build.
 up() {
   echo "--> $1"
   cd "$apps/$1"
@@ -430,7 +469,15 @@ up() {
     docker compose logs --no-color --tail 50 >&2 || true
     exit 1
   fi
+  docker compose config --images | while read -r image; do
+    echo "    $image = $(docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}' "$image" | sed 's/.*@//')"
+  done || true
 }
+
+# Registry logins only have to last for the pulls (restarts reuse the pulled images), so
+# log out when the script ends, failed or not. Docker would keep the token on the host.
+registries=()
+trap 'for r in ${registries[@]+"${registries[@]}"}; do docker logout "$r" >/dev/null 2>&1 || true; done' EXIT
 
 # A new host may still be in its first boot; wait for cloud-init (Docker is installed there).
 if command -v cloud-init >/dev/null 2>&1; then timeout 900 cloud-init status --wait >/dev/null 2>&1 || true; fi
@@ -441,6 +488,7 @@ EOF
   while IFS=$'\t' read -r server username var; do
     [[ -n "$server" ]] || continue
     if [[ "$redact" == 1 ]]; then token="<\$$var>"; else token="$(printf '%s' "${!var}" | b64)"; fi
+    echo "registries+=($(shq "$server"))"
     echo "printf '%s' $(shq "$token") | base64 -d | docker login $(shq "$server") -u $(shq "$username") --password-stdin >/dev/null"
   done < <(jq -r 'to_entries[] | [.key, .value.username, .value.password_env] | @tsv' "$TMP/registries.json")
 
@@ -490,7 +538,7 @@ wait_for_ssh() { # wait_for_ssh <user@address>
 }
 
 deploy_host() { # deploy_host <host> <dry run 0|1>
-  local host="$1" dry_run="$2" address user url
+  local host="$1" dry_run="$2" address user url known new_key fp line
   address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
   user="$(jq -r --arg h "$host" '.[$h].user' "$TMP/targets.json")"
   [[ -n "$address" ]] || die "$host has no address to deploy to"
@@ -502,7 +550,14 @@ deploy_host() { # deploy_host <host> <dry run 0|1>
   fi
 
   log "$host: deploying to $user@$address"
+  known="$(state_root)/known_hosts"
+  if ssh-keygen -F "$address" -f "$known" >/dev/null 2>&1; then new_key=0; else new_key=1; fi
   wait_for_ssh "$user@$address"
+  # SSH trusts a host key it has never seen (accept-new), so show which one it trusted.
+  if [[ $new_key -eq 1 ]] && fp="$(ssh-keygen -l -F "$address" -f "$known" 2>/dev/null | grep -v '^#')"; then
+    log "$host: first connection, trusted this host key without checking it (docs/deploy-a-container.md#check-the-host-key):"
+    while IFS= read -r line; do echo "      $line" >&2; done <<< "$fp"
+  fi
   # Run as root: apps live in /opt/freelunch/apps, which cloud-init created as root.
   # shellcheck disable=SC2016 # expanded by the remote shell
   if ! remote_script "$host" 0 | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi'; then
@@ -635,6 +690,7 @@ main() {
     plan|apply|destroy)   cmd_lifecycle "$cmd" "$@" ;;
     hybrid)               cmd_hybrid ;;
     inventory)            cmd_inventory ;;
+    output)               cmd_output "$@" ;;
     catalog)              cmd_catalog ;;
     test)                 cmd_test "$@" ;;
     fmt)                  cmd_fmt "$@" ;;
