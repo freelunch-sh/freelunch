@@ -1,0 +1,18 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: freenom
+display_name: "Freenom"
+category: domains
+status: excluded
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: none
+free_tier: "Stopped registrations in March 2023 and left the domain business in February 2024 (previously free .tk, .ml, .ga, .cf and .gq names)"
+card_required: "unknown"
+url: "https://www.freenom.com"
+last_verified: "2026-10-23"
+notes: "Excluded: service closed. Freenom stopped after Meta sued it over abuse, and ICANN ended its registrar accreditation in November 2023. By March 2024, 12.6 million of its names no longer resolved."
+sources:
+  - "krebsonsecurity.com/2023/03/sued-by-meta-freenom-halts-domain-registrations (checked 2026-10-23)"
+  - "netcraft.com/blog/cloudflare-loses-22-of-its-domains-in-freenom-tk-shutdown (checked 2026-10-23)"
+inspire: []

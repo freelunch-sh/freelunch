@@ -23,12 +23,17 @@ locals {
     card_required  = ["yes", "no", "unknown"]
   }
 
+  # `recommended: true` marks the provider to start with where a category offers several.
+  recommended = [for k, p in local.providers : k if try(p.recommended, false) == true]
+
   invalid = {
-    missing_fields = [for k, p in local.providers : k if !alltrue([for f in local.required_fields : try(p[f], null) != null])]
-    name_mismatch  = [for k, p in local.providers : k if try(p.name, "") != k]
-    bad_category   = [for k, p in local.providers : k if !contains(local.category_keys, try(p.category, ""))]
-    bad_enum       = [for k, p in local.providers : k if !alltrue([for f, allowed in local.enums : contains(allowed, try(tostring(p[f]), ""))])]
-    bad_terraform  = [for k, p in local.providers : k if(try(p.terraform_provider, null) == null) != (try(p.iac, "") == "none")]
+    missing_fields  = [for k, p in local.providers : k if !alltrue([for f in local.required_fields : try(p[f], null) != null])]
+    name_mismatch   = [for k, p in local.providers : k if try(p.name, "") != k]
+    bad_category    = [for k, p in local.providers : k if !contains(local.category_keys, try(p.category, ""))]
+    bad_enum        = [for k, p in local.providers : k if !alltrue([for f, allowed in local.enums : contains(allowed, try(tostring(p[f]), ""))])]
+    bad_terraform   = [for k, p in local.providers : k if(try(p.terraform_provider, null) == null) != (try(p.iac, "") == "none")]
+    bad_recommended = [for k, p in local.providers : k if !(try(p.recommended, false) == true || try(p.recommended, false) == false) || (contains(local.recommended, k) && try(p.status, "") == "excluded")]
+    two_recommended = [for c in local.category_keys : c if length([for k in local.recommended : k if try(local.providers[k].category, "") == c]) > 1]
   }
 
   icons = {

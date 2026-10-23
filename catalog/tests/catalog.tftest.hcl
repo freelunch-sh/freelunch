@@ -23,6 +23,11 @@ run "valid_catalog_renders" {
   }
 
   assert {
+    condition     = strcontains(output.checklist, "♾️ 1 tiny VM · **recommended**\n") && strcontains(output.checklist, "⏳ Trial credit\n")
+    error_message = "Only the provider with recommended: true should carry the recommended mark."
+  }
+
+  assert {
     condition     = strcontains(output.checklist, "### VPS & cloud credits (1/1)") && strcontains(output.checklist, "### Managed databases (0/1)")
     error_message = "Section headings should carry done/total counts."
   }
@@ -38,6 +43,16 @@ run "invalid_provider_yaml_is_rejected" {
 
   variables {
     providers_dir = "tests/fixtures/invalid"
+  }
+
+  expect_failures = [output.checklist, output.stub_readmes]
+}
+
+run "one_recommended_provider_per_category" {
+  command = plan
+
+  variables {
+    providers_dir = "tests/fixtures/two-recommended"
   }
 
   expect_failures = [output.checklist, output.stub_readmes]

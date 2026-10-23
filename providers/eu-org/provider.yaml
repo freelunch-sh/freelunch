@@ -1,0 +1,22 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: eu-org
+display_name: "EU.org"
+category: domains
+status: ready
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "Free names under eu.org or a country subdomain such as de.eu.org, with no expiry; requests are checked by hand and can take months"
+card_required: "no"
+url: "https://nic.eu.org/"
+last_verified: "2026-10-23"
+notes: "Run by volunteers since 1996, with no support beyond a mailing list. The request is checked against the nameservers you give, so the name needs a DNS host that answers for it before approval (ClouDNS or Hurricane Electric); move it to Cloudflare once it is approved."
+# Checked by `freelunch domain suggest`.
+suffixes: ["eu.org"]
+sources:
+  - "nic.eu.org (checked 2026-10-23)"
+  - "forum.infinityfree.com threads on eu.org approval times (checked 2026-10-23)"
+  - "Guides on applying with ClouDNS and moving to Cloudflare after approval (checked 2026-10-23)"
+  - "Public Suffix List lists eu.org and 51 country subdomains (checked 2026-10-23)"
+inspire: []

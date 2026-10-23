@@ -1,0 +1,13 @@
+name: epsilon
+display_name: "Epsilon Names"
+category: domains
+status: ready
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "More free names"
+recommended: true
+card_required: "no"
+url: "https://epsilon.example"
+last_verified: "2026-10-23"
