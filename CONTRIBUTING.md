@@ -11,7 +11,7 @@ tests use a fake `ssh` and `docker`. No cloud account needed.
 ```bash
 bin/freelunch test        # every test suite, plus tests/cli.sh
 bin/freelunch fmt         # format HCL (CI runs: bin/freelunch fmt -check)
-shellcheck bin/freelunch tests/cli.sh providers/*/scripts/*.sh
+git ls-files -z '*.sh' | xargs -0 shellcheck bin/freelunch
 ```
 
 `bin/freelunch test providers/cloudflare deploy` runs only the suites under those folders

@@ -45,6 +45,9 @@ freelunch deploy              # copies compose.yaml to the VM, starts it and clo
 freelunch destroy all         # removes the tunnel, DNS record and VM
 ```
 
+If `apply oci` stops at "Out of host capacity", run `freelunch apply oci --wait-for-capacity`:
+it tries again until OCI has room for the VM.
+
 Then open `https://api.example.com`. To ship a new version, change the image tag in
 `compose.yaml` and run `freelunch deploy` again. The VM stays.
 
