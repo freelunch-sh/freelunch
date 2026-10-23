@@ -24,7 +24,7 @@ Hosts without a public IP (`public_ip = null`) are listed by their private IP in
 `ansible_inventory` and `ssh_config`; reach them over Tailscale or a VPN.
 
 ```bash
-terraform -chdir=hybrid output -raw ansible_inventory > inventory.yaml
+freelunch output hybrid -raw ansible_inventory > inventory.yaml
 ansible -i inventory.yaml arm64 -m ping
 ```
 

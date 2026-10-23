@@ -17,26 +17,44 @@ failed=0
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
-# Records the destination, then runs the remote script locally.
-for a; do last="$a"; done
+# Records the destination, then runs the remote script locally. With FAKE_HOST_KEY set it
+# adds that key to known_hosts on first contact, like StrictHostKeyChecking=accept-new.
+for a; do
+  [[ "$a" == UserKnownHostsFile=* ]] && known="${a#UserKnownHostsFile=}"
+  [[ "$a" == *@* ]] && dest="$a"
+  last="$a"
+done
 echo "ssh $*" >> "$FAKE_LOG"
+if [[ -n "${FAKE_HOST_KEY:-}" ]] && ! ssh-keygen -F "${dest#*@}" -f "$known" >/dev/null 2>&1; then
+  echo "${dest#*@} $FAKE_HOST_KEY" >> "$known"
+fi
 [[ "$last" == "true" ]] && exit 0
 sed "s#/opt/freelunch/apps#$FAKE_ROOT/apps#" | bash -s
 EOF
 cat > "$WORK/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 echo "docker $* @ $(basename "$PWD")" >> "$FAKE_LOG"
+for a; do last="$a"; done
 case "$1 ${2:-}" in
   "login "*)   echo "stdin: $(cat)" >> "$FAKE_LOG" ;;
   "compose up") [[ "$(basename "$PWD")" != "${FAKE_UNHEALTHY:-}" ]] || exit 1 ;;
+  "compose config") echo "example/$(basename "$PWD"):1.0" ;;
+  "image inspect") echo "${last%%:*}@sha256:digest-of-$(basename "${last%%:*}")" ;;
 esac
 exit 0
 EOF
+ssh-keygen -q -t ed25519 -N '' -C fake-host -f "$WORK/hostkey"
 printf '#!/bin/sh\nexit 0\n' > "$WORK/bin/cloud-init"
-# Records the arguments a stack run gets instead of running tofu/terraform.
+# Records the arguments a stack run gets instead of running tofu/terraform. Like them, init
+# writes the dependency lock file next to the code (FAKE_LOCK is its content).
 cat > "$WORK/bin/fake-tf" <<'EOF'
 #!/usr/bin/env bash
 echo "TF_DATA_DIR=${TF_DATA_DIR:-} $*" >> "$FAKE_LOG"
+dir="${1#-chdir=}"
+if [[ "${2:-}" == "init" ]]; then
+  echo "lock before init: $(cat "$dir/.terraform.lock.hcl" 2>/dev/null || echo none)" >> "$FAKE_LOG"
+  echo "${FAKE_LOCK:-# lock}" > "$dir/.terraform.lock.hcl"
+fi
 EOF
 chmod +x "$WORK/bin/"*
 
@@ -58,6 +76,18 @@ registries = {
   "ghcr.io" = { username = "me", password_env = "GHCR_TOKEN" }
 }
 EOF
+}
+
+# A copy of the CLI and some stacks' code, for tests that let the CLI write next to the
+# stack code (as it does in a submodule) without touching this checkout.
+scratch_checkout() { # scratch_checkout <dir> <stack...>
+  local dir="$1" s; shift
+  mkdir -p "$dir/bin" && cp "$CLI" "$dir/bin/"
+  for s in "$@"; do
+    mkdir -p "$dir/providers/$s/stack"
+    cp "$ROOT/providers/$s/provider.yaml" "$dir/providers/$s/"
+    cp "$ROOT/providers/$s/stack/"*.tf "$ROOT/providers/$s/stack/"*.example "$dir/providers/$s/stack/"
+  done
 }
 
 # deploy_in <dir> [args...]: run deploy with the fakes
@@ -172,19 +202,44 @@ test_checkout_inside_a_project_keeps_home_mode() {
 }
 
 test_stacks_get_project_tfvars_state_and_data_dir() {
-  local p="$WORK/args"
+  local p="$WORK/args" c="$WORK/args-checkout"
   new_project "$p"
+  scratch_checkout "$c" oci cloudflare
   touch "$p/.freelunch/oci/terraform.tfvars" "$p/.freelunch/cloudflare/terraform.tfvars"
-  (cd "$p" && FAKE_LOG="$p/fake.log" FREELUNCH_TF="$WORK/bin/fake-tf" "$CLI" plan oci cloudflare)
-  grep -q "TF_DATA_DIR=$p/.freelunch/oci/.terraform -chdir=$ROOT/providers/oci/stack plan -input=false -var-file=$p/.freelunch/oci/terraform.tfvars -state=$p/.freelunch/oci/terraform.tfstate" "$p/fake.log"
-  grep -q -- "-chdir=$ROOT/providers/cloudflare/stack plan .*-var=inventory_state_path=$p/.freelunch/hybrid/terraform.tfstate" "$p/fake.log"
+  (cd "$p" && FAKE_LOG="$p/fake.log" FREELUNCH_TF="$WORK/bin/fake-tf" "$c/bin/freelunch" plan oci cloudflare)
+  grep -q "TF_DATA_DIR=$p/.freelunch/oci/.terraform -chdir=$c/providers/oci/stack plan -input=false -var-file=$p/.freelunch/oci/terraform.tfvars -state=$p/.freelunch/oci/terraform.tfstate" "$p/fake.log"
+  grep -q -- "-chdir=$c/providers/cloudflare/stack plan .*-var=inventory_state_path=$p/.freelunch/hybrid/terraform.tfstate" "$p/fake.log"
   lacks "$(grep "providers/oci/stack plan" "$p/fake.log")" "inventory_state_path"
 }
 
-test_deploy_copies_files_and_starts_apps() {
-  local p="$WORK/deploy"
+# The lock file pins provider versions and checksums. tofu/terraform write it next to the
+# code, but it belongs to the project, which commits it so every machine and CI run
+# installs the same provider builds.
+test_lock_files_live_in_the_project() {
+  local p="$WORK/locks" c="$WORK/locks-checkout" out
   new_project "$p"
-  GHCR_TOKEN=ghp_test-token deploy_in "$p"
+  scratch_checkout "$c" oci
+  touch "$p/.freelunch/oci/terraform.tfvars"
+  echo "# left by another project" > "$c/providers/oci/stack/.terraform.lock.hcl"
+  out="$(cd "$p" && FAKE_LOG="$p/fake.log" FAKE_LOCK="# first lock" FREELUNCH_TF="$WORK/bin/fake-tf" "$c/bin/freelunch" plan oci 2>&1)"
+  grep -qx 'lock before init: none' "$p/fake.log"
+  equals "$(cat "$p/.freelunch/oci/.terraform.lock.hcl")" "# first lock"
+  contains "$out" "wrote .freelunch/oci/.terraform.lock.hcl"
+  # Later runs start from the project's lock, whatever sits next to the code.
+  echo "# left by another project" > "$c/providers/oci/stack/.terraform.lock.hcl"
+  out="$(cd "$p" && FAKE_LOG="$p/fake.log" FAKE_LOCK="# first lock" FREELUNCH_TF="$WORK/bin/fake-tf" "$c/bin/freelunch" plan oci 2>&1)"
+  grep -qx 'lock before init: # first lock' "$p/fake.log"
+  lacks "$out" "wrote .freelunch/oci/.terraform.lock.hcl"
+  # Committed, unlike state and secrets.
+  git -C "$p" init -q
+  fails git -C "$p" check-ignore -q .freelunch/oci/.terraform.lock.hcl
+  for f in oci/terraform.tfstate oci/.terraform/providers .env; do git -C "$p" check-ignore -q ".freelunch/$f"; done
+}
+
+test_deploy_copies_files_and_starts_apps() {
+  local p="$WORK/deploy" out
+  new_project "$p"
+  out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" 2>&1)"
   cmp "$p/compose.yaml" "$p/host/apps/api/compose.yaml"
   cmp "$ROOT/providers/cloudflare/apps/cloudflared/compose.yaml" "$p/host/apps/cloudflared/compose.yaml"
   equals "$(cat "$p/host/apps/api/.env")" "API_SECRET=s3cret-value"
@@ -199,6 +254,22 @@ test_deploy_copies_files_and_starts_apps() {
   grep -q '^docker image prune -af' "$p/fake.log"
   # Apps start before the tunnel that exposes them.
   contains "$(grep 'compose up' "$p/fake.log" | head -1)" "@ api"
+  # Each image's digest is printed, and the registry login ends with the deploy.
+  contains "$out" "example/api:1.0 = sha256:digest-of-api"
+  contains "$out" "example/cloudflared:1.0 = sha256:digest-of-cloudflared"
+  contains "$(grep '^docker' "$p/fake.log" | tail -1)" "docker logout ghcr.io"
+}
+
+test_deploy_shows_a_new_host_key_once() {
+  local p="$WORK/first-contact" key fp out
+  new_project "$p"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  fp="$(ssh-keygen -l -f "$WORK/hostkey.pub" | cut -d' ' -f2)"
+  out="$(GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$p" 2>&1)"
+  contains "$out" "oci-main: first connection, trusted this host key without checking it"
+  contains "$out" "203.0.113.10 ED25519 $fp"
+  out="$(GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$p" 2>&1)"
+  lacks "$out" "first connection"
 }
 
 test_deploy_reads_secrets_from_the_project_env_file() {
@@ -232,6 +303,7 @@ test_deploy_fails_loudly_when_an_app_is_unhealthy() {
   contains "$out" "api is not healthy after 180s"
   contains "$out" "oci-main: deploy failed"
   fails grep -q '@ cloudflared$' "$p/fake.log"
+  grep -q '^docker logout ghcr.io' "$p/fake.log"
 }
 
 test_deploy_targets() {
@@ -250,6 +322,17 @@ test_deploy_rejects_unknown_hosts_and_missing_secrets() {
   sed -i.bak 's/oci-main/oci-mian/' "$p/.freelunch/apps.tfvars"
   if out="$(GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
   contains "$out" "not in the inventory"
+}
+
+test_output_reads_a_stack_from_the_project() {
+  local p="$WORK/output"
+  new_project "$p"
+  equals "$(cd "$p" && "$CLI" output oci -json hosts | jq -r '.[0].public_ip')" "203.0.113.10"
+  equals "$(cd "$p" && "$CLI" output cloudflare -json tunnel_tokens | jq -r '."oci-main"')" "mock-tunnel-token"
+  (cd "$p" && "$CLI" inventory)
+  contains "$(cd "$p" && "$CLI" output hybrid -raw ssh_config)" "HostName 203.0.113.10"
+  fails in_dir "$p" "$CLI" output gcp
+  fails in_dir "$p" "$CLI" output no-such-stack
 }
 
 test_tunnel_only_hosts_get_cloudflared() {
