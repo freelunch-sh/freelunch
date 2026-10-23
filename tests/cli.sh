@@ -101,6 +101,18 @@ case "$1 ${2:-}" in
   "session validate")
     if [[ "${FAKE_SESSION_REFRESHES:-1000}" == "0" ]]; then echo "Session has expired" >&2; exit 1; fi
     echo "Session is valid until 2026-10-24 10:00:00" >&2; exit 0 ;;
+  "compute console-history")
+    # FAKE_CONSOLE_KEYS are the keys cloud-init printed at the end of the first boot.
+    case "$3" in
+      capture) echo "ocid1.consolehistory.oc1..h1" ;;
+      get-content)
+        printf '[   11.2] cloud-init[1042]: Cloud-init v. 24.4 running modules:final\r\n'
+        if [[ -n "${FAKE_CONSOLE_KEYS:-}" ]]; then
+          printf -- '-----BEGIN SSH HOST KEY KEYS-----\r\n%s\r\n-----END SSH HOST KEY KEYS-----\r\n' "${FAKE_CONSOLE_KEYS//$'\n'/$'\r\n'}"
+        fi
+        printf 'Ubuntu 24.04 LTS main ttyS0\r\n\r\nmain login: \r\n' ;;
+    esac
+    exit 0 ;;
   "iam region-subscription")
     if [[ -n "${FAKE_OCI_KEY_BAD:-}" ]]; then
       echo 'ServiceError: {"code": "NotAuthenticated", "message": "The required information to complete authentication was not provided or was incorrect."}' >&2
@@ -141,6 +153,15 @@ echo "post $a [$type] $body" >> "$FAKE_LOG"
 EOF
 chmod +x "$WORK/wait-bin/"*
 mkdir -p "$WORK/doctor-bin" && ln -s "$WORK/wait-bin/oci" "$WORK/doctor-bin/oci"
+# For trust: an ssh-keyscan that finds the key in FAKE_SCANNED at any address.
+mkdir -p "$WORK/trust-bin"
+cat > "$WORK/trust-bin/ssh-keyscan" <<'EOF'
+#!/usr/bin/env bash
+for a; do address="$a"; done
+echo "ssh-keyscan $*" >> "$FAKE_LOG"
+[[ -z "${FAKE_SCANNED:-}" ]] || echo "$address $FAKE_SCANNED"
+EOF
+chmod +x "$WORK/trust-bin/ssh-keyscan"
 
 # The fake internet (below) for `freelunch domain`.
 mkdir -p "$WORK/doh-bin"
@@ -318,6 +339,12 @@ doctor_in() {
   local dir="$1"; shift
   (cd "$dir" && HOME="$dir/home" SSH_AUTH_SOCK="" PATH="${TEST_PATH:-$WORK/doctor-bin:$WORK/bin:$PATH}" FAKE_LOG="$dir/fake.log" \
     CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN:-}" FREELUNCH_SSH_KEY="${TEST_SSH_KEY:-}" GHCR_TOKEN="${GHCR_TOKEN:-}" "$CLI" doctor "$@")
+}
+
+# trust_in <dir> <host>: run trust with the fake OCI CLI and ssh-keyscan
+trust_in() {
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/trust-bin:$WORK/doctor-bin:$PATH" FAKE_LOG="$dir/fake.log" "$CLI" trust "$@")
 }
 
 # suggest_in <dir> [names...]: run domain suggest against the fake internet
@@ -722,7 +749,7 @@ test_apply_says_what_is_next() {
   out="$(apply_in "$p" oci 2>&1)"
   contains "$out" "==> oci-main is ready at 203.0.113.10"
   contains "$out" "==> oci-edge-1 is ready at 203.0.113.11"
-  contains "$out" "$(printf 'Next steps:\n  1. Check the host key of oci-main, oci-edge-1 before the first deploy (docs/deploy-a-container.md#check-the-host-key)\n  2. freelunch deploy')"
+  contains "$out" "$(printf 'Next steps:\n  1. Pin the host keys before the first deploy: freelunch trust oci-main, freelunch trust oci-edge-1\n  2. freelunch deploy')"
   # Pinned keys need no check, and a cloudflare stack that isn't applied yet comes first.
   key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
   printf '203.0.113.10 %s\n203.0.113.11 %s\n' "$key" "$key" > "$p/.freelunch/known_hosts"
@@ -1071,6 +1098,56 @@ test_dry_run_shows_the_plan_without_secrets() {
   lacks "$out" "mock-tunnel-token"
   lacks "$out" "ghp_test-token"
   absent "$p/fake.log"
+}
+
+# trust pins the keys a host printed to its serial console, before the first deploy.
+test_trust_pins_host_keys_from_the_console() {
+  local p="$WORK/trust" out key ecdsa
+  new_project "$p"
+  cp "$ROOT/providers/oci/stack/project.tfvars.example" "$p/.freelunch/oci/terraform.tfvars"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  ssh-keygen -q -t ecdsa -N '' -f "$p/ecdsa"
+  ecdsa="$(cut -d' ' -f1,2 "$p/ecdsa.pub")"
+  out="$(FAKE_CONSOLE_KEYS="$(printf '%s root@main\n%s root@main' "$ecdsa" "$key")" FAKE_SCANNED="$key" trust_in "$p" oci-main 2>&1)"
+  grep -qxF "203.0.113.10 $key" "$p/.freelunch/known_hosts"
+  grep -qxF "203.0.113.10 $ecdsa" "$p/.freelunch/known_hosts"
+  contains "$out" "oci-main: pinned its host keys in .freelunch/known_hosts:"
+  contains "$out" "$(ssh-keygen -l -f "$WORK/hostkey.pub" | cut -d' ' -f2)"
+  contains "$out" "oci-main: 203.0.113.10 answers with the same key"
+  grep -qx 'oci compute console-history capture --instance-id ocid1.instance.oc1..a --wait-for-state SUCCEEDED --query data.id --raw-output --profile DEFAULT --region eu-frankfurt-1' "$p/fake.log"
+  grep -q '^oci compute console-history delete --instance-console-history-id ocid1.consolehistory.oc1..h1 --force ' "$p/fake.log"
+  # The first deploy finds the key pinned: nothing to accept on trust.
+  out="$(GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$p" 2>&1)"
+  lacks "$out" "first connection"
+  # Once more changes nothing.
+  out="$(FAKE_CONSOLE_KEYS="$(printf '%s root@main\n%s root@main' "$ecdsa" "$key")" trust_in "$p" oci-main 2>&1)"
+  contains "$out" "has its keys already"
+  equals "$(grep -c '^203.0.113.10 ' "$p/.freelunch/known_hosts")" 2
+}
+
+test_trust_refuses_keys_that_dont_match() {
+  local p="$WORK/trust-mismatch" out key other
+  new_project "$p"
+  cp "$ROOT/providers/oci/stack/project.tfvars.example" "$p/.freelunch/oci/terraform.tfvars"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  ssh-keygen -q -t ed25519 -N '' -f "$p/other"
+  other="$(cut -d' ' -f1,2 "$p/other.pub")"
+  # known_hosts remembers another machine at the address.
+  echo "203.0.113.10 $other" > "$p/.freelunch/known_hosts"
+  if out="$(FAKE_CONSOLE_KEYS="$key root@main" trust_in "$p" oci-main 2>&1)"; then echo "trust should have failed"; return 1; fi
+  contains "$out" "has other keys for 203.0.113.10 than the console shows"
+  contains "$out" "ssh-keygen -R 203.0.113.10 -f .freelunch/known_hosts"
+  equals "$(cat "$p/.freelunch/known_hosts")" "203.0.113.10 $other"
+  # Something else answers at the address.
+  rm "$p/.freelunch/known_hosts"
+  if out="$(FAKE_CONSOLE_KEYS="$key root@main" FAKE_SCANNED="$other" trust_in "$p" oci-main 2>&1)"; then echo "trust should have failed"; return 1; fi
+  contains "$out" "203.0.113.10 answers with a key its console doesn't have. Don't deploy until you know why"
+  # No keys in the console yet, a host that isn't there, and one name at a time.
+  if out="$(trust_in "$p" oci-main 2>&1)"; then echo "trust should have failed"; return 1; fi
+  contains "$out" "the console of oci-main has no host keys"
+  fails trust_in "$p" gcp-main
+  fails trust_in "$p"
+  fails trust_in "$p" oci-main oci-edge-1
 }
 
 test_deploy_fails_loudly_when_an_app_is_unhealthy() {

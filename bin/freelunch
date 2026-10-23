@@ -40,6 +40,8 @@ Project:
                           their env to the hosts over SSH, start them and wait until they are
                           healthy. Targets: all (default), a provider (oci) or a host
                           (oci-main). --dry-run prints the remote script instead.
+  trust <host>            Pin a host's SSH keys in known_hosts from its serial console, so the
+                          first deploy talks to the right machine (OCI hosts)
   domain suggest <name...>
                           Whether the name you typed is registered, then free names like it
                           (myapp.dpdns.org, myapp.pp.ua, myapp.eu.org, ...) and whether they are
@@ -562,20 +564,21 @@ show_user_data() { # show_user_data <provider> <saved plan>
 # next_steps <host providers...>: after apply, where the hosts are and what is left before
 # the apps run on them
 next_steps() {
-  local p host address known unpinned="" steps=() i
+  local p host address known unpinned="" trust="" steps=() i
   known="$(state_root)/known_hosts"
   for p in "$@"; do
     while read -r host address; do
       [[ -n "$address" ]] || continue
       log "$host is ready at $address"
-      ssh-keygen -F "$address" -f "$known" >/dev/null 2>&1 || unpinned="${unpinned:+$unpinned, }$host"
+      ssh-keygen -F "$address" -f "$known" >/dev/null 2>&1 && continue
+      # trust reads OCI consoles; for the other hosts the walkthrough shows how.
+      if [[ "$p" == "oci" ]]; then trust="${trust:+$trust, }freelunch trust $host"; else unpinned="${unpinned:+$unpinned, }$host"; fi
     done < <(host_addresses "$p")
   done
   # Apps come from deploy when there is an apps file or a tunnel to start.
   if [[ -f "$(state_root)/apps.tfvars" ]] || is_configured cloudflare || is_deployed cloudflare; then
-    if [[ -n "$unpinned" ]]; then
-      steps+=("Check the host key of $unpinned before the first deploy (docs/deploy-a-container.md#check-the-host-key)")
-    fi
+    [[ -z "$trust" ]] || steps+=("Pin the host keys before the first deploy: $trust")
+    [[ -z "$unpinned" ]] || steps+=("Check the host key of $unpinned before the first deploy (docs/deploy-a-container.md#check-the-host-key)")
     if [[ -d "$(stack_dir cloudflare)" ]] && is_configured cloudflare && ! is_deployed cloudflare; then steps+=("freelunch apply cloudflare"); fi
     steps+=("freelunch deploy")
   fi
@@ -1313,7 +1316,7 @@ deploy_host() { # deploy_host <host> <dry run 0|1>
   wait_for_ssh "$user@$address"
   # SSH trusts a host key it has never seen (accept-new), so show which one it trusted.
   if [[ $new_key -eq 1 ]] && fp="$(ssh-keygen -l -F "$address" -f "$known" 2>/dev/null | grep -v '^#')"; then
-    log "$host: first connection, trusted this host key without checking it (docs/deploy-a-container.md#check-the-host-key):"
+    log "$host: first connection, trusted this host key without checking it (freelunch trust $host checks it first):"
     while IFS= read -r line; do echo "      $line" >&2; done <<< "$fp"
   fi
   # Run as root: apps live in /opt/freelunch/apps, which cloud-init created as root.
@@ -1595,6 +1598,91 @@ cmd_domain() {
   set -- "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   [[ "$1" =~ $re ]] || die "domain $sub: '$1' is not a domain name"
   "domain_$sub" "$1"
+}
+
+# --- trust ----------------------------------------------------------------------------
+
+# deploy pins a host's key on first contact (accept-new), so that first connection trusts
+# whatever answers at the address. cloud-init prints the real keys to the serial console at
+# the end of the first boot, and the provider's API, which you are signed in to, can read
+# the console. trust puts those keys in known_hosts before the first deploy.
+
+# oci_console_keys <instance id>: the SSH host keys an OCI instance printed to its console
+oci_console_keys() {
+  local tfvars profile region history out args=()
+  tfvars="$(config_dir oci)/terraform.tfvars"
+  profile="$(tfvar "$tfvars" oci_config_profile)"
+  profile="${profile:-${TF_VAR_oci_config_profile:-DEFAULT}}"
+  region="$(tfvar "$tfvars" region)"
+  command -v oci >/dev/null || die "trust: reading an OCI console takes the OCI CLI (https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm)"
+  args=(--profile "$profile")
+  [[ -z "$region" ]] || args+=(--region "$region")
+  if [[ -n "$(oci_session_profile "$tfvars")" ]]; then
+    check_oci_session "$profile"
+    args+=(--auth security_token)
+  fi
+  history="$(oci compute console-history capture --instance-id "$1" --wait-for-state SUCCEEDED --query data.id --raw-output "${args[@]}")" \
+    || die "trust: can't capture the console of $1 (see above)"
+  out="$(oci compute console-history get-content --instance-console-history-id "$history" --length 1048576 --file - "${args[@]}")" \
+    || die "trust: can't read the console history $history (see above)"
+  # A capture is a copy of the console on OCI's side; it isn't needed any more.
+  oci compute console-history delete --instance-console-history-id "$history" --force "${args[@]}" >/dev/null 2>&1 || true
+  tr -d '\r' <<< "$out" | sed -n '/BEGIN SSH HOST KEY KEYS/,/END SSH HOST KEY KEYS/p' | grep -oE '^(ssh|ecdsa|sk)-[a-z0-9@.-]+ [A-Za-z0-9+/]+=*' | sort -u || true
+}
+
+cmd_trust() {
+  local host="${1:-}" provider id address names known keys pinned shown key fp state=()
+  [[ $# -eq 1 ]] || die "trust: name one host, e.g. freelunch trust oci-main (freelunch inventory lists them)"
+  need_tf
+  command -v jq >/dev/null || die "jq is required for 'trust'"
+  cmd_hybrid >/dev/null 2>&1 || die "trust: can't read the inventory (freelunch hybrid says why)"
+  [[ -z "$PROJECT" ]] || state=(-state="$(hybrid_state)")
+  IFS=$'\t' read -r provider id address < <(tf_for hybrid "$ROOT/hybrid" output ${state[@]+"${state[@]}"} -json hosts \
+    | jq -r --arg h "$host" '.[] | select("\(.provider)-\(.name)" == $h) | [.provider, .id, (.public_ip // .private_ip // "")] | @tsv') || true
+  [[ -n "${provider:-}" ]] || die "trust: $host is not in the inventory (freelunch inventory lists the hosts)"
+  [[ "$provider" == "oci" ]] || die "trust: reading host keys from the console works for OCI hosts so far. For $provider, compare the key deploy shows on first contact with the serial console (docs/deploy-a-container.md#check-the-host-key)"
+
+  # deploy reaches the host at the address apps.tfvars gives it, if any.
+  names="$address"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if [[ -f "$(state_root)/apps.tfvars" ]] && deploy_plan "$(state_root)/apps.tfvars" "" >/dev/null 2>&1; then
+    address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
+    address="${address:-$names}"
+    [[ "$address" == "$names" ]] || names="$names,$address"
+  fi
+  [[ -n "$address" ]] || die "trust: $host has no address"
+
+  log "$host: reading its SSH host keys from the serial console"
+  keys="$(oci_console_keys "$id")"
+  [[ -n "$keys" ]] || die "trust: the console of $host has no host keys. cloud-init prints them at the end of the first boot: try again in a few minutes. After many boots they may be gone from the console; then check the key deploy shows on first contact"
+
+  known="$(state_root)/known_hosts"
+  touch "$known"
+  # Keys known_hosts has for the address already must be among the console's.
+  pinned="$(ssh-keygen -F "$address" -f "$known" 2>/dev/null | grep -v '^#' | grep -oE '(ssh|ecdsa|sk)-[a-z0-9@.-]+ [A-Za-z0-9+/]+=*' | sort -u || true)"
+  if [[ -n "$pinned" ]]; then
+    if grep -vxF -f <(printf '%s\n' "$keys") <<< "$pinned" >/dev/null; then
+      die "trust: $(rel "$known") has other keys for $address than the console shows, from an earlier host at that address perhaps. Remove them (ssh-keygen -R $address -f $(rel "$known")) and run this again"
+    fi
+    log "$host: $(rel "$known") has its keys already"
+  else
+    while IFS= read -r key; do echo "$names $key"; done <<< "$keys" >> "$known"
+    log "$host: pinned its host keys in $(rel "$known"):"
+  fi
+  while IFS= read -r key; do
+    fp="$(ssh-keygen -l -f /dev/stdin <<< "$address $key" 2>/dev/null)" || continue
+    echo "      $fp" >&2
+  done <<< "$keys"
+
+  # What answers at the address now should be one of them.
+  shown="$(ssh-keyscan -T 5 "$address" 2>/dev/null | grep -oE '(ssh|ecdsa|sk)-[a-z0-9@.-]+ [A-Za-z0-9+/]+=*' | sort -u || true)"
+  if [[ -z "$shown" ]]; then
+    log "$host: couldn't reach $address to compare; deploy checks the key when it connects"
+  elif grep -qxF -f <(printf '%s\n' "$keys") <<< "$shown"; then
+    log "$host: $address answers with the same key"
+  else
+    die "trust: $address answers with a key its console doesn't have. Don't deploy until you know why: another machine at that address, or someone in between"
+  fi
 }
 
 # --- doctor ---------------------------------------------------------------------------
@@ -1891,6 +1979,7 @@ main() {
     plan|apply|destroy)   cmd_lifecycle "$cmd" "$@" ;;
     status)               cmd_status ;;
     doctor)               cmd_doctor ;;
+    trust)                cmd_trust "$@" ;;
     hybrid)               cmd_hybrid ;;
     inventory)            cmd_inventory ;;
     output)               cmd_output "$@" ;;

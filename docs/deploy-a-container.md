@@ -150,23 +150,27 @@ The first `deploy` trusts whatever host key the VM shows and pins it in
 `.freelunch/known_hosts`, then sends your registry and tunnel tokens over that connection.
 To rule out a machine in the middle, put the VM's real keys there first. cloud-init prints
 them to the serial console at the end of the first boot, a few minutes after `apply`, and
-the [OCI CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm) can
-read the console:
+OCI's API, which you are signed in to, can read the console:
 
 ```bash
-host="$(freelunch output oci -json hosts | jq -c '.[] | select(.name == "main")')"
-history="$(oci compute console-history capture --instance-id "$(jq -r .id <<< "$host")" \
-  --wait-for-state SUCCEEDED --query data.id --raw-output)"
-oci compute console-history get-content --instance-console-history-id "$history" \
-    --length 1048576 --file - |
-  tr -d '\r' | sed -n '/BEGIN SSH HOST KEY KEYS/,/END SSH HOST KEY KEYS/p' |
-  grep -E '^(ssh|ecdsa)-' | sed "s/^/$(jq -r .public_ip <<< "$host") /" >> .freelunch/known_hosts
+freelunch trust oci-main
 ```
 
-From then on `deploy` only connects when the VM shows one of those keys. If you reach the
-host by another address (Tailscale), use that name instead of the IP. Skip this step and
-`deploy` prints the key it trusted on first contact, which you can compare with the same
-console output later.
+```
+==> oci-main: reading its SSH host keys from the serial console
+==> oci-main: pinned its host keys in .freelunch/known_hosts:
+      256 SHA256:mhwiGenYXCegl2Nx/OSHbc3JeoPtYtd/whxEifT0vSM 203.0.113.10 (ED25519)
+==> oci-main: 203.0.113.10 answers with the same key
+```
+
+It captures the console with the
+[OCI CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm), writes
+the keys for the address `deploy` uses (the IP, plus a `hosts` address from `apps.tfvars`
+such as a Tailscale name), and checks that the host answers with one of them. It never
+replaces keys `known_hosts` already has for that address, and stops if what answers there
+has another key. From then on `deploy` only connects when the VM shows one of those keys.
+The keys appear in the console once, at the first boot, so run it soon after `apply`.
+Skip this step and `deploy` prints the key it trusted on first contact instead.
 
 ## 4. The domain
 
@@ -356,7 +360,7 @@ as `myapp-oci-main`. The machine you deploy from has to be on the same tailnet.
 | `401-NotAuthenticated` from OCI | With an API key, check `user`, `fingerprint` and `key_file` in the profile in `~/.oci/config`, and that `oci_config_profile` names it |
 | `deploy` waits for SSH and gives up | The VM's public IP in `freelunch inventory`, `ssh_source_cidrs`, and your key (`FREELUNCH_SSH_KEY`) |
 | `Permission denied (publickey)` | The key in `ssh_public_keys` must match the one `deploy` uses |
-| `REMOTE HOST IDENTIFICATION HAS CHANGED` | If you recreated the VM with the same IP, remove its line from `.freelunch/known_hosts`. If you didn't, stop: something else answers at that address |
+| `REMOTE HOST IDENTIFICATION HAS CHANGED` | If you recreated the VM with the same IP, remove its line from `.freelunch/known_hosts` (`ssh-keygen -R <ip> -f .freelunch/known_hosts`) and pin the new keys with `freelunch trust <host>`. If you didn't, stop: something else answers at that address |
 | `is built for linux/amd64 only, but oci-main is linux/arm64` | Build the image for the host too: `docker buildx build --platform linux/amd64,linux/arm64 --push`, or the workflow from `freelunch init --image-workflow` |
 | `the registry won't show <image>` | Check the tag. A private image needs its registry under `registries` in `apps.tfvars`, with a token that can read it (`read:packages` on GHCR) |
 | An app is not healthy | The logs printed by `deploy`, or `ssh ubuntu@<ip> 'cd /opt/freelunch/apps/api && sudo docker compose logs'` |
