@@ -65,7 +65,8 @@ and `bin/freelunch inventory` writes `inventory.json`. Hosts without a public IP
 by their private IP, for access over Tailscale or a VPN.
 
 Hosts boot with [`shared/modules/docker-bootstrap`](../shared/modules/docker-bootstrap/):
-Ubuntu, Docker and Compose, optional swap, optional Tailscale, and Compose apps from
+Ubuntu, Docker and Compose with rotated logs, key-only SSH, a reboot window for security
+updates, optional swap, optional Tailscale, and Compose apps from
 `/opt/freelunch/apps/<name>/`. So a workload deploys the same way on any cloud, and
 `freelunch deploy` can update it later over SSH.
 
@@ -106,6 +107,7 @@ The CLI runs in one of two modes:
 ├── <app>.env                   app secrets, copied by deploy (git-ignored)
 ├── oci/terraform.tfvars        stack config (git-ignored)
 ├── oci/terraform.tfstate       stack state (git-ignored)
+├── oci/.terraform.lock.hcl     provider versions and checksums (committed)
 ├── oci/.terraform/             providers and modules for that stack
 ├── cloudflare/...
 ├── hybrid/terraform.tfstate    the inventory
@@ -119,6 +121,13 @@ and `-state=.freelunch/<stack>/terraform.tfstate`, so no stack needed changes. t
 still auto-loads a `terraform.tfvars` next to the code, so the CLI refuses to run a project
 when the checkout has one.
 
+The dependency lock file is the exception to `TF_DATA_DIR`: tofu/terraform always read and
+write `.terraform.lock.hcl` next to the code, which in a submodule or the runner image is
+not the project's to commit. So the CLI copies `.freelunch/<stack>/.terraform.lock.hcl` next
+to the code before `init` (or removes whatever lock is there) and copies it back afterwards.
+The project commits it, and every machine then installs the same provider builds and checks
+them against the recorded checksums.
+
 ## Deploy
 
 Every compute module ignores changes to user data after creation, so an A1 instance is never
@@ -127,11 +136,15 @@ SSH, not through cloud-init: `freelunch deploy` resolves `apps.tfvars` with
 [`deploy/`](../deploy/) (a read-only root module, like `hybrid/`), then pipes a script to
 `sudo bash -s` on each host. The script writes the Compose files and `.env` files to
 `/opt/freelunch/apps/<app>/`, logs in to registries, runs `docker compose up -d --wait` so a
-container that stays unhealthy fails the deploy, starts `cloudflared` with the host's tunnel
-token, and prunes unused images.
+container that stays unhealthy fails the deploy, prints the digest of every image it runs,
+starts `cloudflared` with the host's tunnel token, prunes unused images, and logs out of the
+registries again.
 
 Secrets travel over SSH and land in root-only files. They never go into user data, which is
-readable from the instance metadata service.
+readable from the instance metadata service. SSH uses `StrictHostKeyChecking=accept-new`
+with the project's own `known_hosts`: a changed key fails the deploy, and a new one is
+trusted and printed, unless it was pinned beforehand
+([how](deploy-a-container.md#check-the-host-key)).
 
 ## Free-tier guardrails
 
@@ -169,6 +182,12 @@ Scalr, Spacelift), plus any S3-compatible bucket (OCI Object Storage, Cloudflare
 
 Project mode keeps state local for now, since the stack code is pinned and can't take a
 `backend` block. Encrypted remote state on R2, B2 or OCI Object Storage is on the roadmap.
+
+State holds secrets in plain text: the cloudflare stack's state has the tunnel tokens and
+service token secrets, and `terraform.tfstate.backup` keeps a copy. Both are git-ignored, and
+on one machine they sit next to `.env`, which holds the more powerful API token anyway.
+State that leaves the machine (a remote backend, a CI cache) needs OpenTofu's state
+encryption first, which is why it is planned together with remote state.
 
 ## Catalog
 

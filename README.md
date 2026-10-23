@@ -132,6 +132,7 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 | `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts → services → hybrid → glue) |
 | `freelunch hybrid` | Re-aggregate deployed host stacks |
 | `freelunch inventory` | Write `inventory.json` |
+| `freelunch output <stack> [name]` | Print a stack's outputs from its state, e.g. `output cloudflare -json service_tokens` or `output hybrid -raw ssh_config` |
 | `freelunch catalog` | Regenerate the checklist below and the stub provider READMEs from `provider.yaml` files |
 | `freelunch test` | Run all offline test suites (mocked providers, fake ssh and docker, no credentials) |
 | `freelunch fmt [-check]` | Format all HCL, or check it |
@@ -157,7 +158,7 @@ freelunch/
 │   ├── gcp/, aws/, azure/         ✅ implemented, same layout as oci/
 │   ├── cloudflare/                ✅ glue: tunnel, DNS and Access per host, plus the cloudflared app
 │   └── <provider>/                provider.yaml + README for every catalogued provider
-├── shared/modules/docker-bootstrap  provider-agnostic cloud-init: Docker, Compose apps, swap, Tailscale
+├── shared/modules/docker-bootstrap  provider-agnostic cloud-init: Docker, Compose apps, swap, Tailscale, hardening
 ├── hybrid/                        merges every deployed host stack into one inventory
 ├── deploy/                        resolves a project's apps.tfvars into a deploy plan per host
 ├── catalog/                       renders the checklist from providers/*/provider.yaml
