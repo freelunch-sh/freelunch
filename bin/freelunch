@@ -1625,7 +1625,7 @@ status_waits() {
   for p in $(all_providers); do
     file="$(config_dir "$p")/wait.state"
     approval="$(config_dir "$p")/approved.json"
-    [[ -d "$(stack_dir "$p")" ]] && [[ -f "$file" || -f "$approval" ]] || continue
+    if [[ ! -d "$(stack_dir "$p")" ]] || [[ ! -f "$file" && ! -f "$approval" ]]; then continue; fi
     [[ $header -eq 1 ]] || { echo "Capacity waits"; header=1; }
     # A wait handed to CI (freelunch ci wait) shows in the state once it is over.
     if [[ -f "$approval" ]]; then
@@ -3769,7 +3769,7 @@ EOF
 github_workflows() {
   local base="$1" cron="11,41 * * * *" every="half hour" visibility image=""
   local minutes=$'A run takes a minute or two. A public repository runs them for free; a private one on\n# GitHub Free has 2,000 minutes a month, about 20 days of runs every half hour.'
-  visibility="$(cd "$base" && gh repo view --json visibility -q .visibility 2>/dev/null || true)"
+  visibility="$(cd "$base" && gh repo view --json visibility -q .visibility 2>/dev/null)" || visibility=""
   if [[ "$visibility" == "PUBLIC" ]]; then
     cron="4,19,34,49 * * * *" every="quarter of an hour" minutes="A run takes a minute or two, which a public repository runs for free."
   fi
@@ -3951,7 +3951,7 @@ bundle_ssh_key() {
 # can't go: CI couldn't refresh it past the session's end.
 bundle_oci() {
   local tfvars profile key
-  [[ -d "$(stack_dir oci)" ]] && is_configured oci || return 0
+  if [[ ! -d "$(stack_dir oci)" ]] || ! is_configured oci; then return 0; fi
   tfvars="$(config_dir oci)/terraform.tfvars"
   [[ -z "$(oci_session_profile "$tfvars")" ]] \
     || die "ci: the oci stack signs in with a session token (oci_auth = \"SecurityToken\"), which CI can't refresh past the session's end. Make an API key (oci setup bootstrap --profile-name freelunch), set oci_config_profile = \"freelunch\" and drop oci_auth in $(rel "$tfvars"), then run this again"
