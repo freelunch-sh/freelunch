@@ -145,7 +145,8 @@ For a project set up with freelunch from `main` before 1.0.0:
   saves the registry logins for that project only, runs `cloudflared` as the second service
   and waits until each one runs. `status` and `doctor` ask Northflank, and
   `destroy northflank` deletes the services, the logins and the project. freelunch never
-  takes over a project it didn't make. A request Northflank turns down shows its details
+  takes over a project it didn't make. deploy and `--dry-run` check every service against
+  the fields Northflank requires before anything is sent. A request Northflank turns down shows its details
   (the field and why), with the request's secrets left out. Moving an app from a VM is changing its target in
   `apps.tfvars` and its route, which names the app on a platform (`app = "api"`); the
   walkthrough's new "Switch to another provider" shows it for Northflank and GCP.

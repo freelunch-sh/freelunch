@@ -357,6 +357,13 @@ nf_uid() { printf '%024x' "$(printf '%s' "$1" | cksum | cut -d' ' -f1)"; } # a p
 nf_bad_projects() { # nf_bad_projects <body>: the first entry of restrictions.projects that isn't an ObjectId
   jq -r '[.restrictions.projects[]? | select(test("^[0-9a-f]{24}$") | not)][0] // empty' <<< "$1"
 }
+# nf_invalid_service <body>: Northflank's payload validation of a service, as it answered the
+# live test: a readiness check needs successThreshold, although the reference says optional
+nf_invalid_service() {
+  jq -c '[(.healthChecks // []) | to_entries[] | select(.value.type == "readinessProbe" and .value.successThreshold == null)
+    | {key: "healthChecks.\(.key).successThreshold", value: ["\"successThreshold\" is required when '"'"'type'"'"' is set to '"'"'readinessProbe'"'"'. Received \"undefined\""]}]
+    | if length == 0 then empty else {error: {status: 400, message: "Request failed payload validation - see details.", details: from_entries}} end' <<< "$1"
+}
 nf_missing() { respond 404 "{\"error\":{\"status\":404,\"message\":\"$1 not found\"}}"; }
 nf_deployment() { if listed "$1" "${FAKE_NF_FAILED:-}"; then echo FAILED; elif listed "$1" "${FAKE_NF_PENDING:-}"; then echo IN_PROGRESS; else echo COMPLETED; fi; }
 zone() { jq -nc --arg n "$1" --arg s "$2" '{id: ("zone-" + $n), name: $n, status: $s, account: {id: "acc1", name: "Me"}, name_servers: ["bob.ns.cloudflare.com", "ada.ns.cloudflare.com"]}'; }
@@ -442,6 +449,8 @@ case "$url" in
         done | jq -sc '{data: {services: .}}')" ;;
       "PUT /projects/"*/services/deployment)
         [[ -f "$nf/projects/$project.json" ]] || { nf_missing Project; exit 0; }
+        invalid="$(nf_invalid_service "$data")"
+        if [[ -n "$invalid" ]]; then respond 400 "$invalid"; exit 0; fi
         service="$(jq -r .name <<< "$data")"
         mkdir -p "$nf/services/$project"
         printf '%s\n' "$data" > "$nf/services/$project/$service.json"
@@ -1981,13 +1990,13 @@ test_deploy_puts_each_app_on_northflank() {
     "{\"name\":\"api\",\"plan\":\"nf-compute-20\",\"image\":\"ghcr.io/me/api@$digest\",\"cred\":\"freelunch-freelunch-ghcr-io\",\"docker\":{\"configType\":\"customCommand\",\"customCommand\":\"serve --port 8080\"}}"
   equals "$(jq -c .ports <<< "$body")" '[{"name":"p8080","internalPort":8080,"public":false,"protocol":"HTTP"}]'
   equals "$(jq -c .runtimeEnvironment <<< "$body")" '{"API_SECRET":"s3cret-value","QUOTED":"with spaces","LOG_LEVEL":"info"}'
-  equals "$(jq -c .healthChecks <<< "$body")" '[{"protocol":"CMD","type":"readinessProbe","cmd":"wget -qO- http://127.0.0.1:8080/health","initialDelaySeconds":1,"periodSeconds":10,"timeoutSeconds":30,"failureThreshold":6}]'
+  equals "$(jq -c .healthChecks <<< "$body")" '[{"protocol":"CMD","type":"readinessProbe","cmd":"wget -qO- http://127.0.0.1:8080/health","initialDelaySeconds":1,"periodSeconds":10,"timeoutSeconds":30,"failureThreshold":6,"successThreshold":1}]'
   # cloudflared, pinned like on a VM, with the tunnel token, ready once it is connected.
   body="$(sent "$p" cloudflared)"
   equals "$(jq -r .deployment.external.imagePath <<< "$body")" "cloudflare/cloudflared@$(sed -n 's/.*image: .*@\(sha256:[0-9a-f]*\).*/\1/p' "$ROOT/providers/cloudflare/apps/cloudflared/compose.yaml")"
   equals "$(jq -c '{plan: .billing.deploymentPlan, env: .runtimeEnvironment, ports, cmd: .deployment.docker.customCommand}' <<< "$body")" \
     '{"plan":"nf-compute-10","env":{"TUNNEL_TOKEN":"mock-tunnel-token"},"ports":[],"cmd":"tunnel --no-autoupdate --metrics 0.0.0.0:20241 run"}'
-  equals "$(jq -c '.healthChecks[0] | {protocol, path, port}' <<< "$body")" '{"protocol":"HTTP","path":"/ready","port":20241}'
+  equals "$(jq -c '.healthChecks[0] | {protocol, path, port, successThreshold}' <<< "$body")" '{"protocol":"HTTP","path":"/ready","port":20241,"successThreshold":1}'
   # It waits for both, then says where the app is.
   contains "$out" "northflank-main: api is running"
   contains "$out" "northflank-main: cloudflared is running"
@@ -2009,8 +2018,30 @@ test_deploy_puts_each_app_on_northflank() {
 }
 
 test_deploy_to_northflank_fails_loudly() {
-  local p="$WORK/nf-fail" out
+  local p="$WORK/nf-fail" c="$WORK/nf-fail-checkout" out f
   nf_project "$p"
+  # A service body Northflank would turn down stops deploy and the dry run before anything
+  # is sent: here a CLI whose readiness checks lack successThreshold, as the live test's did.
+  mkdir -p "$c/bin" "$c-unchecked/bin"
+  for f in "$ROOT"/*; do
+    if [[ "$(basename "$f")" != bin ]]; then ln -s "$f" "$c/"; ln -s "$f" "$c-unchecked/"; fi
+  done
+  sed -e '/^        successThreshold: 1$/d' -e 's/failureThreshold: \$s.healthcheck.retries,$/failureThreshold: $s.healthcheck.retries/' \
+    -e 's/, successThreshold: 1}]/}]/' "$CLI" > "$c/bin/freelunch"
+  sed '/^  northflank_check /d' "$c/bin/freelunch" > "$c-unchecked/bin/freelunch"
+  chmod +x "$c/bin/freelunch" "$c-unchecked/bin/freelunch"
+  rm -f "$p/fake.log"
+  for a in deploy "deploy --dry-run"; do
+    # shellcheck disable=SC2086 # the words of $a are the arguments
+    if out="$(GHCR_TOKEN=x CLI="$c/bin/freelunch" nf_in "$p" $a 2>&1)"; then echo "$a should have failed"; return 1; fi
+    contains "$out" "northflank-main: Northflank would turn these services down, so nothing was sent"
+    contains "$out" "  api: healthChecks.0.successThreshold is required"
+    contains "$out" "  cloudflared: healthChecks.0.successThreshold is required"
+  done
+  fails grep -q '^nf PUT\|^nf POST' "$p/fake.log"
+  # Without the check, Northflank's 400 says the same, as it did in the live test.
+  if out="$(GHCR_TOKEN=x CLI="$c-unchecked/bin/freelunch" nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "northflank: can't update the service api (400): Request failed payload validation - see details.; healthChecks.0.successThreshold: \"successThreshold\" is required when 'type' is set to 'readinessProbe'. Received \"undefined\""
   if out="$(GHCR_TOKEN=x FAKE_NF_FAILED=api nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
   contains "$out" "northflank: the deployment of api failed"
   if out="$(GHCR_TOKEN=x FAKE_NF_PENDING=cloudflared FREELUNCH_DEPLOY_TIMEOUT=0 nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
