@@ -52,7 +52,9 @@ printf '#!/bin/sh\nexit 0\n' > "$WORK/bin/cloud-init"
 # writes the dependency lock file next to the code (FAKE_LOCK is its content).
 # FAKE_APPLY says how each apply in turn ends: ok, or the OCI errors it prints, e.g.
 # "capacity busy ok" or "capacity+limit". plan -out=<file> saves FAKE_PLAN there, as the
-# JSON that show -json prints; by default a plan that only creates an instance.
+# JSON that show -json prints; by default a plan that only creates an instance. It logs the
+# mode of a plan file that is there before it writes it. With FAKE_PLAN_AUTH, the plan gets
+# 401s halfway and fails, but saves what it has, like tofu/terraform.
 cat > "$WORK/bin/fake-tf" <<'EOF'
 #!/usr/bin/env bash
 echo "TF_DATA_DIR=${TF_DATA_DIR:-} $*" >> "$FAKE_LOG"
@@ -75,11 +77,21 @@ case "${2:-}" in
         busy)     echo "│ Error: 429-TooManyRequests, Too many requests for the user" ;;
         auth)     echo "│ Error: 401-NotAuthenticated, The required information to complete authentication was not provided or was incorrect." ;;
         limit)    echo "│ Error: 400-LimitExceeded, The following service limits were exceeded: standard-a1-core-count" ;;
+        vcns)     echo "│ Error: 400-LimitExceeded, The following service limits were exceeded: vcn-count. Request a service limit increase from the service limits page in the console." ;;
       esac
     done
     exit 1 ;;
   plan)
-    for a; do [[ "$a" != -out=* ]] || echo "${FAKE_PLAN:-$creates}" > "${a#-out=}"; done
+    for a; do
+      [[ "$a" == -out=* ]] || continue
+      [[ ! -e "${a#-out=}" ]] || echo "plan file before: $(ls -l "${a#-out=}" | cut -c1-10)" >> "$FAKE_LOG"
+      echo "${FAKE_PLAN:-$creates}" > "${a#-out=}"
+    done
+    if [[ -n "${FAKE_PLAN_AUTH:-}" ]]; then
+      echo "│ Error: 401-NotAuthenticated, The required information to complete authentication was not provided or was incorrect."
+      echo "Plan: 5 to add, 0 to change, 5 to destroy."
+      exit 1
+    fi
     echo "Plan: 1 to add, 0 to change, 0 to destroy." ;;
   show)
     for a; do plan="$a"; done
@@ -92,8 +104,10 @@ chmod +x "$WORK/bin/"*
 # (always when unset, never at 0) and then finds the session expired, or fails with
 # FAKE_OCI_ERROR. session validate fails at 0 too. region-subscription list signs in with
 # the API key unless FAKE_OCI_KEY_BAD, and the home region is FAKE_HOME_REGION
-# (eu-frankfurt-1, as in the example tfvars). And a sleep that only records how long it
-# was asked to wait.
+# (eu-frankfurt-1, as in the example tfvars). The limits: FAKE_VCNS_LEFT VCNs (1) next to
+# FAKE_VCNS_USED (1), and FAKE_A1_LEFT A1 cores (2) in each of three availability domains,
+# FAKE_A1_USED (2) of them in use in the first. And a sleep that only records how long it
+# was asked to wait, and a caffeinate that only records what it was asked.
 mkdir -p "$WORK/wait-bin"
 cat > "$WORK/wait-bin/oci" <<'EOF'
 #!/usr/bin/env bash
@@ -118,10 +132,28 @@ case "$1 ${2:-}" in
     exit 0 ;;
   "iam region-subscription")
     if [[ -n "${FAKE_OCI_KEY_BAD:-}" ]]; then
-      echo 'ServiceError: {"code": "NotAuthenticated", "message": "The required information to complete authentication was not provided or was incorrect."}' >&2
+      printf 'ServiceError:\n{\n    "code": "NotAuthenticated",\n    "message": "The required information to complete authentication was not provided or was incorrect.",\n    "opc-request-id": "abc",\n    "status": 401\n}\n' >&2
       exit 1
     fi
     printf '{"data": [{"is-home-region": true, "region-name": "%s"}, {"is-home-region": false, "region-name": "us-ashburn-1"}]}\n' "${FAKE_HOME_REGION:-eu-frankfurt-1}"
+    exit 0 ;;
+  "iam availability-domain")
+    echo '{"data": [{"name": "Xyz:EU-FRANKFURT-1-AD-1"}, {"name": "Xyz:EU-FRANKFURT-1-AD-2"}, {"name": "Xyz:EU-FRANKFURT-1-AD-3"}]}'
+    exit 0 ;;
+  "limits resource-availability")
+    for a; do
+      case "${prev:-}" in
+        --limit-name)          limit="$a" ;;
+        --availability-domain) ad="$a" ;;
+      esac
+      prev="$a"
+    done
+    case "$limit" in
+      vcn-count) printf '{"data": {"available": %s, "used": %s}}\n' "${FAKE_VCNS_LEFT:-1}" "${FAKE_VCNS_USED:-1}" ;;
+      standard-a1-core-count)
+        if [[ "$ad" == *-AD-1 ]]; then used="${FAKE_A1_USED:-2}"; else used=0; fi
+        printf '{"data": {"available": %s, "used": %s}}\n' "${FAKE_A1_LEFT:-2}" "$used" ;;
+    esac
     exit 0 ;;
 esac
 n=$(( $(cat "$FAKE_LOG.refreshes" 2>/dev/null || echo 0) + 1 ))
@@ -136,6 +168,10 @@ EOF
 cat > "$WORK/wait-bin/sleep" <<'EOF'
 #!/bin/sh
 echo "sleep $*" >> "$FAKE_LOG"
+EOF
+cat > "$WORK/wait-bin/caffeinate" <<'EOF'
+#!/bin/sh
+echo "caffeinate $*" >> "$FAKE_LOG"
 EOF
 # Notifications: a desktop one through osascript, and a POST through curl.
 cat > "$WORK/wait-bin/osascript" <<'EOF'
@@ -415,9 +451,10 @@ capacity_project() {
 }
 
 # freelunch_in <dir> <command> [args...]: run a command in a capacity_project with the fakes
+# and a home folder of its own (<dir>/home)
 freelunch_in() {
   local dir="$1"; shift
-  (cd "$dir" && PATH="$WORK/wait-bin:$PATH" FAKE_LOG="$dir/fake.log" FREELUNCH_TF="$WORK/bin/fake-tf" "$dir-checkout/bin/freelunch" "$@")
+  (cd "$dir" && HOME="$dir/home" PATH="$WORK/wait-bin:$PATH" FAKE_LOG="$dir/fake.log" FREELUNCH_TF="$WORK/bin/fake-tf" "$dir-checkout/bin/freelunch" "$@")
 }
 apply_in() { local dir="$1"; shift; freelunch_in "$dir" apply "$@"; }
 
@@ -426,9 +463,18 @@ session_profile() {
   printf 'oci_auth           = "SecurityToken"\noci_config_profile = "%s"   # from oci session authenticate\n' "$2" >> "$1/.freelunch/oci/terraform.tfvars"
 }
 
-# fake_token <exp>: a session token (a JWT) that expires at <exp>, in seconds since the epoch
+# fake_token <exp> [sess_exp]: a session token (a JWT) that expires at <exp>, of a session
+# that ends at <sess_exp> (an hour later by default), in seconds since the epoch
 fake_token() {
-  printf 'eyJhbGciOiJSUzI1NiJ9.%s.c2lnbmF0dXJl\n' "$(printf '{"sub":"ocid1.user.oc1..me","exp":%s}' "$1" | base64 | tr '+/' '-_' | tr -d '=\n')"
+  printf 'eyJhbGciOiJSUzI1NiJ9.%s.c2lnbmF0dXJl\n' "$(printf '{"sub":"ocid1.user.oc1..me","exp":%s,"sess_exp":%s}' "$1" "${2:-$(($1 + 3600))}" | base64 | tr '+/' '-_' | tr -d '=\n')"
+}
+
+# session_token <dir> <profile> <exp> [sess_exp]: the session of <profile> in the project's
+# home folder (<dir>/home), with a token from fake_token
+session_token() {
+  mkdir -p "$1/home/.oci/sessions/$2"
+  printf '[%s]\nsecurity_token_file=~/.oci/sessions/%s/token\nkey_file=~/.oci/sessions/%s/key.pem\nregion=eu-frankfurt-1\n' "$2" "$2" "$2" >> "$1/home/.oci/config"
+  fake_token "$3" "${4:-}" > "$1/home/.oci/sessions/$2/token"
 }
 
 # plan_with "<address> <actions> [availability domain]"...: a plan as show -json prints
@@ -509,7 +555,7 @@ test_init_sets_up_hosts_for_the_tunnel() {
   cmp "$p/.freelunch/oci/terraform.tfvars.example" "$ROOT/examples/backend-app/.freelunch/oci/terraform.tfvars.example"
 }
 
-# A session token lasts a day at most, so init points to an API key when there is none.
+# A session ends hours after signing in, so init points to an API key when there is none.
 test_init_points_to_an_oci_api_key() {
   local p="$WORK/init-key" out
   mkdir -p "$p/home" "$p/project"
@@ -688,10 +734,10 @@ test_apply_waits_for_capacity() {
   fails grep -q '^oci ' "$p/fake.log"
 }
 
-# A session token lasts an hour. It is refreshed before each attempt, which works for up
-# to 24 hours after signing in.
+# A session token lasts an hour. It is refreshed before each attempt, which works until the
+# session ends, as many hours after signing in as the tenancy allows.
 test_capacity_retries_refresh_the_oci_session() {
-  local p="$WORK/capacity-session" out
+  local p="$WORK/capacity-session" out now
   capacity_project "$p"
   session_profile "$p" freelunch
   FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity
@@ -700,8 +746,21 @@ test_capacity_retries_refresh_the_oci_session() {
   # When the session ends during the wait, it stops there and says why.
   rm "$p/fake.log"*
   if out="$(FAKE_APPLY="capacity capacity ok" FAKE_SESSION_REFRESHES=1 apply_in "$p" oci --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
-  contains "$out" "freelunch: oci: the session expired after 1 attempt(s). A session lasts 24 hours at most, so for a longer wait use an API key (oci setup bootstrap). Sign in again: oci session authenticate --profile-name freelunch"
+  contains "$out" "freelunch: oci: the session ended after 1 attempt(s). For a longer wait use an API key (oci setup bootstrap). Sign in again: oci session authenticate --profile-name freelunch"
   equals "$(grep -c '/stack apply ' "$p/fake.log")" 1
+  # The token says when the session ends (sess_exp), and the wait says so up front.
+  now="$(date +%s)"
+  session_token "$p" freelunch $((now + 600)) $((now + 8 * 3600 + 30))
+  rm "$p/fake.log"*
+  out="$(FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity 2>&1)"
+  contains "$out" "oci: the session of profile freelunch ends at "
+  contains "$out" ", in 8h 0m, and the wait with it. An API key doesn't expire (oci setup bootstrap)"
+  grep -qx "session=$((now + 8 * 3600 + 30))" "$p/.freelunch/oci/wait.state"
+  # A token that expires before the session ends missed its refresh: the machine slept.
+  rm "$p/fake.log"*
+  if out="$(FAKE_APPLY="capacity capacity ok" FAKE_SESSION_REFRESHES=1 apply_in "$p" oci --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "the session token expired after 1 attempt(s), before the session ends at "
+  contains "$out" "it has to be refreshed within the hour, which a machine that sleeps can't do"
 }
 
 # Every OCI run refreshes the session first. Once that fails, it stops before init and
@@ -770,6 +829,14 @@ test_capacity_retries_stop_on_other_errors() {
   rm "$p/fake.log"*
   FAKE_APPLY="capacity" fails apply_in "$p" oci
   fails grep -q '^sleep ' "$p/fake.log"
+  # A service limit is no lack of capacity: it says which one, and what to do.
+  rm "$p/fake.log"*
+  if out="$(FAKE_APPLY="capacity+limit" apply_in "$p" oci --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "the tenancy has reached OCI's limit for standard-a1-core-count; freelunch doctor shows what is left"
+  rm "$p/fake.log"*
+  if out="$(FAKE_APPLY="vcns" apply_in "$p" oci 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "the tenancy has reached OCI's limit for vcn-count"
+  contains "$out" "OCI goes on counting a deleted VCN for a while, so after a destroy or a replacement, wait a few minutes before you plan again"
 }
 
 # A plain apply that runs out of capacity says how to wait for it.
@@ -863,6 +930,7 @@ test_plan_out_saves_a_plan_to_review() {
   # tofu runs in the stack's folder, so the path it gets is absolute.
   grep -q -- "-chdir=$p-checkout/providers/oci/stack plan -input=false -var-file=$p/.freelunch/oci/terraform.tfvars -state=$p/.freelunch/oci/terraform.tfstate -out=$p/plans/reviewed.tfplan$" "$p/fake.log"
   equals "$(mode "$p/plans/reviewed.tfplan")" "-rw-------"
+  grep -qx 'plan file before: -rw-------' "$p/fake.log"
   contains "$out" "saved the plan in reviewed.tfplan. freelunch apply oci --plan reviewed.tfplan applies exactly this plan, without a prompt; add --wait-for-capacity"
   contains "$out" "reviewed.tfplan holds the stack's variables and state, secrets included. Keep it out of git"
   # The project folder ignores plans already.
@@ -870,6 +938,20 @@ test_plan_out_saves_a_plan_to_review() {
   lacks "$out" "Keep it out of git"
   out="$(freelunch_in "$p" plan cloudflare --out .freelunch/cloudflare/reviewed.tfplan 2>&1)"
   lacks "$out" "wait-for-capacity"
+  # A plan file is private before anything is in it, one that was readable included, and a
+  # plan that fails halfway is not kept.
+  rm "$p/fake.log"*
+  echo old > "$p/plans/old.tfplan" && chmod 644 "$p/plans/old.tfplan"
+  freelunch_in "$p" plan oci --out plans/old.tfplan >/dev/null 2>&1
+  grep -qx 'plan file before: -rw-------' "$p/fake.log"
+  equals "$(mode "$p/plans/old.tfplan")" "-rw-------"
+  if out="$(FAKE_PLAN_AUTH=1 freelunch_in "$p" plan oci --out plans/failed.tfplan 2>&1)"; then echo "plan should have failed"; return 1; fi
+  absent "$p/plans/failed.tfplan"
+  contains "$out" "OCI turned down the sign-in (401-NotAuthenticated), so what the run printed above is incomplete. A new API key can take a few minutes to work everywhere"
+  lacks "$out" "saved the plan"
+  # Without --out too.
+  if out="$(FAKE_PLAN_AUTH=1 freelunch_in "$p" plan oci 2>&1)"; then echo "plan should have failed"; return 1; fi
+  contains "$out" "401-NotAuthenticated), so what the run printed above is incomplete"
   # One stack per plan, and only plan saves one.
   fails freelunch_in "$p" plan oci cloudflare --out both.tfplan
   fails freelunch_in "$p" plan oci --out
@@ -946,6 +1028,8 @@ test_detached_wait_and_status() {
     freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity --detach 2>&1)"
   contains "$out" "oci: waiting for capacity in the background (pid"
   contains "$out" "freelunch status shows the attempts, .freelunch/oci/wait.log the output"
+  # On a Mac, caffeinate keeps it awake until the wait ends.
+  contains "$out" "oci: caffeinate keeps the Mac awake until the wait ends (kill "
   for _ in $(seq 1 100); do
     [[ "$(sed -n 's/^state=//p' "$p/.freelunch/oci/wait.state" 2>/dev/null)" != "done" ]] || break
     /bin/sleep 0.1
@@ -956,6 +1040,7 @@ test_detached_wait_and_status() {
   grep -q "freelunch apply oci --wait-for-capacity --plan $p/.freelunch/oci/reviewed.tfplan$" "$p/.freelunch/oci/wait.log"
   grep -q 'oci: applied on attempt 3 in UK-LONDON-1-AD-2' "$p/.freelunch/oci/wait.log"
   grep -q '^desktop: oci: got the host on attempt 3' "$p/fake.log"
+  grep -qE '^caffeinate -i -w [0-9]+$' "$p/fake.log"
   # Without a reviewed plan, a wait in the background would sit at the prompt.
   fails freelunch_in "$p" apply oci --wait-for-capacity --detach
   fails freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --detach
@@ -1051,7 +1136,7 @@ test_wait_notifies_when_it_ends() {
   rm "$p/fake.log"*
   session_profile "$p" freelunch
   FAKE_APPLY="capacity capacity" FAKE_SESSION_REFRESHES=1 fails apply_in "$p" oci --wait-for-capacity
-  grep -q '^desktop: oci: the session expired after 1 attempt(s)' "$p/fake.log"
+  grep -q '^desktop: oci: the session ended after 1 attempt(s)' "$p/fake.log"
   grep -q '^state=stopped$' "$p/.freelunch/oci/wait.state"
   # Nothing to say when the first attempt works, and nothing at all with FREELUNCH_NOTIFY=off.
   rm "$p/fake.log"*
@@ -1313,7 +1398,13 @@ test_doctor_finds_nothing_wrong_with_a_good_project() {
   contains "$out" "  warn  keys only reach a host when it is created"
   contains "$out" "No problems found, 1 warning(s)."
   grep -qx 'api GET /user/tokens/verify token=cf-token' "$p/fake.log"
-  grep -q '^oci iam region-subscription list --tenancy-id ocid1.tenancy.oc1..aaaaaaaa... --profile DEFAULT$' "$p/fake.log"
+  grep -q '^oci iam region-subscription list --tenancy-id ocid1.tenancy.oc1..aaaaaaaa... --profile DEFAULT --region eu-frankfurt-1$' "$p/fake.log"
+  # OCI's limits count the whole tenancy.
+  contains "$out" "  ok    VCNs: 1 of 2 left in eu-frankfurt-1, besides this stack's"
+  contains "$out" "  ok    A1: 2 of the 2 free OCPUs in use in the tenancy"
+  grep -q '^oci limits resource-availability get -c ocid1.tenancy.oc1..aaaaaaaa... --service-name compute --limit-name standard-a1-core-count --availability-domain Xyz:EU-FRANKFURT-1-AD-3 --profile DEFAULT --region eu-frankfurt-1$' "$p/fake.log"
+  # It only reads: the inventory it needs is built elsewhere.
+  absent "$p/.freelunch/hybrid"
   # A service token that expires soon is a warning, one that has expired a problem.
   with_service_tokens "$p" cron=5 old=-1
   out="$(GHCR_TOKEN=x TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" doctor_in "$p" 2>&1 || true)"
@@ -1331,7 +1422,7 @@ test_doctor_reports_every_problem() {
   if out="$(TEST_SSH_KEY="$p/other-key" FAKE_HOME_REGION=uk-london-1 FAKE_PLATFORMS=linux/amd64 TEST_CF_TOKEN=cf-token \
     FAKE_ZONES="example.com:pending" FAKE_DENY="tunnel service_tokens" doctor_in "$p" 2>&1)"; then echo "doctor should have failed"; return 1; fi
   contains "$out" "  fail  region is eu-frankfurt-1, but the tenancy's home region is uk-london-1"
-  contains "$out" "  fail  none of ssh_public_keys in .freelunch/oci/terraform.tfvars is the key deploy uses (FREELUNCH_SSH_KEY ($p/other-key))"
+  contains "$out" "  fail  none of ssh_public_keys in .freelunch/oci/terraform.tfvars is the key deploy uses (FREELUNCH_SSH_KEY=$p/other-key). Add its .pub"
   contains "$out" "  fail  \$GHCR_TOKEN is not set (registries in apps.tfvars)"
   contains "$out" "  fail  ghcr.io/me/api:1.0.0 is built for linux/amd64 only, but oci-main is linux/arm64"
   contains "$out" "  fail  the zone example.com is pending: freelunch domain status example.com shows what is left"
@@ -1340,9 +1431,12 @@ test_doctor_reports_every_problem() {
   contains "$out" "7 problem(s), 1 warning(s)."
   # A key OCI turns down, a token Cloudflare turns down, a zone the token can't see.
   out="$(FAKE_OCI_KEY_BAD=1 TEST_CF_TOKEN=bad FAKE_TOKEN_INVALID=1 doctor_in "$p" 2>&1 || true)"
-  contains "$out" "  fail  profile DEFAULT can't sign in to OCI: "
-  contains "$out" "NotAuthenticated"
+  contains "$out" "  fail  profile DEFAULT can't sign in to OCI: 401 NotAuthenticated: The required information to complete authentication was not provided or was incorrect. Its API key is "
+  contains "$out" " old, and a new key can take a few minutes to work everywhere: try again shortly"
   contains "$out" "  fail  Cloudflare doesn't take CLOUDFLARE_API_TOKEN: Invalid API Token (1000)"
+  touch -t 202601010000 "$p/home/.oci/key.pem"
+  out="$(FAKE_OCI_KEY_BAD=1 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "incorrect. A new API key can take a few minutes to work everywhere; otherwise check that the fingerprint and key_file of profile DEFAULT match one of your user's API keys"
   out="$(TEST_CF_TOKEN=cf-token doctor_in "$p" 2>&1 || true)"
   contains "$out" "  fail  the token can't see the zone example.com: add it to Cloudflare (freelunch domain add example.com)"
   out="$(doctor_in "$p" 2>&1 || true)"
@@ -1358,14 +1452,14 @@ test_doctor_checks_oci_sessions_and_works_without_the_oci_cli() {
   local p="$WORK/doctor-oci" out
   doctor_project "$p"
   session_profile "$p" tradio
-  printf '[tradio]\nsecurity_token_file=~/.oci/sessions/tradio/token\nkey_file=~/.oci/sessions/tradio/key.pem\n' >> "$p/home/.oci/config"
+  session_token "$p" tradio $(( $(date +%s) + 600 )) $(( $(date +%s) + 8 * 3600 + 30 ))
   out="$(doctor_in "$p" 2>&1 || true)"
-  contains "$out" "  ok    the session of profile tradio is valid until 2026-10-24 10:00:00"
-  grep -q '^oci iam region-subscription list .*--profile tradio --auth security_token$' "$p/fake.log"
+  contains "$out" "  ok    the session of profile tradio is valid until 2026-10-24 10:00:00, and each run refreshes it; the session ends at "
+  contains "$out" ", in 8h 0m"
+  grep -q '^oci iam region-subscription list .*--profile tradio --region eu-frankfurt-1 --auth security_token$' "$p/fake.log"
   out="$(FAKE_SESSION_REFRESHES=0 doctor_in "$p" 2>&1 || true)"
   contains "$out" "  fail  the session of profile tradio has expired: oci session authenticate --profile-name tradio"
   # Without the OCI CLI: the token's expiry, and a warning.
-  mkdir -p "$p/home/.oci/sessions/tradio"
   fake_token $(( $(date +%s) - 60 )) > "$p/home/.oci/sessions/tradio/token"
   out="$(TEST_PATH="$WORK/bin:$(path_without_oci)" doctor_in "$p" 2>&1 || true)"
   contains "$out" "  warn  no OCI CLI"
@@ -1545,6 +1639,105 @@ test_domain_suggest_checks_names_first() {
   fails suggest_in "$d"
   fails in_dir "$d" "$CLI" domain register myapp.com
   absent "$d/fake.log"
+}
+
+# A saved plan that replaces or destroys something says so, and an OCI one that needs a VCN
+# the tenancy hasn't got says that too.
+test_plan_warns_about_replacements() {
+  local p="$WORK/replace" out vcn='module.docker_host.module.network.oci_core_vcn.this'
+  capacity_project "$p"
+  out="$(FAKE_PLAN="$(plan_with "$vcn delete,create" 'module.docker_host.module.compute.oci_core_instance.this["main"] create,delete' 'oci_core_volume.old delete')" \
+    freelunch_in "$p" plan oci --out .freelunch/oci/reviewed.tfplan 2>&1)"
+  contains "$out" "oci: this plan replaces $vcn, module.docker_host.module.compute.oci_core_instance.this[\"main\"]. Each one is destroyed and created again, along with what is in it (a VCN takes its hosts with it)"
+  contains "$out" "oci: this plan destroys oci_core_volume.old"
+  lacks "$out" "no VCN"
+  # A full tenancy can't take the new VCN while OCI still counts the old one.
+  out="$(FAKE_VCNS_LEFT=0 FAKE_VCNS_USED=2 FAKE_PLAN="$(plan_with "$vcn delete,create")" freelunch_in "$p" plan oci --out .freelunch/oci/reviewed.tfplan 2>&1)"
+  contains "$out" "oci: the tenancy has no VCN to spare in eu-frankfurt-1 (2 in use), and OCI goes on counting a deleted VCN for a while, so the new one would fail with LimitExceeded. Destroy first (freelunch destroy oci)"
+  grep -q '^oci limits resource-availability get -c ocid1.tenancy.oc1..aaaaaaaa... --service-name vcn --limit-name vcn-count --profile DEFAULT --region eu-frankfurt-1$' "$p/fake.log"
+  out="$(FAKE_VCNS_LEFT=0 FAKE_VCNS_USED=2 FAKE_PLAN="$(plan_with "$vcn create")" freelunch_in "$p" plan oci --out .freelunch/oci/reviewed.tfplan 2>&1)"
+  contains "$out" "oci: the tenancy has no VCN left in eu-frankfurt-1 (2 in use), so creating this one would fail with LimitExceeded"
+  # A plan that only adds says nothing, and doesn't ask about limits.
+  rm "$p/fake.log"*
+  out="$(freelunch_in "$p" plan oci --out .freelunch/oci/reviewed.tfplan 2>&1)"
+  lacks "$out" "this plan replaces"
+  lacks "$out" "this plan destroys"
+  fails grep -q '^oci limits' "$p/fake.log"
+}
+
+# Before the host exists, status says what is set up and what it waits for.
+test_status_before_the_hosts_exist() {
+  local p="$WORK/status-waiting" out now pid
+  capacity_project "$p"
+  scratch_checkout "$p-checkout" cloudflare
+  # The network exists, the instance doesn't yet.
+  jq '.outputs.hosts.value = []' "$ROOT/hybrid/tests/fixtures/oci.tfstate" > "$p/.freelunch/oci/terraform.tfstate"
+  rm "$p/.freelunch/cloudflare/terraform.tfstate"
+  touch "$p/.freelunch/cloudflare/terraform.tfvars"
+  out="$(freelunch_in "$p" status)"
+  contains "$out" "$(printf 'Hosts\n  none yet (oci: freelunch apply oci)\nTunnels\n  cloudflare: configured, not applied (after the hosts: freelunch apply cloudflare)')"
+  lacks "$out" "Apps"
+  now="$(date +%s)"
+  /bin/sleep 30 & pid=$!
+  printf 'state=waiting\npid=%s\nstarted=%s\nupdated=%s\nattempt=3\nlast=out of host capacity\nnext=%s\nlog=\nsession=%s\n' \
+    "$pid" "$now" "$now" $((now + 100)) $((now + 7200)) > "$p/.freelunch/oci/wait.state"
+  out="$(freelunch_in "$p" status)"
+  kill "$pid"
+  contains "$out" "  none yet (oci: waiting for capacity)"
+  contains "$out" "  the session ends: "
+  contains "$out" ", and the wait with it"
+  # Once the host exists, cloudflare is next.
+  cp "$ROOT/hybrid/tests/fixtures/oci.tfstate" "$p/.freelunch/oci/terraform.tfstate"
+  contains "$(freelunch_in "$p" status)" "  cloudflare: configured, not applied (freelunch apply cloudflare)"
+}
+
+# init in a project from an earlier freelunch keeps every file, adds the .gitignore lines
+# that came since, and checks the compose files the kept apps.tfvars names.
+test_init_again_updates_an_older_project() {
+  local p="$WORK/init-older" out f
+  mkdir -p "$p/.freelunch" "$p/poc/sidecar"
+  printf '# mine\n*/terraform.tfvars\n*/terraform.tfstate\n.env\n' > "$p/.freelunch/.gitignore"
+  printf 'apps = {\n  sidecar = {\n    host    = "oci-main"\n    compose = "../poc/sidecar/compose.yaml"\n  }\n  web = { host = "oci-main", compose = "../web/compose.yaml" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  touch "$p/poc/sidecar/compose.yaml"
+  out="$(cd "$p" && "$CLI" init oci 2>&1)"
+  contains "$out" "added to .freelunch/.gitignore: */terraform.tfstate.* */.terraform/ *.env inventory.json known_hosts */wait.log */wait.state *.tfplan"
+  contains "$out" "kept .freelunch/apps.tfvars"
+  equals "$(head -1 "$p/.freelunch/.gitignore")" "# mine"
+  git -C "$p" init -q
+  for f in oci/wait.log oci/wait.state oci/reviewed.tfplan; do git -C "$p" check-ignore -q ".freelunch/$f"; done
+  contains "$out" "there is no web/compose.yaml yet; apps.tfvars expects one for web"
+  lacks "$out" "sidecar"
+  lacks "$out" "there is no compose.yaml"
+  # Once more adds nothing.
+  out="$(cd "$p" && "$CLI" init oci 2>&1)"
+  lacks "$out" "added to"
+}
+
+# Before the hosts exist, doctor checks OCI's limits for what the stack creates, and the
+# images for the shapes in the tfvars.
+test_doctor_before_the_hosts_exist() {
+  local p="$WORK/doctor-new" out
+  doctor_project "$p"
+  rm "$p/.freelunch/oci/terraform.tfstate" "$p/.freelunch/cloudflare/terraform.tfstate"
+  out="$(GHCR_TOKEN=x TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" FAKE_A1_USED=0 doctor_in "$p" 2>&1)"
+  contains "$out" "  ok    VCNs: 1 of 2 left in eu-frankfurt-1, and this stack creates one"
+  contains "$out" "  ok    A1: 0 of the 2 free OCPUs in use in the tenancy, and this stack adds 2"
+  contains "$out" "  ok    no host exists yet, so the images are checked for the shapes in .freelunch/oci/terraform.tfvars: oci-main is linux/arm64"
+  contains "$out" "  ok    ghcr.io/me/api:1.0.0 has a linux/arm64 build for oci-main"
+  lacks "$out" "keys only reach a host"
+  # The registry token is checked without a host too.
+  out="$(FAKE_A1_USED=0 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  fail  \$GHCR_TOKEN is not set (registries in apps.tfvars)"
+  # An image without an arm64 build fails before there is a host to pull it.
+  out="$(GHCR_TOKEN=x FAKE_PLATFORMS=linux/amd64 FAKE_A1_USED=0 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  fail  ghcr.io/me/api:1.0.0 is built for linux/amd64 only, but oci-main is linux/arm64"
+  # No VCN left, A1 cores in use elsewhere, and no availability domain with room.
+  out="$(FAKE_VCNS_LEFT=0 FAKE_VCNS_USED=2 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  fail  VCNs: all 2 in eu-frankfurt-1 are in use, and this stack creates one, so apply would stop at LimitExceeded (vcn-count)"
+  contains "$out" "  fail  A1: other instances in the tenancy use 2 OCPU(s), and with this stack's 2 that is over the Always Free 2"
+  out="$(FAKE_A1_LEFT=1 FAKE_A1_USED=0 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  fail  A1: this stack's new hosts need 2 OCPU(s) in one availability domain, and the tenancy's limit leaves 1 in AD-1, 1 in AD-2, 1 in AD-3"
+  absent "$p/.freelunch/hybrid"
 }
 
 echo "tests/cli.sh"

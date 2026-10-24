@@ -51,9 +51,11 @@ update that file; the modules read it at plan time.
 `oci_config_profile` picks the profile in `~/.oci/config` (default `DEFAULT`). A session
 token works instead of an API key: run `oci session authenticate`, then set
 `oci_auth = "SecurityToken"` and `oci_config_profile` to the profile the session was saved
-under. A session expires after an hour. `oci session refresh --profile <name>` gives it
-another hour, but only while it is still valid, and for 24 hours after you signed in at
-most.
+under. A session token expires after an hour. `oci session refresh --profile <name>` gives
+it another hour, but only while it is still valid, and only until the session ends: as many
+hours after you signed in as the tenancy allows (8 in some tenancies, 24 in others).
+The token says when (`sess_exp`), and `freelunch doctor` and `apply --wait-for-capacity`
+show it.
 
 freelunch refreshes the session before every plan, apply and destroy of this stack. Once
 it can't be refreshed any more, the run stops before it plans anything, with one line:
@@ -184,7 +186,10 @@ freelunch status     # oci: waiting for capacity for 5h 12m, 141 attempts so far
 
 Its output goes to `.freelunch/oci/wait.log`, and `kill <pid>` stops it. `--detach` needs a
 reviewed plan (or `FREELUNCH_AUTO_APPROVE=1`), since nobody would be at the prompt. A
-laptop that sleeps pauses the wait until it wakes.
+machine that sleeps pauses the wait, and with a session token, one that sleeps for more than
+an hour ends it, since the token can't be refreshed while it sleeps. On a Mac, `--detach`
+runs `caffeinate -i -w <pid>`, which keeps the Mac awake until the wait ends (closing the
+lid still puts it to sleep). Elsewhere, keep the machine awake yourself.
 
 When a wait in the background ends, or a wait that had to retry, freelunch sends a desktop
 notification (macOS, or Linux with `notify-send`). Set `FREELUNCH_NOTIFY` in `.freelunch/.env`
@@ -195,8 +200,9 @@ to get it on your phone too: an [ntfy](https://ntfy.sh) topic URL
 **With a session token** (`oci_auth = "SecurityToken"`), freelunch runs
 `oci session refresh --profile <oci_config_profile>` before every attempt, so it needs the
 [OCI CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm). That
-keeps the session going for its 24 hours, measured from when you signed in. When a refresh
-fails, the retries stop and print the command to sign in again
+keeps the session going until it ends, which the wait prints when it starts and
+`freelunch status` shows. When a refresh fails, the retries stop and print the command to
+sign in again
 (`oci session authenticate --profile-name <name>`); run `apply` again after it. For a
 longer wait, use an API key, which doesn't expire (`oci setup bootstrap`, see
 [Prerequisites](#prerequisites)). The runner image has no OCI CLI, so there it takes an
@@ -224,13 +230,22 @@ The stack outputs `hosts` (the [host contract](../../docs/architecture.md#host-c
   moves to the next one on each retry (`availability_domain_offset`). Set
   `availability_domain_index` to pin one. A created instance never changes AD.
 - **No surprise replacement.** Platform-image updates and edits to cloud-init/SSH keys are
-  ignored after creation. Recreating an A1 instance can fail for days on capacity, so a
+  ignored after creation, and so is a new VCN DNS label: OCI can't change one, so setting
+  `name_prefix` on a project that has its network already would replace the VCN and the
+  hosts in it. The network and hosts are renamed in place instead and keep the old label. Recreating an A1 instance can fail for days on capacity, so a
   rebuild has to be deliberate: `terraform apply -replace='module.docker_host.module.compute.oci_core_instance.this["main"]'`.
 - **IMDSv1 disabled** (`are_legacy_imds_endpoints_disabled = true`).
 - **Host hardening** comes from the shared bootstrap: SSH keys only, rotated Docker logs,
   and a 04:00 UTC reboot when a security update needs one.
 
 ## Caveats
+
+- **The tenancy's limits count every project in it.** Two VCNs are free, and the A1 cores of
+  any other instance count against the same Always Free allowance. `freelunch doctor` asks
+  OCI's limits API how many VCNs and A1 cores are left before you apply. OCI goes on
+  counting a deleted VCN for a few minutes, so a plan that replaces the network on a full
+  tenancy fails; `plan --out` warns about that, and `freelunch destroy oci`, then a new plan
+  a few minutes later, gets around it.
 
 - **"Out of host capacity"** on A1 creation is common. `apply oci --wait-for-capacity`
   keeps trying until the host exists (see [Waiting for capacity](#waiting-for-capacity)).
