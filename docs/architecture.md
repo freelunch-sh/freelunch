@@ -222,14 +222,37 @@ state_overrides = {
 Free remote state options are catalogued under *IaC state, CI & registries* (HCP Terraform,
 Scalr, Spacelift), plus any S3-compatible bucket (OCI Object Storage, Cloudflare R2, Backblaze B2).
 
-Project mode keeps state local for now, since the stack code is pinned and can't take a
-`backend` block. Encrypted remote state on R2, B2 or OCI Object Storage is on the roadmap.
+In project mode the stack code is pinned and takes no `backend` block, so the stacks keep
+their local state there too. A project can keep a copy of it in a **state store** as well,
+for CI and its other machines: `.freelunch/state.<backend>.tfbackend` holds the settings of
+any tofu/terraform backend (s3 for OCI Object Storage, R2 or B2, http for GitLab), with
+`{stack}` where a stack's name goes. The CLI copies each stack's state to the store and back
+with `state push` and `state pull`, through a root module of its own in a temp folder that
+has nothing but that backend. A command that reads state first takes the store's copy when
+it is newer; apply, destroy and each attempt of a wait copy theirs back. Everything else,
+`hybrid/` included, goes on reading the local files. push refuses an older serial or another
+lineage, so a copy never overwrites a newer one, and the CLI stops when both copies changed
+since the last sync ([how to use it](ci.md#1-keep-the-state-in-a-store)).
 
 State holds secrets in plain text: the cloudflare stack's state has the tunnel tokens and
 service token secrets, and `terraform.tfstate.backup` keeps a copy. Both are git-ignored, and
-on one machine they sit next to `.env`, which holds the more powerful API token anyway.
-State that leaves the machine (a remote backend, a CI cache) needs OpenTofu's state
-encryption first, which is why it is planned together with remote state.
+on one machine they sit next to `.env`, which holds the more powerful API token anyway. The
+copy that leaves the machine is encrypted: the store's runs get OpenTofu's state encryption
+(`TF_ENCRYPTION`, AES-GCM with a key from `FREELUNCH_STATE_PASSPHRASE`), and with Terraform,
+which has none, the passphrase has to be set to `none` on purpose.
+
+## CI
+
+A CI job runs the same CLI on the same project ([docs/ci.md](ci.md)). The state comes from
+the store. What git doesn't have travels in one secret, `FREELUNCH_BUNDLE`: a gzipped list
+of files (tfvars, `.env` with its secret references read, app env files, `known_hosts`, the
+OCI profile and key, the deploy key), which `ci restore` writes back under the checkout and
+the home folder, and nowhere else. A wait for capacity in CI applies without a prompt, so it
+needs an approval: `ci wait` turns a plan reviewed on your machine into
+`<stack>/approved.json`, the resources and actions it changes and a checksum of the tfvars,
+and every attempt in CI plans again and applies only a subset of that. One attempt per
+scheduled run keeps the minutes a private repository spends low, and numbering attempts
+after the run moves each one to the next availability domain.
 
 ## Catalog
 

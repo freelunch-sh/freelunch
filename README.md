@@ -76,7 +76,9 @@ freelunch deploy               # copy compose files and secrets, start, wait unt
 
 If OCI is out of Arm capacity, `freelunch apply oci --wait-for-capacity` keeps trying, in
 every availability domain, until the VM exists; with a reviewed plan it can wait in the
-background and notify you. No capacity, or no wish to run a VM? Northflank's free plan runs
+background and notify you. That can take days, longer than a laptop stays awake, so
+`freelunch ci wait` hands the wait to GitHub Actions instead, which also deploys each new
+image ([docs/ci.md](docs/ci.md)). No capacity, or no wish to run a VM? Northflank's free plan runs
 the same app, without a card, as two always-on services: your app and `cloudflared`
 ([switch to another provider](docs/deploy-a-container.md#switch-to-another-provider)).
 
@@ -151,6 +153,8 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 | `freelunch trust <host>` | Pin an OCI host's SSH keys in `known_hosts` from its serial console before the first deploy, and check that the host answers with one of them |
 | `freelunch domain suggest <name...>` | Whether the name you typed is registered, then free names like it at every free domain provider, and similar ones where yours is taken ([docs/free-domains.md](docs/free-domains.md)) |
 | `freelunch domain add\|status <name>` | Put the name on Cloudflare and print the nameservers to set at its provider; say when they are set and the zone is active |
+| `freelunch state [push\|pull]`, `state init <store>` | Keep an encrypted copy of every stack's state where CI and your other machines reach it: OCI Object Storage (`state init oci` makes the bucket), R2, B2 or GitLab. Commands copy it on their own ([docs/ci.md](docs/ci.md#1-keep-the-state-in-a-store)) |
+| `freelunch ci init\|secrets\|wait` | Run the project from CI: workflows that wait for capacity on a schedule and deploy each new image, the secret `FREELUNCH_BUNDLE` with what git doesn't have, and a wait for capacity handed to GitHub Actions with the plan you reviewed ([docs/ci.md](docs/ci.md)) |
 | `freelunch list` | Every provider with category, status, layer, IaC support and deployment state |
 | `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts and platforms → services → hybrid → glue). A platform's `apply` makes the target there (the Northflank project) and `destroy` deletes it with what `deploy` put in it. `plan --show-user-data` prints each host's cloud-init with secrets left out, `plan --out <file>` saves a plan and `apply --plan <file>` applies it without a prompt. `apply --wait-for-capacity` retries hosts while OCI is out of capacity, `--detach` in the background ([how](providers/oci/README.md#waiting-for-capacity)) |
 | `freelunch status` | One screen after setup: hosts and platforms, the apps on each one and whether they run, tunnels and their URLs, service token expiry, capacity waits |
@@ -173,6 +177,7 @@ value can also name a secret in 1Password (`op://...`) or the macOS keychain
 ```
 freelunch/
 ├── bin/freelunch                  CLI (bash; uses tofu or terraform)
+├── action.yml                     the GitHub Action that projects' workflows run freelunch with
 ├── Dockerfile, compose.yaml       runner image (published to GHCR) and a dev runner for this checkout
 ├── providers/
 │   ├── _template/                 starting point for a new provider
@@ -191,7 +196,7 @@ freelunch/
 ├── catalog/                       renders the checklist from providers/*/provider.yaml
 ├── examples/backend-app/          a project that deploys one container behind a tunnel
 ├── tests/cli.sh                   offline tests for init, project state, deploy and domain suggest
-├── docs/                          architecture, deploying a container, free domains, adding a provider
+├── docs/                          architecture, deploying a container, running it from CI, free domains, adding a provider
 └── inspire/                       local research corpus (git-ignored, not published)
 ```
 
@@ -205,17 +210,19 @@ Releases are small: every usable feature gets its own tag.
   Northflank's free plan when Oracle has no capacity), reach it at
   `https://api.example.com` through a Cloudflare Tunnel and DNS, and ship new versions with
   `freelunch deploy` without replacing the VM.
+- **On main since:** run the project from CI and other machines: an encrypted copy of
+  the state in a store, a GitHub Action, and a wait for capacity in GitHub Actions
+  ([docs/ci.md](docs/ci.md)).
 - **Next, in order:**
   1. **Menus:** ready-made stacks in one command, starting with the v1.0 setup.
-  2. **Deploy from CI:** a GitHub Action that deploys on push.
-  3. **$0 guardrails:** a budget alert on every provider and a cost summary after each plan.
-  4. **Health alerts** for hosts and apps.
-  5. **Backups** to R2 or B2, with restore.
-  6. **`freelunch doctor`, continued:** billable leftovers, expiring trials and free names.
+  2. **$0 guardrails:** a budget alert on every provider and a cost summary after each plan.
+  3. **Health alerts** for hosts and apps.
+  4. **Backups** to R2 or B2, with restore.
+  5. **`freelunch doctor`, continued:** billable leftovers, expiring trials and free names.
 - **Later:** more menus (self-hosted PaaS, homelab, k3s, VPN, n8n, CI runners, game
-  servers), moving a host to another cloud with its data, encrypted remote state, secrets
-  managers, more container platforms (Cloud Run, Scaleway, Koyeb, Render) and GPU providers,
-  and a linter that flags billable resources in any Terraform repo.
+  servers), moving a host to another cloud with its data, secrets managers, more container
+  platforms (Cloud Run, Scaleway, Koyeb, Render) and GPU providers, and a linter that flags
+  billable resources in any Terraform repo.
 
 Ideas and requests are welcome as issues.
 
