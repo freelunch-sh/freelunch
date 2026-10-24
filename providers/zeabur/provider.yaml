@@ -3,7 +3,7 @@ name: zeabur
 display_name: "Zeabur"
 category: containers
 status: planned
-layer: service
+layer: platform
 terraform_provider: null
 iac: none
 free_tier_type: always-free

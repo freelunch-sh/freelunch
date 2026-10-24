@@ -7,7 +7,9 @@ zone = "example.com"   # a domain already added to your Cloudflare account
 # Public hostname -> host and local port. Host names are <provider>-<instance>
 # (run `freelunch inventory` to list them). The app should publish its port on
 # 127.0.0.1 only, e.g. ports: ["127.0.0.1:8080:8080"], because cloudflared reaches
-# it from the host and nothing else needs to.
+# it from the host and nothing else needs to. On a container platform such as
+# northflank-main, add app = "<name>", the app in apps.tfvars, and port is the port
+# its container listens on.
 routes = {
   "api.example.com" = { host = "oci-main", port = 8080 }
 

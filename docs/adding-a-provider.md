@@ -17,7 +17,7 @@ Schema (enforced by `catalog/`):
 | `name` | folder name |
 | `category` | a key in [`catalog/categories.yaml`](../catalog/categories.yaml) |
 | `status` | `ready`, `planned`, `excluded` |
-| `layer` | `host`, `service`, `glue` (see [architecture](architecture.md#layers)) |
+| `layer` | `host`, `platform`, `service`, `glue` (see [architecture](architecture.md#layers)) |
 | `terraform_provider` | registry address, or `null` |
 | `iac` | `official`, `partner`, `community`, `stale`, `none` (`none` if and only if `terraform_provider` is null) |
 | `free_tier_type` | `always-free`, `monthly-credit`, `trial`, `startup-credits`, `none` |
@@ -44,6 +44,12 @@ Use [`providers/oci`](../providers/oci/) as the reference.
 - [ ] Host providers: a `stack/project.tfvars.example`, which `freelunch init` copies into
       projects instead of `terraform.tfvars.example`: no open ports (the tunnel serves the
       apps) and no `apps` in cloud-init (`freelunch deploy` runs them)
+- [ ] Platform providers: the stack outputs `platforms` following the
+      [platform contract](architecture.md#platform-contract), with the free-tier limits as
+      preconditions. `bin/freelunch` does the rest through the provider's API: `platform_up`
+      after `apply`, `deploy_platform` (a service per app, from `deploy/`'s `platforms`
+      output), `status` and `doctor` checks, and `destroy_platform`. Northflank is the
+      reference; `tests/cli.sh` runs it against a fake API
 - [ ] Glue providers: the stack takes `inventory_state_path` and checks its hosts against the
       inventory, following the [glue contract](architecture.md#glue-contract)
 - [ ] Offline tests (`tests/*.tftest.hcl`) using `mock_provider`: the default layout plans,

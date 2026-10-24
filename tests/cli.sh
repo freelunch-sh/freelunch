@@ -156,6 +156,7 @@ echo "post $a [$type] $body" >> "$FAKE_LOG"
 EOF
 chmod +x "$WORK/wait-bin/"*
 mkdir -p "$WORK/doctor-bin" && ln -s "$WORK/wait-bin/oci" "$WORK/doctor-bin/oci"
+mkdir -p "$WORK/nf-bin" && ln -s "$WORK/wait-bin/sleep" "$WORK/nf-bin/sleep"
 # Secret stores: 1Password's op knows op://Private/GHCR/token, the macOS keychain knows
 # freelunch-cloudflare. Both log what they are asked.
 mkdir -p "$WORK/secret-bin"
@@ -201,7 +202,13 @@ mkdir -p "$WORK/doh-bin"
 #   repositories in FAKE_PRIVATE only with the password FAKE_PASSWORD (default
 #   ghp_test-token). An image is an index of FAKE_PLATFORMS (default linux/amd64
 #   linux/arm64), or one manifest for FAKE_SINGLE_ARCH. Repositories in FAKE_MISSING don't
-#   exist, and FAKE_REGISTRY_DOWN fails every request. These go to $FAKE_LOG.registry.
+#   exist, and FAKE_REGISTRY_DOWN fails every request. These go to $FAKE_LOG.registry. A
+#   manifest's digest is a checksum of its repository's name.
+# - The Northflank API, which keeps its projects, services and registry logins as JSON files
+#   in $FAKE_NF, and takes the token FAKE_NF_TOKEN (default nf-token). Projects in
+#   FAKE_NF_FOREIGN exist and weren't made by freelunch. A service's deployment fails when
+#   it is in FAKE_NF_FAILED and never ends in FAKE_NF_PENDING, and its container is stopped
+#   in FAKE_NF_STOPPED.
 cat > "$WORK/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 method=GET data="" headers="" out="" write="" auth="" basic="" url="" query=()
@@ -209,6 +216,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -X)      method="$2"; shift ;;
     --data)  data="$2"; shift ;;
+    --data-binary) data="$(cat "${2#@}")"; shift ;;
     -D)      headers="$2"; shift ;;
     -o)      out="$2"; shift ;;
     -w)      write="$2"; shift ;;
@@ -226,6 +234,10 @@ respond() { # respond <status> <body>
   [[ -z "$write" ]] || printf '%s' "$1"
 }
 zone_status() { local z; for z in ${FAKE_ZONES:-}; do [[ "${z%%:*}" != "$1" ]] || { echo "${z#*:}"; return; }; done; }
+listed() { [[ " $2 " == *" $1 "* ]]; } # listed <word> <list>
+digest_of() { printf 'sha256:%064x' "$(printf '%s' "$1" | cksum | cut -d' ' -f1)"; }
+nf_missing() { respond 404 "{\"error\":{\"status\":404,\"message\":\"$1 not found\"}}"; }
+nf_deployment() { if listed "$1" "${FAKE_NF_FAILED:-}"; then echo FAILED; elif listed "$1" "${FAKE_NF_PENDING:-}"; then echo IN_PROGRESS; else echo COMPLETED; fi; }
 zone() { jq -nc --arg n "$1" --arg s "$2" '{id: ("zone-" + $n), name: $n, status: $s, account: {id: "acc1"}, name_servers: ["bob.ns.cloudflare.com", "ada.ns.cloudflare.com"]}'; }
 allowed() { [[ " ${FAKE_DENY:-} " != *" $1 "* ]] && echo '{"success":true,"result":[]}' || echo '{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}'; }
 case "$url" in
@@ -278,6 +290,75 @@ case "$url" in
       "PUT /zones/"*/activation_check) echo '{"success":true,"result":{}}' ;;
       *) echo '{"success":false,"errors":[{"code":7003,"message":"No route for that URI"}]}' ;;
     esac ;;
+  https://api.northflank.com/v1/*)
+    path="${url#https://api.northflank.com/v1}"
+    nf="${FAKE_NF:?}"
+    mkdir -p "$nf/projects" "$nf/services" "$nf/registries"
+    echo "nf $method $path token=$auth" >> "$FAKE_LOG"
+    if [[ "$path" != /regions && "$auth" != "${FAKE_NF_TOKEN:-nf-token}" ]]; then respond 401 '{"error":{"status":401,"message":"Invalid token"}}'; exit 0; fi
+    project="${path#/projects/}"
+    project="${project%%/*}"
+    case "$method $path" in
+      "GET /regions") respond 200 '{"data":{"regions":[{"id":"europe-west"},{"id":"us-central"}]}}' ;;
+      "GET /projects/"*/services/*/containers)
+        service="${path%/containers}"
+        service="${service##*/}"
+        if listed "$service" "${FAKE_NF_STOPPED:-}"; then state=TASK_FAILED; else state=TASK_RUNNING; fi
+        respond 200 "$(jq -nc --arg s "$service" --arg st "$state" '{data: {containers: [{name: ($s + "-7d9f4-x2k"), status: $st}]}}')" ;;
+      "GET /projects/"*/services/*)
+        service="${path##*/}"
+        if [[ -f "$nf/services/$project/$service.json" ]]; then
+          respond 200 "$(jq -c --arg st "$(nf_deployment "$service")" '{data: {id: .name, name: .name, description, status: {deployment: {status: $st, reason: "DEPLOYING"}}}}' "$nf/services/$project/$service.json")"
+        else nf_missing Service; fi ;;
+      "GET /projects/"*/services)
+        [[ -f "$nf/projects/$project.json" ]] || { nf_missing Project; exit 0; }
+        respond 200 "$(for f in "$nf/services/$project"/*.json; do
+          [[ -f "$f" ]] || continue
+          service="$(basename "$f" .json)"
+          jq -nc --arg s "$service" --arg st "$(nf_deployment "$service")" '{id: $s, name: $s, status: {deployment: {status: $st}}}'
+        done | jq -sc '{data: {services: .}}')" ;;
+      "PUT /projects/"*/services/deployment)
+        [[ -f "$nf/projects/$project.json" ]] || { nf_missing Project; exit 0; }
+        service="$(jq -r .name <<< "$data")"
+        mkdir -p "$nf/services/$project"
+        printf '%s\n' "$data" > "$nf/services/$project/$service.json"
+        respond 200 "$(jq -nc --arg s "$service" '{data: {id: $s, name: $s}}')" ;;
+      "DELETE /projects/"*/services/*)
+        rm -f "$nf/services/$project/${path##*/}.json"
+        respond 200 '{"data":{}}' ;;
+      "GET /projects/"*)
+        if listed "$project" "${FAKE_NF_FOREIGN:-}"; then
+          respond 200 "$(jq -nc --arg p "$project" '{data: {id: $p, name: $p, description: "My own project", lifecycleStatus: "created", deployment: {region: "europe-west"}}}')"
+        elif [[ -f "$nf/projects/$project.json" ]]; then
+          respond 200 "$(jq -c '{data: (. + {id: .name, lifecycleStatus: "created", deployment: {region: .region}})}' "$nf/projects/$project.json")"
+        else nf_missing Project; fi ;;
+      "PUT /projects")
+        project="$(jq -r .name <<< "$data")"
+        printf '%s\n' "$data" > "$nf/projects/$project.json"
+        respond 200 "$(jq -c '{data: (. + {id: .name})}' <<< "$data")" ;;
+      "DELETE /projects/"*)
+        if ls "$nf/services/$project"/*.json >/dev/null 2>&1; then respond 409 '{"error":{"status":409,"message":"Project is not empty"}}'
+        elif [[ -f "$nf/projects/$project.json" ]]; then rm "$nf/projects/$project.json"; respond 200 '{"data":{}}'
+        else nf_missing Project; fi ;;
+      "GET /integrations/registries")
+        respond 200 "$(for f in "$nf/registries"/*.json; do
+          [[ -f "$f" ]] || continue
+          jq -c --arg id "$(basename "$f" .json)" '{id: $id, name: .name, provider: .provider}' "$f"
+        done | jq -sc '{data: {credentials: .}}')" ;;
+      "POST /integrations/registries")
+        id="$(jq -r .name <<< "$data" | tr ' .' '--')"
+        printf '%s\n' "$data" > "$nf/registries/$id.json"
+        respond 200 "$(jq -nc --arg id "$id" '{data: {id: $id}}')" ;;
+      "PATCH /integrations/registries/"*)
+        id="${path##*/}"
+        [[ -f "$nf/registries/$id.json" ]] || { nf_missing Credentials; exit 0; }
+        jq -c --argjson d "$data" '. * $d' "$nf/registries/$id.json" > "$nf/registries/$id.new" && mv "$nf/registries/$id.new" "$nf/registries/$id.json"
+        respond 200 "$(jq -nc --arg id "$id" '{data: {id: $id}}')" ;;
+      "DELETE /integrations/registries/"*)
+        rm -f "$nf/registries/${path##*/}.json"
+        respond 200 '{"data":{}}' ;;
+      *) respond 404 '{"error":{"status":404,"message":"No such endpoint"}}' ;;
+    esac ;;
   */token)
     echo "$url${basic:+ basic=$basic}${query[*]:+ ${query[*]}}" >> "$FAKE_LOG.registry"
     [[ -z "${FAKE_REGISTRY_DOWN:-}" ]] || exit 7
@@ -292,6 +373,10 @@ case "$url" in
     repo="${url#*/v2/}"
     repo="${repo%/manifests/*}"
     repo="${repo%/blobs/*}"
+    # A manifest that is there says which digest its tag points to.
+    if [[ -n "$headers" && "$auth" == "good-for-$repo" && "$url" == */manifests/* && " ${FAKE_MISSING:-} " != *" $repo "* ]]; then
+      printf 'HTTP/1.1 200 OK\r\nDocker-Content-Digest: %s\r\n\r\n' "$(digest_of "$repo")" > "$headers"
+    fi
     if [[ "$auth" != "good-for-$repo" ]]; then
       [[ -z "$headers" ]] || printf 'HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm="https://%s/token",service="%s",scope="repository:%s:pull"\r\n\r\n' "$host" "$host" "$repo" > "$headers"
       respond 401 '{"errors":[{"code":"UNAUTHORIZED"}]}'
@@ -420,6 +505,54 @@ freelunch_in() {
   (cd "$dir" && PATH="$WORK/wait-bin:$PATH" FAKE_LOG="$dir/fake.log" FREELUNCH_TF="$WORK/bin/fake-tf" "$dir-checkout/bin/freelunch" "$@")
 }
 apply_in() { local dir="$1"; shift; freelunch_in "$dir" apply "$@"; }
+
+# A project whose app runs on Northflank behind a tunnel: the northflank stack "applied"
+# from a fixture, its project at the fake Northflank, and the cloudflare stack routing
+# api.example.com to api:8080 there.
+nf_project() { # nf_project <dir>
+  mkdir -p "$1/nf/projects"
+  cat > "$1/compose.yaml" <<'YAML'
+services:
+  api:
+    image: ghcr.io/me/api:1.0.0
+    command: ["serve", "--port", "8080"]
+    ports: ["127.0.0.1:8080:8080"]
+    env_file: .env
+    environment:
+      LOG_LEVEL: info
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      retries: 6
+    restart: unless-stopped
+YAML
+  (cd "$1" && "$CLI" init --name freelunch northflank cloudflare) >/dev/null 2>&1
+  cp "$1/.freelunch/northflank/terraform.tfvars.example" "$1/.freelunch/northflank/terraform.tfvars"
+  cp "$ROOT/hybrid/tests/fixtures/northflank.tfstate" "$1/.freelunch/northflank/terraform.tfstate"
+  cp "$ROOT/deploy/tests/fixtures/platform/cloudflare.tfstate" "$1/.freelunch/cloudflare/terraform.tfstate"
+  printf 'zone   = "example.com"\nroutes = { "api.example.com" = { host = "northflank-main", app = "api", port = 8080 } }\n' > "$1/.freelunch/cloudflare/terraform.tfvars"
+  printf '{"name":"freelunch","region":"europe-west","description":"Managed by freelunch"}\n' > "$1/nf/projects/freelunch.json"
+  printf 'API_SECRET=s3cret-value\nQUOTED="with spaces"\n' > "$1/.freelunch/api.env"
+  cat > "$1/.freelunch/apps.tfvars" <<'EOF2'
+apps = {
+  api = { host = "northflank-main", compose = "../compose.yaml", env_file = "api.env" }
+}
+registries = {
+  "ghcr.io" = { username = "me", password_env = "GHCR_TOKEN" }
+}
+EOF2
+}
+
+# nf_in <dir> <command> [args...]: run the CLI against the fake Northflank, registry and
+# Cloudflare, with a sleep that only records how long it was asked to wait
+nf_in() {
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/nf-bin:$WORK/bin:$PATH" FAKE_LOG="$dir/fake.log" FAKE_NF="$dir/nf" \
+    NORTHFLANK_API_TOKEN="${TEST_NF_TOKEN-nf-token}" CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN:-}" "$CLI" "$@")
+}
+
+# sent <dir> <service>: the body the fake Northflank last got for that service
+sent() { cat "$1/nf/services/freelunch/$2.json"; }
 
 # session_profile <dir> <profile>: sign the project's oci stack in with a session token
 session_profile() {
@@ -1545,6 +1678,169 @@ test_domain_suggest_checks_names_first() {
   fails suggest_in "$d"
   fails in_dir "$d" "$CLI" domain register myapp.com
   absent "$d/fake.log"
+}
+
+# Container platforms (Northflank) -------------------------------------------------------
+
+test_init_sets_up_a_platform() {
+  local p="$WORK/init-nf/My_App" out
+  mkdir -p "$p" && touch "$p/compose.yaml"
+  out="$(cd "$p" && "$CLI" init northflank cloudflare 2>&1)"
+  grep -qx 'name_prefix = "my-app"' "$p/.freelunch/northflank/terraform.tfvars.example"
+  grep -qx 'region = "europe-west"' "$p/.freelunch/northflank/terraform.tfvars.example"
+  # The app becomes a Northflank service, so its name has no underscores.
+  grep -q '^  my-app = {' "$p/.freelunch/apps.tfvars"
+  grep -q 'host    = "northflank-main"' "$p/.freelunch/apps.tfvars"
+  fails grep -q 'hosts = {' "$p/.freelunch/apps.tfvars"
+  grep -qF '"api.example.com" = { host = "northflank-main", app = "my-app", port = 8080 }' "$p/.freelunch/cloudflare/terraform.tfvars.example"
+  grep -qx 'NORTHFLANK_API_TOKEN=' "$p/.freelunch/.env.example"
+  contains "$out" "freelunch apply northflank, then freelunch apply cloudflare"
+  contains "$out" "providers/northflank/README.md#api-token"
+  # Other hosts get the routes too, without app.
+  mkdir -p "$WORK/init-nf/gcp" && (cd "$WORK/init-nf/gcp" && "$CLI" init gcp cloudflare) >/dev/null 2>&1
+  grep -qF '"api.example.com" = { host = "gcp-main", port = 8080 }' "$WORK/init-nf/gcp/.freelunch/cloudflare/terraform.tfvars.example"
+  fails grep -q NORTHFLANK "$WORK/init-nf/gcp/.freelunch/.env.example"
+}
+
+# The stack runs for real (it has no provider to download), and apply makes the project.
+test_apply_and_destroy_make_and_delete_the_project() {
+  local p="$WORK/nf-apply" out
+  mkdir -p "$p/nf" && (cd "$p" && "$CLI" init --name moneyspider northflank) >/dev/null 2>&1
+  cp "$p/.freelunch/northflank/terraform.tfvars.example" "$p/.freelunch/northflank/terraform.tfvars"
+  out="$(FREELUNCH_AUTO_APPROVE=1 nf_in "$p" apply northflank 2>&1)"
+  equals "$(jq -c . "$p/nf/projects/moneyspider.json")" '{"name":"moneyspider","region":"europe-west","description":"Managed by freelunch"}'
+  grep -qx 'nf PUT /projects token=nf-token' "$p/fake.log"
+  contains "$out" "northflank: project moneyspider in europe-west"
+  contains "$out" "northflank-main is ready: Northflank project moneyspider in europe-west"
+  equals "$(jq -c '.outputs.platforms.value | map("\(.provider)-\(.name)")' "$p/.freelunch/hybrid/terraform.tfstate")" '["northflank-main"]'
+  equals "$(jq -r '.outputs.platforms.value[0].max_services' "$p/.freelunch/northflank/terraform.tfstate")" 2
+  # Destroy deletes what deploy put there too: the services and the registry logins.
+  mkdir -p "$p/nf/services/moneyspider"
+  echo '{"name":"api"}' > "$p/nf/services/moneyspider/api.json"
+  echo '{"name":"freelunch moneyspider ghcr.io"}' > "$p/nf/registries/freelunch-moneyspider-ghcr-io.json"
+  echo '{"name":"someone else"}' > "$p/nf/registries/someone-else.json"
+  out="$(FREELUNCH_AUTO_APPROVE=1 nf_in "$p" destroy northflank 2>&1)"
+  absent "$p/nf/projects/moneyspider.json"
+  absent "$p/nf/services/moneyspider/api.json"
+  absent "$p/nf/registries/freelunch-moneyspider-ghcr-io.json"
+  exists "$p/nf/registries/someone-else.json"
+  contains "$out" "northflank: deleted the project moneyspider"
+  equals "$(jq -c '.outputs.platforms.value // []' "$p/.freelunch/hybrid/terraform.tfstate")" '[]'
+  # A second run finds nothing left to delete.
+  out="$(FREELUNCH_AUTO_APPROVE=1 nf_in "$p" destroy northflank 2>&1)"
+  contains "$out" "northflank: there is no project moneyspider at Northflank"
+}
+
+test_apply_leaves_other_projects_alone() {
+  local p="$WORK/nf-foreign" out
+  mkdir -p "$p/nf" && (cd "$p" && "$CLI" init --name shop northflank) >/dev/null 2>&1
+  cp "$p/.freelunch/northflank/terraform.tfvars.example" "$p/.freelunch/northflank/terraform.tfvars"
+  if out="$(FREELUNCH_AUTO_APPROVE=1 FAKE_NF_FOREIGN=shop nf_in "$p" apply northflank 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "there is a project shop already, which freelunch didn't make"
+  fails grep -q 'nf PUT' "$p/fake.log"
+  if out="$(FREELUNCH_AUTO_APPROVE=1 TEST_NF_TOKEN='' nf_in "$p" apply northflank 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "NORTHFLANK_API_TOKEN is not set"
+}
+
+test_deploy_puts_each_app_on_northflank() {
+  local p="$WORK/nf-deploy" out body digest
+  nf_project "$p"
+  out="$(GHCR_TOKEN=ghp_test-token nf_in "$p" deploy 2>&1)"
+  digest="$(sed -n 's/^.*api: ghcr.io\/me\/api:1.0.0 = //p' <<< "$out")"
+  [[ "$digest" == sha256:* ]] || { echo "no digest in: $out"; return 1; }
+  # The registry login, for the project only, with the token from the environment.
+  equals "$(jq -c . "$p/nf/registries/freelunch-freelunch-ghcr-io.json")" \
+    '{"name":"freelunch freelunch ghcr.io","provider":"github","credentials":{"username":"me","password":"ghp_test-token","scope":{"pull":true,"push":false}},"restrictions":{"restricted":true,"projects":["freelunch"]}}'
+  # The app: pinned to the digest its tag points to, a private port for cloudflared, the
+  # env file and the Compose environment, and the healthcheck as a readiness check.
+  body="$(sent "$p" api)"
+  equals "$(jq -c '{name, plan: .billing.deploymentPlan, image: .deployment.external.imagePath, cred: .deployment.external.credentials, docker: .deployment.docker}' <<< "$body")" \
+    "{\"name\":\"api\",\"plan\":\"nf-compute-20\",\"image\":\"ghcr.io/me/api@$digest\",\"cred\":\"freelunch-freelunch-ghcr-io\",\"docker\":{\"configType\":\"customCommand\",\"customCommand\":\"serve --port 8080\"}}"
+  equals "$(jq -c .ports <<< "$body")" '[{"name":"p8080","internalPort":8080,"public":false,"protocol":"HTTP"}]'
+  equals "$(jq -c .runtimeEnvironment <<< "$body")" '{"API_SECRET":"s3cret-value","QUOTED":"with spaces","LOG_LEVEL":"info"}'
+  equals "$(jq -c .healthChecks <<< "$body")" '[{"protocol":"CMD","type":"readinessProbe","cmd":"wget -qO- http://127.0.0.1:8080/health","initialDelaySeconds":1,"periodSeconds":10,"timeoutSeconds":30,"failureThreshold":6}]'
+  # cloudflared, pinned like on a VM, with the tunnel token, ready once it is connected.
+  body="$(sent "$p" cloudflared)"
+  equals "$(jq -r .deployment.external.imagePath <<< "$body")" "cloudflare/cloudflared@$(sed -n 's/.*image: .*@\(sha256:[0-9a-f]*\).*/\1/p' "$ROOT/providers/cloudflare/apps/cloudflared/compose.yaml")"
+  equals "$(jq -c '{plan: .billing.deploymentPlan, env: .runtimeEnvironment, ports, cmd: .deployment.docker.customCommand}' <<< "$body")" \
+    '{"plan":"nf-compute-10","env":{"TUNNEL_TOKEN":"mock-tunnel-token"},"ports":[],"cmd":"tunnel --no-autoupdate --metrics 0.0.0.0:20241 run"}'
+  equals "$(jq -c '.healthChecks[0] | {protocol, path, port}' <<< "$body")" '{"protocol":"HTTP","path":"/ready","port":20241}'
+  # It waits for both, then says where the app is.
+  contains "$out" "northflank-main: api is running"
+  contains "$out" "northflank-main: cloudflared is running"
+  contains "$out" "northflank-main: https://api.example.com"
+  grep -qx 'nf GET /projects/freelunch/services/api token=nf-token' "$p/fake.log"
+  # Secrets travel in the bodies, never on a command line the fake curl logged.
+  lacks "$(cat "$p/fake.log")" "s3cret-value"
+  lacks "$(cat "$p/fake.log")" "ghp_test-token"
+  # A second deploy updates the same login and services.
+  out="$(GHCR_TOKEN=ghp_new-token nf_in "$p" deploy 2>&1)"
+  grep -q '^nf PATCH /integrations/registries/freelunch-freelunch-ghcr-io ' "$p/fake.log"
+  equals "$(grep -c '^nf POST /integrations/registries ' "$p/fake.log")" 1
+  equals "$(jq -r .credentials.password "$p/nf/registries/freelunch-freelunch-ghcr-io.json")" "ghp_new-token"
+  equals "$(ls "$p/nf/services/freelunch")" "$(printf 'api.json\ncloudflared.json')"
+  # A service that apps.tfvars doesn't list still counts against the free plan.
+  echo '{"name":"old-api"}' > "$p/nf/services/freelunch/old-api.json"
+  out="$(GHCR_TOKEN=ghp_new-token nf_in "$p" deploy 2>&1)"
+  contains "$out" "the project also runs old-api, which apps.tfvars doesn't list"
+}
+
+test_deploy_to_northflank_fails_loudly() {
+  local p="$WORK/nf-fail" out
+  nf_project "$p"
+  if out="$(GHCR_TOKEN=x FAKE_NF_FAILED=api nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "northflank: the deployment of api failed"
+  if out="$(GHCR_TOKEN=x FAKE_NF_PENDING=cloudflared FREELUNCH_DEPLOY_TIMEOUT=0 nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "northflank: cloudflared is still in_progress after 0s"
+  if out="$(GHCR_TOKEN=x FAKE_NF_STOPPED=api FREELUNCH_DEPLOY_TIMEOUT=0 nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "northflank: api is still out, but no container runs (task_failed)"
+  # Without the project, or with a token Northflank refuses.
+  rm "$p/nf/projects/freelunch.json"
+  if out="$(GHCR_TOKEN=x nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "there is no project freelunch yet: freelunch apply northflank makes it"
+  if out="$(GHCR_TOKEN=x TEST_NF_TOKEN=wrong nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "Northflank doesn't take NORTHFLANK_API_TOKEN (401): Invalid token"
+}
+
+test_northflank_dry_run_leaves_out_secrets() {
+  local p="$WORK/nf-dry" out
+  nf_project "$p"
+  out="$(GHCR_TOKEN=ghp_test-token TEST_NF_TOKEN='' nf_in "$p" deploy --dry-run 2>&1)"
+  contains "$out" "northflank-main: would send this to Northflank, project freelunch (dry run, secrets left out)"
+  contains "$out" "save the login to ghcr.io for me (password from \$GHCR_TOKEN)"
+  contains "$out" "PUT /projects/freelunch/services/deployment"
+  contains "$out" '"API_SECRET": "<redacted>"'
+  contains "$out" '"TUNNEL_TOKEN": "<redacted>"'
+  lacks "$out" "s3cret-value"
+  lacks "$out" "mock-tunnel-token"
+  lacks "$out" "ghp_test-token"
+  fails grep -q '^nf ' "$p/fake.log"
+}
+
+test_status_and_doctor_ask_northflank() {
+  local p="$WORK/nf-status" out
+  nf_project "$p"
+  GHCR_TOKEN=x nf_in "$p" deploy >/dev/null 2>&1
+  out="$(FAKE_NF_STOPPED=cloudflared nf_in "$p" status)"
+  contains "$out" "$(printf 'Platforms\n  northflank-main project freelunch in europe-west  amd64  nf-compute-20')"
+  contains "$out" "$(printf 'Apps on northflank-main (Northflank project freelunch)\n  api                  running\n  cloudflared          not running (task_failed)')"
+  contains "$out" "$(printf 'Tunnels\n  northflank-main not checked without CLOUDFLARE_API_TOKEN')"
+  out="$(TEST_NF_TOKEN='' nf_in "$p" status)"
+  contains "$out" "  not asked without NORTHFLANK_API_TOKEN"
+  # doctor: the region, the token and the project.
+  out="$(GHCR_TOKEN=x nf_in "$p" doctor 2>&1 || true)"
+  contains "$out" "  ok    region europe-west exists"
+  contains "$out" "  ok    NORTHFLANK_API_TOKEN signs in"
+  contains "$out" "  ok    the project freelunch is there"
+  contains "$out" "  ok    ghcr.io/me/api:1.0.0 has a linux/amd64 build for northflank-main"
+  out="$(GHCR_TOKEN=x TEST_NF_TOKEN=wrong nf_in "$p" doctor 2>&1 || true)"
+  contains "$out" "  fail  Northflank doesn't take NORTHFLANK_API_TOKEN (401): Invalid token"
+  sed -i.bak 's/^region = .*/region = "mars-north"/' "$p/.freelunch/northflank/terraform.tfvars"
+  out="$(GHCR_TOKEN=x nf_in "$p" doctor 2>&1 || true)"
+  contains "$out" "  fail  region mars-north doesn't exist at Northflank; pick one of: europe-west, us-central"
+  # trust has nothing to do there.
+  if out="$(nf_in "$p" trust northflank-main 2>&1)"; then echo "trust should have failed"; return 1; fi
+  contains "$out" "northflank-main is a container platform, which deploy reaches through its API"
 }
 
 echo "tests/cli.sh"

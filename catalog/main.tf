@@ -17,7 +17,7 @@ locals {
   required_fields = ["name", "display_name", "category", "status", "layer", "iac", "free_tier_type", "free_tier", "card_required", "url", "last_verified"]
   enums = {
     status         = ["ready", "planned", "excluded"]
-    layer          = ["host", "service", "glue"]
+    layer          = ["host", "platform", "service", "glue"]
     iac            = ["official", "partner", "community", "stale", "none"]
     free_tier_type = ["always-free", "monthly-credit", "trial", "startup-credits", "none"]
     card_required  = ["yes", "no", "unknown"]
@@ -50,9 +50,10 @@ locals {
       none              = "No free tier (paid)"
     }
     layer = {
-      host    = "produces Docker hosts for the hybrid inventory"
-      service = "standalone managed service (database, PaaS, monitoring, ...)"
-      glue    = "consumes the hybrid inventory (DNS, mesh, tunnels)"
+      host     = "produces Docker hosts for the hybrid inventory"
+      platform = "runs your apps' images without a VM; deploy goes through its API"
+      service  = "standalone managed service (database, PaaS, monitoring, ...)"
+      glue     = "consumes the hybrid inventory (DNS, mesh, tunnels)"
     }
     status = { ready = "✅ Implemented", planned = "🚧 Planned", excluded = "⛔ Excluded" }
   }

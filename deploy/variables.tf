@@ -1,8 +1,9 @@
 variable "apps" {
   description = <<-EOT
     Compose apps to run, keyed by app name. Each app goes to /opt/freelunch/apps/<name>/
-    on its host. host is <provider>-<instance> from the inventory. compose and env_file
-    are paths, relative to config_dir unless absolute.
+    on its host, or becomes a service named <name> on a container platform. host is
+    <provider>-<instance> from the inventory. compose and env_file are paths, relative to
+    config_dir unless absolute.
   EOT
   type = map(object({
     host     = string

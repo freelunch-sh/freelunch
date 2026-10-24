@@ -38,8 +38,9 @@ Project:
                           builds the image for the hosts and pushes it to ghcr.io
   deploy [target...]      Check that each image has a build for its host, copy Compose apps and
                           their env to the hosts over SSH, start them and wait until they are
-                          healthy. Targets: all (default), a provider (oci) or a host
-                          (oci-main). --dry-run prints the remote script instead.
+                          healthy. On a container platform (northflank) each app becomes a
+                          service through its API instead. Targets: all (default), a provider
+                          (oci) or a host (oci-main). --dry-run prints what it would do
   trust <host>            Pin a host's SSH keys in known_hosts from its serial console, so the
                           first deploy talks to the right machine (OCI hosts)
   domain suggest <name...>
@@ -56,17 +57,20 @@ Infrastructure:
   plan    <p...|all>      Plan provider stacks. --show-user-data also prints the cloud-init of
                           each host in the plan, with secrets left out. --out <file> saves the
                           plan of one stack for apply --plan
-  apply   <p...|all>      Apply provider stacks (hosts, then services), refresh hybrid, then glue.
+  apply   <p...|all>      Apply provider stacks (hosts and platforms, then services), refresh
+                          hybrid, then glue. A platform's apply also makes the target there.
                           --plan <file> applies a saved plan without a prompt.
                           --wait-for-capacity retries hosts until OCI has the capacity for them,
                           each time in the next availability domain; with --detach it waits in
                           the background, logging to .freelunch/<stack>/wait.log
-  destroy <p...|all>      Destroy provider stacks in reverse layer order, then refresh hybrid
-  status                  Hosts and their addresses, the apps on each host and whether they run,
+  destroy <p...|all>      Destroy provider stacks in reverse layer order, then refresh hybrid. On
+                          a platform it also deletes what apply and deploy made there
+  status                  Hosts and platforms, the apps on each one and whether they run,
                           tunnels and their URLs, service token expiry, and capacity waits
-  doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in, SSH
-                          keys, images and their registry logins, the Cloudflare token and zone
-  hybrid                  Re-aggregate deployed host stacks into the hybrid inventory
+  doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in, the
+                          Northflank token, SSH keys, images and their registry logins, the
+                          Cloudflare token and zone
+  hybrid                  Re-aggregate deployed host and platform stacks into the hybrid inventory
   inventory               Write inventory.json (all hosts across providers)
   output <stack> [args]   Print a stack's outputs from its state, e.g. output cloudflare -json
                           service_tokens, or output hybrid -raw ssh_config
@@ -611,6 +615,13 @@ next_steps() {
   local p host address known unpinned="" trust="" steps=() i
   known="$(state_root)/known_hosts"
   for p in "$@"; do
+    if is_platform "$p"; then
+      while read -r host address; do
+        [[ -n "$host" ]] || continue
+        log "$host is ready: $(meta "$p" display_name) project $address"
+      done < <(jq -r '.outputs.platforms.value[]? | "\(.provider)-\(.name) \(.id) in \(.region)"' "$(config_dir "$p")/terraform.tfstate" 2>/dev/null)
+      continue
+    fi
     while read -r host address; do
       [[ -n "$address" ]] || continue
       log "$host is ready at $address"
@@ -631,11 +642,11 @@ next_steps() {
   for i in "${!steps[@]}"; do echo "  $((i + 1)). ${steps[$i]}" >&2; done
 }
 
-deployed_hosts_json() {
+deployed_json() { # deployed_json <layer>: the deployed stacks of that layer, as a JSON list
   local p first=1
   printf '['
   for p in $(all_providers); do
-    if [[ "$(meta "$p" layer)" != "host" || ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
+    if [[ "$(meta "$p" layer)" != "$1" || ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
     [[ $first -eq 1 ]] || printf ','
     printf '"%s"' "$p"; first=0
   done
@@ -644,13 +655,14 @@ deployed_hosts_json() {
 
 cmd_hybrid() {
   need_tf
-  local hosts state=() vars=()
-  hosts="$(deployed_hosts_json)"
+  local hosts platforms state=() vars=()
+  hosts="$(deployed_json host)"
+  platforms="$(deployed_json platform)"
   check_checkout_tfvars "$ROOT/hybrid"
   if [[ -n "$PROJECT" ]]; then state=(-state="$(hybrid_state)"); vars=(-var "state_dir=$PROJECT"); fi
-  log "hybrid: aggregating $hosts"
+  log "hybrid: aggregating $hosts$([[ "$platforms" == "[]" ]] || echo ", platforms $platforms")"
   tf_for hybrid "$ROOT/hybrid" init -input=false -upgrade=false >/dev/null
-  tf_for hybrid "$ROOT/hybrid" apply -input=false -auto-approve ${state[@]+"${state[@]}"} ${vars[@]+"${vars[@]}"} -var "host_providers=$hosts" >/dev/null
+  tf_for hybrid "$ROOT/hybrid" apply -input=false -auto-approve ${state[@]+"${state[@]}"} ${vars[@]+"${vars[@]}"} -var "host_providers=$hosts" -var "platform_providers=$platforms" >/dev/null
   tf_for hybrid "$ROOT/hybrid" output ${state[@]+"${state[@]}"} hosts_by_provider
 }
 
@@ -725,18 +737,19 @@ cmd_lifecycle() { # plan|apply|destroy
     die "$action: --out, --plan and --detach take one stack, not ${#providers[@]}"
   fi
 
-  local hosts=() services=() glue=()
+  local hosts=() platforms=() services=() glue=()
   for a in "${providers[@]}"; do
     case "$(meta "$a" layer)" in
-      host)    hosts+=("$a") ;;
-      service) services+=("$a") ;;
-      glue)    glue+=("$a") ;;
+      host)     hosts+=("$a") ;;
+      platform) platforms+=("$a") ;;
+      service)  services+=("$a") ;;
+      glue)     glue+=("$a") ;;
     esac
   done
 
   case "$action" in
     plan)
-      for a in ${hosts[@]+"${hosts[@]}"} ${services[@]+"${services[@]}"} ${glue[@]+"${glue[@]}"}; do
+      for a in ${hosts[@]+"${hosts[@]}"} ${platforms[@]+"${platforms[@]}"} ${services[@]+"${services[@]}"} ${glue[@]+"${glue[@]}"}; do
         saved="$out"
         if [[ -z "$saved" && $user_data -eq 1 && "$(meta "$a" layer)" == "host" ]]; then
           [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
@@ -759,13 +772,20 @@ cmd_lifecycle() { # plan|apply|destroy
       for a in ${hosts[@]+"${hosts[@]}"}; do
         if [[ $wait_for_capacity -eq 1 ]]; then apply_until_capacity "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; else apply_host "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; fi
       done
+      # A platform stack declares the target; its API then makes it (the Northflank project).
+      for a in ${platforms[@]+"${platforms[@]}"}; do
+        apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}
+        platform_up "$a"
+      done
       for a in ${services[@]+"${services[@]}"}; do apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; done
-      [[ ${#hosts[@]} -gt 0 ]] && cmd_hybrid
+      [[ ${#hosts[@]} -eq 0 && ${#platforms[@]} -eq 0 ]] || cmd_hybrid
       for a in ${glue[@]+"${glue[@]}"}; do apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; done
-      next_steps ${hosts[@]+"${hosts[@]}"} ;;
+      next_steps ${hosts[@]+"${hosts[@]}"} ${platforms[@]+"${platforms[@]}"} ;;
     destroy)
-      for a in ${glue[@]+"${glue[@]}"} ${services[@]+"${services[@]}"} ${hosts[@]+"${hosts[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
-      [[ ${#hosts[@]} -gt 0 ]] && cmd_hybrid ;;
+      for a in ${glue[@]+"${glue[@]}"} ${services[@]+"${services[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
+      for a in ${platforms[@]+"${platforms[@]}"}; do destroy_platform "$a" ${extra[@]+"${extra[@]}"}; done
+      for a in ${hosts[@]+"${hosts[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
+      [[ ${#hosts[@]} -eq 0 && ${#platforms[@]} -eq 0 ]] || cmd_hybrid ;;
   esac
 }
 
@@ -879,6 +899,17 @@ status_hosts() {
   printf '%s' "$lines"
 }
 
+status_platforms() {
+  local p lines=""
+  for p in $(all_providers); do
+    if ! is_platform "$p" || [[ ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
+    lines="$lines$(jq -r '.outputs.platforms.value[]? | "  \("\(.provider)-\(.name)" | . + (" " * ([14 - length, 1] | max)))project \(.id) in \(.region)  \(.arch)  \(.size)"' "$(config_dir "$p")/terraform.tfstate")"$'\n'
+  done
+  [[ -n "$lines" ]] || return 1
+  echo "Platforms"
+  printf '%s' "$lines"
+}
+
 status_apps() {
   local apps_file tunnel_state="" host address user out app service state health expected seen
   apps_file="$(state_root)/apps.tfvars"
@@ -892,6 +923,13 @@ status_apps() {
   fi
   ssh_options yes
   for host in $(jq -r 'keys[]' "$TMP/targets.json"); do
+    # A platform says how its apps run through its API.
+    if [[ "$(jq -r --arg h "$host" '.[$h].kind' "$TMP/targets.json")" == "platform" ]]; then
+      case "$(jq -r --arg h "$host" '.[$h].provider' "$TMP/targets.json")" in
+        northflank) northflank_status "$host" ;;
+      esac
+      continue
+    fi
     address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
     user="$(jq -r --arg h "$host" '.[$h].user' "$TMP/targets.json")"
     expected="$(jq -r --arg h "$host" '.[$h] | (.apps | keys) + (if .tunnel then ["cloudflared"] else [] end) | .[]' "$TMP/targets.json")"
@@ -923,8 +961,8 @@ status_tunnels() {
   state="$(config_dir cloudflare)/terraform.tfstate"
   [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare || return 0
   tfvars="$(config_dir cloudflare)/terraform.tfvars"
-  account="$(tfvar "$tfvars" account_id 2>/dev/null)"
-  zone="$(tfvar "$tfvars" zone 2>/dev/null)"
+  account="$(tfvar "$tfvars" account_id 2>/dev/null || true)"
+  zone="$(tfvar "$tfvars" zone 2>/dev/null || true)"
   if [[ -n "$token" && -z "$account" && -n "$zone" ]]; then account="$(cf_get "/zones?name=$zone" | jq -r '.result[0].account.id // empty' 2>/dev/null)"; fi
   echo "Tunnels"
   while IFS=$'\t' read -r host id; do
@@ -969,8 +1007,11 @@ status_waits() {
 }
 
 cmd_status() {
+  local found=0
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-  if ! status_hosts; then
+  if status_hosts; then found=1; fi
+  if status_platforms; then found=1; fi
+  if [[ $found -eq 0 ]]; then
     echo "Nothing is deployed here yet."
     status_waits
     return 0
@@ -1001,7 +1042,7 @@ image_workflow() {
   for s in "$@"; do
     case "$s" in
       oci) arm=1 ;;
-      gcp|aws|azure) x86=1 ;;
+      gcp|aws|azure|northflank) x86=1 ;;
     esac
   done
   if [[ $arm -eq $x86 ]]; then platforms="linux/amd64,linux/arm64"; elif [[ $arm -eq 1 ]]; then platforms="linux/arm64"; else platforms="linux/amd64"; fi
@@ -1085,6 +1126,13 @@ with_name() {
     }' "$2"
 }
 
+# route_example <stack> <target> <app> <platform 0|1>: a stack's example as it is, except
+# that the cloudflare one routes to the project's target, and names the app on a platform
+route_example() {
+  if [[ "$1" != "cloudflare" || -z "$2" || "$2" == "oci-main" ]]; then cat; return 0; fi
+  if [[ "$4" == 1 ]]; then sed "s/{ host = \"oci-main\", port/{ host = \"$2\", app = \"$3\", port/"; else sed "s/host = \"oci-main\"/host = \"$2\"/"; fi
+}
+
 cmd_init() {
   local base cfg s src name="" workflow=0 stacks=()
   while [[ $# -gt 0 ]]; do
@@ -1132,27 +1180,40 @@ known_hosts
 *.tfplan
 EOF
 
+  # The first host or platform runs the app. On a platform the app becomes a service named
+  # after it, and those names are stricter: letters, digits and single hyphens.
+  local app host="" platform=0 compose="compose.yaml" f
+  for s in "${stacks[@]}"; do
+    [[ -z "$host" ]] || break
+    case "$(meta "$s" layer)" in
+      host)     host="$s-main" ;;
+      platform) host="$s-main"; platform=1 ;;
+    esac
+  done
+  app="$(basename "$base" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9_-]/-/g' -e 's/^[^a-z0-9]*//')"
+  if [[ $platform -eq 1 ]]; then app="$(printf '%s' "$app" | tr '_' '-' | tr -s '-' | sed -e 's/^[^a-z]*//' -e 's/-*$//' | cut -c1-54 | sed 's/-*$//')"; fi
+  [[ ${#app} -ge 3 && "$app" != "cloudflared" ]] || app="app"
+
   # Host stacks have a project.tfvars.example: only SSH open and no apps in cloud-init,
   # since the tunnel serves the apps and deploy runs them. Other stacks get their
-  # terraform.tfvars.example.
+  # terraform.tfvars.example, and the cloudflare one routes to the project's target.
   for s in "${stacks[@]}"; do
     mkdir -p "$cfg/$s"
     src="$(stack_dir "$s")/project.tfvars.example"
     [[ -f "$src" ]] || src="$(stack_dir "$s")/terraform.tfvars.example"
-    with_name "$name" "$src" "$(stack_dir "$s")" | write_new "$cfg/$s/terraform.tfvars.example"
+    with_name "$name" "$src" "$(stack_dir "$s")" | route_example "$s" "$host" "$app" "$platform" | write_new "$cfg/$s/terraform.tfvars.example"
   done
 
-  local app host="" compose="compose.yaml" f
-  app="$(basename "$base" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9_-]/-/g' -e 's/^[^a-z0-9]*//')"
-  [[ -n "$app" && "$app" != "cloudflared" ]] || app="app"
-  for s in "${stacks[@]}"; do
-    if [[ -z "$host" && "$(meta "$s" layer)" == "host" ]]; then host="$s-main"; fi
-  done
   for f in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
     if [[ -f "$base/$f" ]]; then compose="$f"; break; fi
   done
 
-  write_new "$cfg/apps.tfvars" <<EOF
+  local secrets="deploy copies the file to the host as .env next to the
+    # compose file; use env_file: .env in the compose service to pass them in."
+  [[ $platform -eq 0 ]] || secrets="deploy sets every value in the file in the
+    # environment of the app's service, next to what the compose file sets."
+  {
+    cat <<EOF
 # Apps that \`freelunch deploy\` runs on your hosts. Paths are relative to this folder.
 # Host names are <provider>-<instance>; \`freelunch inventory\` lists them.
 
@@ -1161,8 +1222,7 @@ apps = {
     host    = "${host:-oci-main}"
     compose = "../$compose"
 
-    # Secrets for the app. deploy copies the file to the host as .env next to the
-    # compose file; use env_file: .env in the compose service to pass them in.
+    # Secrets for the app. $secrets
     # Keep it in this folder: *.env files are git-ignored.
     # env_file = "$app.env"
   }
@@ -1173,19 +1233,31 @@ apps = {
 # registries = {
 #   "ghcr.io" = { username = "your-github-user", password_env = "GHCR_TOKEN" }
 # }
+EOF
+    # A platform is reached through its API, not at an address.
+    [[ $platform -eq 1 ]] || cat <<EOF
 
 # Reach a host at another address, e.g. its Tailscale name instead of the public IP.
 # hosts = {
 #   ${host:-oci-main} = { address = "$name-${host:-oci-main}" }
 # }
 EOF
+  } | write_new "$cfg/apps.tfvars"
 
-  write_new "$cfg/.env.example" <<'EOF'
+  {
+    cat <<'EOF'
 # Credentials for the freelunch CLI. Copy to .env (git-ignored); variables already set in
 # your shell win over this file.
 
 # Cloudflare API token for the cloudflare stack (permissions: providers/cloudflare/README.md)
 CLOUDFLARE_API_TOKEN=
+EOF
+    [[ " ${stacks[*]} " != *" northflank "* ]] || cat <<'EOF'
+
+# Northflank API token for the northflank stack (providers/northflank/README.md#api-token)
+NORTHFLANK_API_TOKEN=
+EOF
+    cat <<'EOF'
 
 # Read-only registry token, when apps.tfvars lists registries
 # GHCR_TOKEN=
@@ -1199,6 +1271,7 @@ CLOUDFLARE_API_TOKEN=
 # GHCR_TOKEN=op://Private/GHCR/token
 # CLOUDFLARE_API_TOKEN=keychain:freelunch-cloudflare
 EOF
+  } | write_new "$cfg/.env.example"
 
   log "project name: $name (name_prefix in each stack's tfvars)"
   [[ $workflow -eq 0 ]] || image_workflow "$base" "${stacks[@]}"
@@ -1220,6 +1293,13 @@ EOF
 There is no OCI API key in ~/.oci/config yet. oci setup bootstrap --profile-name freelunch
 signs you in through the browser and creates one that doesn't expire; then set
 oci_config_profile = "freelunch" in .freelunch/oci/terraform.tfvars.
+EOF
+  fi
+  if [[ " ${stacks[*]} " == *" northflank "* ]]; then
+    cat >&2 <<'EOF'
+
+The northflank stack signs in with NORTHFLANK_API_TOKEN in .freelunch/.env. Make the token
+in your Northflank team's settings (providers/northflank/README.md#api-token).
 EOF
   fi
 }
@@ -1283,7 +1363,7 @@ registry_get() {
     *)
       echo 401; return 0 ;;
   esac
-  code="$(curl -s -L --max-time 20 -o "$file" -w '%{http_code}' -H "Accept: $accept" "${login[@]}" "https://$host/v2/$path")" || code=000
+  code="$(curl -s -L --max-time 20 -D "$file.headers" -o "$file" -w '%{http_code}' -H "Accept: $accept" "${login[@]}" "https://$host/v2/$path")" || code=000
   echo "$code"
 }
 
@@ -1367,7 +1447,7 @@ shq() { local s="${1//\'/\'\\\'\'}"; printf "'%s'" "$s"; } # quote for the remot
 b64() { base64 | tr -d '\n'; echo; }
 
 # deploy_plan: resolve apps.tfvars, the inventory and the tunnels with deploy/ into
-# $TMP/targets.json, registries.json and tunnel_tokens.json.
+# $TMP/targets.json, platforms.json, registries.json and tunnel_tokens.json.
 deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
   local apps_file="$1" tunnel_state="$2" args o
   args=(-state="$TMP/deploy.tfstate" -var "config_dir=$(state_root)" -var "inventory_state_path=$(hybrid_state)")
@@ -1376,7 +1456,7 @@ deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
   check_checkout_tfvars "$ROOT/deploy"
   TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" init -input=false >/dev/null || return 1
   TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" apply -input=false -auto-approve "${args[@]}" >/dev/null || return 1
-  for o in targets registries tunnel_tokens; do
+  for o in targets platforms registries tunnel_tokens; do
     TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" output -state="$TMP/deploy.tfstate" -json "$o" > "$TMP/$o.json" || return 1
   done
 }
@@ -1565,7 +1645,421 @@ cmd_deploy() {
 
   ssh_options accept-new
   token_reminders
-  for h in "${hosts[@]}"; do deploy_host "$h" "$dry_run"; done
+  for h in "${hosts[@]}"; do
+    if [[ "$(jq -r --arg h "$h" '.[$h].kind' "$TMP/targets.json")" == "platform" ]]; then deploy_platform "$h" "$dry_run"; else deploy_host "$h" "$dry_run"; fi
+  done
+}
+
+# --- container platforms --------------------------------------------------------------
+
+# A platform stack (layer: platform) declares a target that runs apps without a VM, and the
+# provider's API does the rest: apply makes the target, deploy puts a service per app in
+# it, destroy deletes both. Northflank is the first.
+
+is_platform() { [[ "$(meta "$1" layer)" == "platform" ]]; }
+
+# platform_field <provider> <field>: a field of the stack's target (the platform contract),
+# from its state
+platform_field() {
+  jq -r --arg f "$2" '.outputs.platforms.value[0][$f] // empty' "$(config_dir "$1")/terraform.tfstate" 2>/dev/null || true
+}
+
+platform_up() { # platform_up <provider>: make the target the stack declares
+  case "$1" in
+    northflank) northflank_up "$(platform_field northflank id)" "$(platform_field northflank region)" ;;
+  esac
+}
+
+# destroy_platform <provider> [extra args]: destroy the stack, then what apply and deploy
+# made at the provider. tofu/terraform fail when you decline, so that only happens after
+# a yes. A destroyed stack keeps its state file and tfvars, so a second run finishes what
+# an interrupted one left.
+destroy_platform() {
+  local p="$1" id state; shift
+  state="$(config_dir "$p")/terraform.tfstate"
+  id="$(platform_field "$p" id)"
+  if [[ -z "$id" && -f "$state" ]]; then
+    id="$(tfvar "$(config_dir "$p")/terraform.tfvars" name_prefix 2>/dev/null || true)"
+    id="${id:-freelunch}"
+  fi
+  run_stack destroy "$p" "$@"
+  [[ -n "$id" ]] || return 0
+  case "$p" in
+    northflank) northflank_down "$id" ;;
+  esac
+}
+
+deploy_platform() { # deploy_platform <target> <dry run 0|1>
+  local provider
+  provider="$(jq -r --arg h "$1" '.[$h].provider' "$TMP/targets.json")"
+  case "$provider" in
+    northflank) northflank_deploy "$@" ;;
+    *)          die "$1: freelunch can't deploy to $provider yet" ;;
+  esac
+}
+
+# env_json <dotenv file>: its KEY=value lines as a JSON object, read the way docker compose
+# reads an env_file. The values go through a pipe, never the command line.
+env_json() {
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
+    line="${line#export }"
+    key="${line%%=*}"
+    value="${line#*=}"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    if [[ ${#value} -ge 2 && ( "$value" == \"*\" || "$value" == \'*\' ) ]]; then value="${value:1:${#value}-2}"; fi
+    printf '%s\n%s\n' "$key" "$value"
+  done < "$1" | jq -Rs 'split("\n") | .[:-1] | [range(0; length; 2) as $i | {(.[$i]): .[$i + 1]}] | add // {}'
+}
+
+# image_name <image>: the image without its tag or digest (ghcr.io/me/api:1.4.2 is
+# ghcr.io/me/api)
+image_name() {
+  local n="${1%%@*}"
+  [[ "${n##*/}" != *:* ]] || n="${n%:*}"
+  echo "$n"
+}
+
+# image_digest <image> [user password]: the digest the image's tag points to now, from
+# its registry, or nothing when the registry doesn't say
+image_digest() {
+  local registry repo ref file="$TMP/digest.json"
+  IFS=$'\t' read -r registry repo ref <<< "$(image_parts "$1")"
+  if [[ "$ref" == sha256:* ]]; then echo "$ref"; return 0; fi
+  [[ "$(registry_get "$registry" "$repo/manifests/$ref" "$INDEX_TYPES, $MANIFEST_TYPES" "$file" "${@:2}")" == "200" ]] || return 0
+  tr -d '\r' < "$file.headers" | sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest: *\(sha256:[0-9a-f]*\).*/\1/p' | tail -1
+}
+
+# --- Northflank -----------------------------------------------------------------------
+
+NF_API="https://api.northflank.com/v1"
+# In the description of every project and service freelunch makes, so that it never takes
+# over or deletes one somebody made by hand under the same name.
+NF_MARK="Managed by freelunch"
+NF_TUNNEL_PLAN="nf-compute-10"
+
+# nf <method> <path> [JSON file]: call the Northflank API with NORTHFLANK_API_TOKEN, and
+# print the HTTP status (000 when it can't be reached). The answer is in $TMP/nf.json. A
+# body travels in a file, so the secrets in it never show up in the process list.
+nf() {
+  local code args=()
+  [[ -n "${NORTHFLANK_API_TOKEN:-}" ]] || die "northflank: NORTHFLANK_API_TOKEN is not set: export it, or put it in $(rel "$(state_root)")/.env (providers/northflank/README.md#api-token)"
+  [[ $# -lt 3 ]] || args=(--data-binary "@$3")
+  code="$(curl -sS --max-time 60 -o "$TMP/nf.json" -w '%{http_code}' -X "$1" -H "Authorization: Bearer $NORTHFLANK_API_TOKEN" \
+    -H "Content-Type: application/json" ${args[@]+"${args[@]}"} "$NF_API$2")" || code=000
+  echo "$code"
+}
+
+nf_ok() { [[ "$1" == 2?? ]]; }
+
+# nf_error: why the last call failed, as Northflank put it
+nf_error() {
+  local m
+  m="$(jq -r '.error.message // empty' "$TMP/nf.json" 2>/dev/null)" || m=""
+  echo "${m:-no answer it could read}"
+}
+
+# nf_mine <description>: whether freelunch made the project or service
+nf_mine() { [[ "$1" == "$NF_MARK"* ]]; }
+
+# northflank_up <project> <region>: make the project, or bring it up to date. One that
+# freelunch didn't make is left alone.
+northflank_up() {
+  local id="$1" region="$2" code status i
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  code="$(nf GET "/projects/$id")"
+  if nf_ok "$code"; then
+    nf_mine "$(jq -r '.data.description // ""' "$TMP/nf.json")" \
+      || die "northflank: there is a project $id already, which freelunch didn't make. Pick another name_prefix in $(rel "$(config_dir northflank)")/terraform.tfvars, or rename that project"
+    status="$(jq -r '.data.deployment.region // empty' "$TMP/nf.json")"
+    [[ -z "$status" || "$status" == "$region" ]] \
+      || die "northflank: the project $id is in $status, and Northflank can't move it to $region. Set region = \"$status\", or destroy it first (freelunch destroy northflank)"
+  elif [[ "$code" != 404 ]]; then
+    die "northflank: can't look up the project $id ($code): $(nf_error)"
+  fi
+  jq -n --arg n "$id" --arg r "$region" --arg d "$NF_MARK" '{name: $n, region: $r, description: $d}' > "$TMP/project.json"
+  code="$(nf PUT /projects "$TMP/project.json")"
+  nf_ok "$code" || die "northflank: can't make the project $id in $region ($code): $(nf_error)"
+  [[ "$(jq -r '.data.id' "$TMP/nf.json")" == "$id" ]] || die "northflank: Northflank gave the project the ID $(jq -r '.data.id' "$TMP/nf.json"), not $id"
+  # A new project takes a moment before services can go in.
+  for i in $(seq 1 30); do
+    code="$(nf GET "/projects/$id")"
+    status="$(jq -r '.data.lifecycleStatus // "created"' "$TMP/nf.json")"
+    [[ "$status" != "created" ]] || { log "northflank: project $id in $region"; return 0; }
+    [[ "$status" != *failed ]] || die "northflank: the project $id is $status"
+    sleep 5
+  done
+  die "northflank: the project $id is still $status after 2.5 minutes; run freelunch apply northflank again"
+}
+
+# northflank_down <project>: delete the project's services, the registry logins deploy
+# saved for it, and the project
+northflank_down() {
+  local id="$1" code s i
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  code="$(nf GET "/projects/$id")"
+  if [[ "$code" == 404 ]]; then
+    log "northflank: there is no project $id at Northflank"
+    northflank_forget_registries "$id"
+    return 0
+  fi
+  nf_ok "$code" || die "northflank: can't look up the project $id ($code): $(nf_error)"
+  nf_mine "$(jq -r '.data.description // ""' "$TMP/nf.json")" || die "northflank: freelunch didn't make the project $id, so it leaves it alone"
+  code="$(nf GET "/projects/$id/services")"
+  nf_ok "$code" || die "northflank: can't list the services of $id ($code): $(nf_error)"
+  for s in $(jq -r '.data.services[]?.id' "$TMP/nf.json"); do
+    code="$(nf DELETE "/projects/$id/services/$s")"
+    nf_ok "$code" || [[ "$code" == 404 ]] || die "northflank: can't delete the service $s ($code): $(nf_error)"
+    log "northflank: deleted the service $s"
+  done
+  northflank_forget_registries "$id"
+  # Services go away in the background, and a project with services in it can't be
+  # deleted, so this tries for two minutes.
+  for i in $(seq 1 24); do
+    code="$(nf DELETE "/projects/$id")"
+    if nf_ok "$code" || [[ "$code" == 404 ]]; then log "northflank: deleted the project $id"; return 0; fi
+    [[ "$code" != 401 && "$code" != 403 && $i -lt 24 ]] || break
+    sleep 5
+  done
+  die "northflank: can't delete the project $id ($code): $(nf_error). Delete it at app.northflank.com, or run freelunch destroy northflank again"
+}
+
+# northflank_forget_registries <project>: delete the registry logins deploy saved for it
+northflank_forget_registries() {
+  local id code
+  code="$(nf GET /integrations/registries)"
+  nf_ok "$code" || { log "northflank: can't list the registry logins ($code): $(nf_error)"; return 0; }
+  for id in $(jq -r --arg n "freelunch $1 " '.data.credentials[]? | select(.name | startswith($n)) | .id' "$TMP/nf.json"); do
+    code="$(nf DELETE "/integrations/registries/$id")"
+    if nf_ok "$code"; then log "northflank: deleted the registry login $id"; else log "northflank: can't delete the registry login $id ($code): $(nf_error)"; fi
+  done
+}
+
+# northflank_registry <project> <server>: the ID of the login Northflank pulls the
+# project's images from that registry with, saved or updated from apps.tfvars. It stays
+# at Northflank, which pulls again whenever it starts a container, so give it a read-only
+# token.
+northflank_registry() {
+  local project="$1" server="$2" name user var provider id code
+  name="freelunch $project $server"
+  user="$(jq -r --arg s "$server" '.[$s].username' "$TMP/registries.json")"
+  var="$(jq -r --arg s "$server" '.[$s].password_env' "$TMP/registries.json")"
+  case "$server" in
+    ghcr.io)             provider=github ;;
+    docker.io)           provider=dockerhub ;;
+    registry.gitlab.com) provider=gitlab ;;
+    *)                   provider=custom ;;
+  esac
+  code="$(nf GET /integrations/registries)"
+  nf_ok "$code" || die "northflank: can't list the registry logins ($code): $(nf_error)"
+  id="$(jq -r --arg n "$name" 'first(.data.credentials[]? | select(.name == $n) | .id) // empty' "$TMP/nf.json")"
+  printf '%s\n%s\n' "$user" "${!var}" | jq -Rs --arg project "$project" 'split("\n") as $l
+    | {credentials: {username: $l[0], password: $l[1], scope: {pull: true, push: false}}, restrictions: {restricted: true, projects: [$project]}}' > "$TMP/registry.json"
+  if [[ -n "$id" ]]; then
+    code="$(nf PATCH "/integrations/registries/$id" "$TMP/registry.json")"
+  else
+    jq --arg n "$name" --arg p "$provider" --arg s "$server" '{name: $n, provider: $p} + (if $p == "custom" then {registryUrl: $s} else {} end) + .' \
+      "$TMP/registry.json" > "$TMP/registry.new"
+    mv "$TMP/registry.new" "$TMP/registry.json"
+    code="$(nf POST /integrations/registries "$TMP/registry.json")"
+    id="$(jq -r '.data.id // empty' "$TMP/nf.json")"
+  fi
+  rm -f "$TMP/registry.json"
+  nf_ok "$code" && [[ -n "$id" ]] || die "northflank: can't save the login to $server ($code): $(nf_error)"
+  echo "$id"
+}
+
+# northflank_body <name> <plan> <image path> <credentials ID or ""> <spec file> <env file>:
+# the body that creates or updates the app's service: its plan, image, command, private
+# ports (cloudflared reaches them as <name>:<port>), environment and readiness check
+northflank_body() {
+  jq -n --arg name "$1" --arg plan "$2" --arg image "$3" --arg cred "$4" --arg mark "$NF_MARK" \
+    --slurpfile spec "$5" --slurpfile env "$6" '$spec[0] as $s | {
+      name: $name,
+      description: $mark,
+      billing: {deploymentPlan: $plan},
+      deployment: {
+        instances: 1,
+        external: ({imagePath: $image} + (if $cred == "" then {} else {credentials: $cred} end)),
+        docker: (
+          if $s.entrypoint != null and $s.command != null then {configType: "customEntrypointCustomCommand", customEntrypoint: $s.entrypoint, customCommand: $s.command}
+          elif $s.entrypoint != null then {configType: "customEntrypoint", customEntrypoint: $s.entrypoint}
+          elif $s.command != null then {configType: "customCommand", customCommand: $s.command}
+          else {configType: "default"} end)
+      },
+      ports: [$s.ports[] | {name: "p\(.)", internalPort: ., public: false, protocol: "HTTP"}],
+      runtimeEnvironment: ($env[0] + $s.environment),
+      healthChecks: (if $s.healthcheck == null then [] else [{
+        protocol: "CMD", type: "readinessProbe", cmd: $s.healthcheck.cmd,
+        initialDelaySeconds: $s.healthcheck.initial_delay, periodSeconds: $s.healthcheck.interval,
+        timeoutSeconds: $s.healthcheck.timeout, failureThreshold: $s.healthcheck.retries
+      }] end)
+    }'
+}
+
+# northflank_tunnel_body <token file>: cloudflared, pinned like on a VM. Its /ready answers
+# once the tunnel is connected, so the deploy waits for that.
+northflank_tunnel_body() {
+  local image
+  image="$(compose_images "$PROVIDERS_DIR/cloudflare/apps/cloudflared/compose.yaml" | head -1)"
+  jq -Rs --arg image "$(image_name "$image")@${image##*@}" --arg plan "$NF_TUNNEL_PLAN" --arg mark "$NF_MARK" '{
+      name: "cloudflared",
+      description: ($mark + ": the Cloudflare Tunnel connector"),
+      billing: {deploymentPlan: $plan},
+      deployment: {
+        instances: 1,
+        external: {imagePath: $image},
+        docker: {configType: "customCommand", customCommand: "tunnel --no-autoupdate --metrics 0.0.0.0:20241 run"}
+      },
+      ports: [],
+      runtimeEnvironment: {TUNNEL_TOKEN: rtrimstr("\n")},
+      healthChecks: [{protocol: "HTTP", type: "readinessProbe", path: "/ready", port: 20241,
+        initialDelaySeconds: 5, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 6}]
+    }' "$1"
+}
+
+# redact_body: a service body without its secrets, for the dry run
+redact_body() { jq '.runtimeEnvironment |= with_entries(.value = "<redacted>")'; }
+
+# northflank_wait <target> <project> <service...>: wait until the latest deployment of each
+# service is out, and stop with what Northflank says when one doesn't come up
+northflank_wait() {
+  local host="$1" project="$2" s code status running timeout="${FREELUNCH_DEPLOY_TIMEOUT:-180}" deadline; shift 2
+  deadline=$((SECONDS + timeout))
+  # The services start a new deployment right after the update; give it a moment to show.
+  sleep 5
+  for s in "$@"; do
+    while :; do
+      code="$(nf GET "/projects/$project/services/$s")"
+      nf_ok "$code" || die "northflank: can't read the service $s ($code): $(nf_error)"
+      status="$(jq -r '.data.status.deployment.status // "PENDING"' "$TMP/nf.json")"
+      if [[ "$status" == "COMPLETED" ]]; then
+        code="$(nf GET "/projects/$project/services/$s/containers")"
+        running="$(jq -r '[.data.containers[]? | select(.status == "TASK_RUNNING")] | length' "$TMP/nf.json" 2>/dev/null || echo 0)"
+        if [[ "$running" -gt 0 ]]; then log "$host: $s is running"; break; fi
+        status="out, but no container runs ($(jq -r '[.data.containers[]?.status] | unique | join(", ") | ascii_downcase' "$TMP/nf.json" 2>/dev/null))"
+      elif [[ "$status" == "FAILED" ]]; then
+        die "northflank: the deployment of $s failed. Its logs are on app.northflank.com, in the project $project"
+      fi
+      [[ $SECONDS -lt $deadline ]] || die "northflank: $s is still $(tr '[:upper:]' '[:lower:]' <<< "$status") after ${timeout}s (FREELUNCH_DEPLOY_TIMEOUT). Its logs are on app.northflank.com, in the project $project"
+      sleep 5
+    done
+  done
+}
+
+# northflank_deploy <target> <dry run 0|1>: create or update a service per app in the
+# target's project, and cloudflared when it has a tunnel, then wait until they all run
+northflank_deploy() {
+  local host="$1" dry_run="$2" project plan name compose env_file image server cred var digest path code url
+  local services=() creds="" others
+  project="$(jq -r --arg h "$host" '.[$h].id' "$TMP/platforms.json")"
+  plan="$(jq -r --arg h "$host" '.[$h].size' "$TMP/platforms.json")"
+  if [[ "$dry_run" == 1 ]]; then
+    log "$host: would send this to Northflank, project $project (dry run, secrets left out)"
+  else
+    log "$host: deploying to the Northflank project $project"
+    code="$(nf GET "/projects/$project")"
+    case "$code" in
+      404)      die "northflank: there is no project $project yet: freelunch apply northflank makes it" ;;
+      401|403)  die "northflank: Northflank doesn't take NORTHFLANK_API_TOKEN ($code): $(nf_error)" ;;
+    esac
+    nf_ok "$code" || die "northflank: can't look up the project $project ($code): $(nf_error)"
+  fi
+
+  while IFS=$'\t' read -r name compose env_file; do
+    [[ -n "$name" ]] || continue
+    jq --arg h "$host" --arg n "$name" '.[$h].services[$n]' "$TMP/platforms.json" > "$TMP/spec.json"
+    image="$(jq -r '.image' "$TMP/spec.json")"
+    server="$(image_parts "$image" | cut -f1)"
+    cred=""
+    if jq -e --arg s "$server" 'has($s)' "$TMP/registries.json" >/dev/null; then
+      if [[ "$dry_run" == 1 ]]; then
+        echo "save the login to $server for $(jq -r --arg s "$server" '.[$s].username' "$TMP/registries.json") (password from \$$(jq -r --arg s "$server" '.[$s].password_env' "$TMP/registries.json"))"
+        cred="<login to $server>"
+      else
+        # One login per registry, saved once per deploy.
+        cred="$(awk -v s="$server" '$1 == s { print $2 }' <<< "$creds")"
+        if [[ -z "$cred" ]]; then
+          cred="$(northflank_registry "$project" "$server")"
+          creds="$creds$server $cred"$'\n'
+        fi
+      fi
+    fi
+    # Deploying by digest makes a moved tag (:main, :latest) a new deployment too.
+    var="$(jq -r --arg s "$server" '.[$s].password_env // empty' "$TMP/registries.json")"
+    if [[ -n "$var" ]]; then digest="$(image_digest "$image" "$(jq -r --arg s "$server" '.[$s].username' "$TMP/registries.json")" "${!var:-}")"; else digest="$(image_digest "$image")"; fi
+    if [[ -n "$digest" ]]; then path="$(image_name "$image")@$digest"; else path="$image"; log "$host: the registry doesn't say what $image points to, so Northflank pulls the tag again only when something else changes"; fi
+    if [[ -n "$env_file" ]]; then env_json "$env_file" > "$TMP/env.json"; else echo '{}' > "$TMP/env.json"; fi
+    northflank_body "$name" "$plan" "$path" "$cred" "$TMP/spec.json" "$TMP/env.json" > "$TMP/service.json"
+    rm -f "$TMP/env.json"
+    if [[ "$dry_run" == 1 ]]; then
+      echo "PUT /projects/$project/services/deployment"
+      redact_body < "$TMP/service.json"
+    else
+      code="$(nf PUT "/projects/$project/services/deployment" "$TMP/service.json")"
+      nf_ok "$code" || die "northflank: can't update the service $name ($code): $(nf_error)"
+      log "$host: $name: $image${digest:+ = $digest}"
+      services+=("$(jq -r --arg n "$name" '.data.id // $n' "$TMP/nf.json")")
+    fi
+    rm -f "$TMP/service.json"
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // "")] | @tsv' "$TMP/targets.json")
+
+  if [[ "$(jq -r --arg h "$host" '.[$h].tunnel' "$TMP/targets.json")" == "true" ]]; then
+    ( umask 077; jq -r --arg h "$host" '.[$h]' "$TMP/tunnel_tokens.json" > "$TMP/tunnel.token" )
+    northflank_tunnel_body "$TMP/tunnel.token" > "$TMP/service.json"
+    rm -f "$TMP/tunnel.token"
+    if [[ "$dry_run" == 1 ]]; then
+      echo "PUT /projects/$project/services/deployment"
+      redact_body < "$TMP/service.json"
+    else
+      code="$(nf PUT "/projects/$project/services/deployment" "$TMP/service.json")"
+      nf_ok "$code" || die "northflank: can't update cloudflared ($code): $(nf_error)"
+      services+=(cloudflared)
+    fi
+    rm -f "$TMP/service.json"
+  fi
+  [[ "$dry_run" == 0 ]] || return 0
+
+  northflank_wait "$host" "$project" ${services[@]+"${services[@]}"}
+  while IFS= read -r url; do log "$host: $url"; done < <(jq -r --arg h "$host" '.[$h].urls[]' "$TMP/targets.json")
+  # Services nobody listed still count against the free plan's two.
+  code="$(nf GET "/projects/$project/services")"
+  if nf_ok "$code"; then
+    others="$(jq -r '[.data.services[]?.id | select(. as $s | $ARGS.positional | index($s) | not)] | join(", ")' --args ${services[@]+"${services[@]}"} < "$TMP/nf.json")"
+    [[ -z "$others" ]] || log "$host: the project also runs $others, which apps.tfvars doesn't list. They count against the free plan; delete them at app.northflank.com when you don't need them"
+  fi
+  log "$host: done"
+}
+
+# northflank_status <target>: each service in the target's project, and whether it runs
+northflank_status() {
+  local host="$1" project expected code s status running seen=""
+  project="$(jq -r --arg h "$host" '.[$h].id' "$TMP/platforms.json")"
+  expected="$(jq -r --arg h "$host" '.[$h] | (.apps | keys) + (if .tunnel then ["cloudflared"] else [] end) | .[]' "$TMP/targets.json")"
+  echo "Apps on $host (Northflank project $project)"
+  if [[ -z "${NORTHFLANK_API_TOKEN:-}" ]]; then echo "  not asked without NORTHFLANK_API_TOKEN"; return 0; fi
+  code="$(nf GET "/projects/$project/services")"
+  if [[ "$code" == 404 ]]; then echo "  the project isn't at Northflank (freelunch apply northflank makes it)"; return 0; fi
+  nf_ok "$code" || { echo "  can't ask Northflank ($code): $(nf_error)"; return 0; }
+  jq -r '.data.services[]? | [.id, (.status.deployment.status // "PENDING")] | @tsv' "$TMP/nf.json" > "$TMP/nf-services.tsv"
+  while IFS=$'\t' read -r s status; do
+    [[ -n "$s" ]] || continue
+    seen="$seen $s "
+    case "$status" in
+      COMPLETED)
+        code="$(nf GET "/projects/$project/services/$s/containers")"
+        running="$(jq -r '[.data.containers[]? | select(.status == "TASK_RUNNING")] | length' "$TMP/nf.json" 2>/dev/null || echo 0)"
+        if [[ "$running" -gt 0 ]]; then status="running"; else status="not running ($(jq -r '[.data.containers[]?.status] | unique | join(", ") | ascii_downcase' "$TMP/nf.json" 2>/dev/null))"; fi ;;
+      FAILED) status="failed: its last deployment didn't come up" ;;
+      *)      status="deploying" ;;
+    esac
+    printf '  %-20s %s\n' "$s" "$status"
+  done < "$TMP/nf-services.tsv"
+  for s in $expected; do
+    [[ "$seen" == *" $s "* ]] || printf '  %-20s %s\n' "$s" "not deployed yet (freelunch deploy)"
+  done
 }
 
 # --- domain ---------------------------------------------------------------------------
@@ -1834,6 +2328,9 @@ cmd_trust() {
   [[ -z "$PROJECT" ]] || state=(-state="$(hybrid_state)")
   IFS=$'\t' read -r provider id address < <(tf_for hybrid "$ROOT/hybrid" output ${state[@]+"${state[@]}"} -json hosts \
     | jq -r --arg h "$host" '.[] | select("\(.provider)-\(.name)" == $h) | [.provider, .id, (.public_ip // .private_ip // "")] | @tsv') || true
+  if tf_for hybrid "$ROOT/hybrid" output ${state[@]+"${state[@]}"} -json platforms 2>/dev/null | jq -e --arg h "$host" 'any(.[]; "\(.provider)-\(.name)" == $h)' >/dev/null 2>&1; then
+    die "trust: $host is a container platform, which deploy reaches through its API, not SSH, so there is no host key to pin"
+  fi
   [[ -n "${provider:-}" ]] || die "trust: $host is not in the inventory (freelunch inventory lists the hosts)"
   [[ "$provider" == "oci" ]] || die "trust: reading host keys from the console works for OCI hosts so far. For $provider, compare the key deploy shows on first contact with the serial console (docs/deploy-a-container.md#check-the-host-key)"
 
@@ -1953,6 +2450,36 @@ doctor_oci() {
   else
     check fail "profile $profile can't sign in to OCI: $(grep -m1 -E 'message|Error|error' <<< "$out" | sed 's/^[[:space:]]*//')"
   fi
+}
+
+doctor_northflank() {
+  local tfvars id region code regions
+  tfvars="$(config_dir northflank)/terraform.tfvars"
+  id="$(tfvar "$tfvars" name_prefix)"; id="${id:-freelunch}"
+  region="$(tfvar "$tfvars" region)"; region="${region:-europe-west}"
+  echo "Northflank ($(rel "$tfvars"))"
+  # The regions are public: no token needed.
+  regions="$(curl -s --max-time 20 "$NF_API/regions" | jq -r '[.data.regions[]?.id] | join(" ")' 2>/dev/null)" || regions=""
+  if [[ -z "$regions" ]]; then check warn "can't ask Northflank which regions there are"
+  elif [[ " $regions " == *" $region "* ]]; then check ok "region $region exists"
+  else check fail "region $region doesn't exist at Northflank; pick one of: ${regions// /, }"; fi
+  if [[ -z "${NORTHFLANK_API_TOKEN:-}" ]]; then
+    check fail "NORTHFLANK_API_TOKEN is not set: export it or put it in $(rel "$(state_root)")/.env (providers/northflank/README.md#api-token)"
+    return 0
+  fi
+  code="$(nf GET "/projects/$id")"
+  case "$code" in
+    401|403) check fail "Northflank doesn't take NORTHFLANK_API_TOKEN ($code): $(nf_error)" ;;
+    404)
+      check ok "NORTHFLANK_API_TOKEN signs in"
+      if is_deployed northflank; then check fail "the project $id is gone from Northflank: freelunch apply northflank makes it again"
+      else check ok "there is no project $id yet; freelunch apply northflank makes it"; fi ;;
+    2??)
+      check ok "NORTHFLANK_API_TOKEN signs in"
+      if nf_mine "$(jq -r '.data.description // ""' "$TMP/nf.json")"; then check ok "the project $id is there"
+      else check fail "there is a project $id that freelunch didn't make, so apply would stop: pick another name_prefix"; fi ;;
+    *) check fail "can't reach Northflank ($code): $(nf_error)" ;;
+  esac
 }
 
 # public_keys <file>: the SSH public keys in a file, as "type base64", without comments
@@ -2093,6 +2620,7 @@ cmd_doctor() {
   doctor_config
   if [[ ${#ENV_REFS[@]} -gt 0 ]]; then echo "Secrets ($(rel "$(state_root)")/.env)"; resolve_env_refs report; fi
   if [[ -d "$(stack_dir oci)" ]] && is_configured oci; then doctor_oci; fi
+  if [[ -d "$(stack_dir northflank)" ]] && is_configured northflank; then doctor_northflank; fi
   doctor_ssh
   doctor_images
   doctor_cloudflare

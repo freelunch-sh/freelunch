@@ -3,7 +3,7 @@
 # the others, and no provider credentials are needed here.
 
 data "terraform_remote_state" "provider" {
-  for_each = toset(var.host_providers)
+  for_each = toset(concat(var.host_providers, var.platform_providers))
 
   backend = try(var.state_overrides[each.key].backend, "local")
   config = try(var.state_overrides[each.key].config, {
@@ -17,4 +17,6 @@ locals {
   }
 
   hosts = flatten([for p in var.host_providers : local.hosts_by_provider[p]])
+
+  platforms = flatten([for p in var.platform_providers : try(data.terraform_remote_state.provider[p].outputs.platforms, [])])
 }

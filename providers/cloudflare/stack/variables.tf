@@ -19,7 +19,9 @@ variable "routes" {
   description = <<-EOT
     Public hostname -> inventory host and local port, e.g.
     { "api.example.com" = { host = "oci-main", port = 8080 } }.
-    host is <provider>-<instance> from `freelunch inventory`. Add
+    host is <provider>-<instance> from `freelunch inventory`. On a container
+    platform such as northflank-main, add app = "<name>", the app in apps.tfvars
+    that serves the hostname, and port is the port its container listens on. Add
     access = { emails = ["you@example.com"] } to require an email login, or
     access = { service_tokens = ["backend"] } to let only clients with that
     token through.
@@ -27,6 +29,7 @@ variable "routes" {
   type = map(object({
     host   = string
     port   = number
+    app    = optional(string)
     scheme = optional(string, "http")
     access = optional(object({
       emails         = optional(list(string), [])
@@ -34,6 +37,11 @@ variable "routes" {
       service_tokens = optional(list(string), [])
     }))
   }))
+
+  validation {
+    condition     = alltrue([for r in var.routes : r.app == null || can(regex("^[a-z0-9][a-z0-9_-]*$", coalesce(r.app, "x")))])
+    error_message = "app is the name of an app in apps.tfvars, e.g. api."
+  }
 }
 
 variable "service_token_duration" {

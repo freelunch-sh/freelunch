@@ -30,12 +30,16 @@ browser ── https://api.example.com ──> Cloudflare edge ──tunnel─�
                                                                         └─> http://localhost:8080 ──> your app
 ```
 
+On a container platform such as `northflank-main`, `cloudflared` runs as a service next to
+the app's and reaches it by name over the platform's private network (`http://api:8080`),
+so no port is public there either.
+
 | Piece | Where it comes from |
 |---|---|
 | Tunnel per host, ingress rules | this stack (`modules/tunnel`) |
 | Proxied `CNAME api.example.com → <tunnel>.cfargotunnel.com` | this stack |
 | Access app with an email login, service tokens, or both (optional) | this stack |
-| `cloudflared` container on the host | `freelunch deploy`, from [`apps/cloudflared/compose.yaml`](apps/cloudflared/compose.yaml) |
+| `cloudflared` container on the host | `freelunch deploy`, from [`apps/cloudflared/compose.yaml`](apps/cloudflared/compose.yaml); a service of its own on a platform |
 | Tunnel token on the host | `freelunch deploy` writes it to `/opt/freelunch/apps/cloudflared/.env` |
 
 Host stacks never see Cloudflare credentials, and the token is not in cloud-init, where it
@@ -48,8 +52,9 @@ user with no capabilities, no privilege escalation and a read-only filesystem.
 1. A domain whose DNS is on Cloudflare (a free plan zone). It can be a free name such as
    `myapp.dpdns.org`: see [docs/free-domains.md](../../docs/free-domains.md).
 2. An API token, see below.
-3. A host stack applied first (for example `freelunch apply oci`): every route names a host
-   from the inventory, and the plan fails if it doesn't exist.
+3. A host or platform stack applied first (for example `freelunch apply oci` or
+   `freelunch apply northflank`): every route names a host from the inventory, and the plan
+   fails if it doesn't exist.
 
 ### API token
 
@@ -113,7 +118,8 @@ services:
 |---|---|---|
 | key | (required) | Full hostname inside `zone`, e.g. `api.example.com` |
 | `host` | (required) | Inventory host, `<provider>-<instance>` (`freelunch inventory` lists them) |
-| `port` | (required) | Port on the host's loopback |
+| `port` | (required) | Port on the host's loopback, or on a platform the port the app's container listens on |
+| `app` | none | The app in `apps.tfvars` that serves the hostname. Needed on a platform such as `northflank-main`, where cloudflared reaches it at `<app>:<port>`; a VM ignores it |
 | `scheme` | `http` | `https` if the app itself serves TLS |
 | `access` | none | `{ emails = [...], email_domains = [...] }`: require a login through Cloudflare Access (one-time PIN by email). `service_tokens = [...]`: let machine clients in with a service token ([below](#service-tokens-for-machine-clients)) |
 
@@ -212,7 +218,7 @@ bin/freelunch test
 | Suite | Covers |
 |---|---|
 | `modules/tunnel/tests/tunnel.tftest.hcl` | One tunnel per host, ingress per route with the catch-all last, proxied CNAMEs, tokens per host, Access only where asked, service tokens under a Service Auth policy, input validation |
-| `stack/tests/plan.tftest.hcl` | Zone and account lookup by name, routes must point at inventory hosts and stay inside the zone |
+| `stack/tests/plan.tftest.hcl` | Zone and account lookup by name, routes must point at inventory hosts and stay inside the zone, routes to a platform go to `<app>:<port>` and need `app` |
 
 ## Roadmap
 

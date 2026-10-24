@@ -83,3 +83,46 @@ run "hostnames_outside_the_zone_fail_the_plan" {
 
   expect_failures = [terraform_data.checks]
 }
+
+# On a container platform, cloudflared runs as a service next to the apps and reaches each
+# one by its service name.
+run "routes_to_a_platform_reach_the_app_by_name" {
+  command = plan
+
+  variables {
+    routes = {
+      "api.example.com" = { host = "northflank-main", app = "api", port = 8080 }
+      "www.example.com" = { host = "oci-main", app = "web", port = 3000 }
+    }
+  }
+
+  assert {
+    condition     = module.tunnel.routes["api.example.com"] == { host = "northflank-main", service = "http://api:8080", protected = false }
+    error_message = "A route to a platform should go to <app>:<port>."
+  }
+
+  assert {
+    condition     = module.tunnel.routes["www.example.com"].service == "http://localhost:3000"
+    error_message = "On a VM, app changes nothing: cloudflared runs with host networking."
+  }
+}
+
+run "routes_to_a_platform_need_the_app" {
+  command = plan
+
+  variables {
+    routes = { "api.example.com" = { host = "northflank-main", port = 8080 } }
+  }
+
+  expect_failures = [terraform_data.checks]
+}
+
+run "platforms_without_cloudflared_get_no_routes" {
+  command = plan
+
+  variables {
+    routes = { "api.example.com" = { host = "cloud-run-main", app = "api", port = 8080 } }
+  }
+
+  expect_failures = [terraform_data.checks]
+}
