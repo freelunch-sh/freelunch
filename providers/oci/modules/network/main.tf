@@ -8,6 +8,12 @@ resource "oci_core_vcn" "this" {
   cidr_blocks    = [var.vcn_cidr]
   dns_label      = substr(replace(var.name, "-", ""), 0, 15)
   freeform_tags  = local.freeform_tags
+
+  lifecycle {
+    # OCI can't change a VCN's DNS label, so a new name would replace the VCN and
+    # everything in it, hosts included. A renamed project keeps the label it started with.
+    ignore_changes = [dns_label]
+  }
 }
 
 resource "oci_core_internet_gateway" "this" {

@@ -11,7 +11,7 @@ anywhere, ICMP type 3 code 4 (path MTU discovery), and all egress.
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `compartment_id` | string | (required) | Compartment OCID |
-| `name` | string | `freelunch` | Name prefix; also the VCN DNS label (hyphens removed, max 15 chars) |
+| `name` | string | `freelunch` | Name prefix; also the VCN DNS label (hyphens removed, max 15 chars). A VCN keeps the label it was created with, so a new name renames it instead of replacing it |
 | `vcn_cidr` | string | `10.0.0.0/16` | VCN CIDR |
 | `subnet_cidr` | string | `10.0.1.0/24` | Public subnet CIDR |
 | `ssh_source_cidrs` | list(string) | `["0.0.0.0/0"]` | Who may reach port 22; `[]` closes SSH |

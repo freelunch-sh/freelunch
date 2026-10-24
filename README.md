@@ -141,7 +141,7 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 | `freelunch list` | Every provider with category, status, layer, IaC support and deployment state |
 | `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts → services → hybrid → glue). `plan --show-user-data` prints each host's cloud-init with secrets left out, `plan --out <file>` saves a plan and `apply --plan <file>` applies it without a prompt. `apply --wait-for-capacity` retries hosts while OCI is out of capacity, `--detach` in the background ([how](providers/oci/README.md#waiting-for-capacity)) |
 | `freelunch status` | One screen after setup: hosts and addresses, the apps on each host and whether they run, tunnels and their URLs, service token expiry, capacity waits |
-| `freelunch doctor` | Check what plan, apply and deploy will need before they run: tools, the OCI sign-in and home region, SSH keys, images and registry logins, the Cloudflare token, its permissions and the zone |
+| `freelunch doctor` | Check what plan, apply and deploy will need before they run: tools, the OCI sign-in, home region and the VCNs and A1 cores the tenancy has left, SSH keys, images and registry logins, the Cloudflare token, its permissions and the zone. It changes nothing |
 | `freelunch hybrid` | Re-aggregate deployed host stacks |
 | `freelunch inventory` | Write `inventory.json` |
 | `freelunch output <stack> [name]` | Print a stack's outputs from its state, e.g. `output cloudflare -json service_tokens` or `output hybrid -raw ssh_config` |
