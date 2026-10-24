@@ -85,7 +85,8 @@ on the same accounts don't clash.
 ```
 
 Commit `.freelunch/` except what its `.gitignore` excludes. State, tfvars and secrets stay
-on your machine (remote state is on the roadmap). The first `plan` or `apply` of a stack also
+on your machine. To run the project from CI or another machine as well, keep an encrypted
+copy of the state in a store ([Run freelunch from CI](ci.md)). The first `plan` or `apply` of a stack also
 writes `.freelunch/<stack>/.terraform.lock.hcl` with the provider versions and their checksums.
 Commit it too: every machine and CI run then installs the same provider builds, and refuses
 a download that doesn't match.
@@ -145,8 +146,16 @@ freelunch status
 `plan --out` says when the plan replaces or destroys something, which is easy to miss in a
 long plan. With a session token the wait refreshes the session before each attempt, but the
 session still ends (the wait says when), so for a longer wait use an API key. On a Mac,
-`--detach` keeps the Mac awake until the wait ends. See
-[Waiting for capacity](../providers/oci/README.md#waiting-for-capacity).
+`--detach` keeps the Mac awake until the wait ends, as long as the lid is open: a laptop that
+sleeps makes no attempts. A wait can take days, so hand it to GitHub Actions instead, with the
+same reviewed plan:
+
+```bash
+freelunch ci wait oci --plan .freelunch/oci/reviewed.tfplan
+```
+
+Each scheduled run makes one attempt until the VM exists ([how](ci.md#4-wait-for-capacity-in-github-actions)).
+See [Waiting for capacity](../providers/oci/README.md#waiting-for-capacity) for the rest.
 
 When it finishes, `apply` prints the VM's address and the steps left before your app runs
 on it, and `freelunch inventory` lists the host as `oci-main`.
@@ -345,7 +354,8 @@ A tag can be moved to a different build later. To deploy exactly the build you t
 add its digest, which `deploy` prints: `image: ghcr.io/you/api:1.4.3@sha256:…`. Docker then
 pulls by digest and refuses any other content. freelunch pins `cloudflared` the same way.
 
-`freelunch deploy oci-main` deploys one host and `freelunch deploy oci` all OCI hosts.
+`freelunch deploy oci-main` deploys one host and `freelunch deploy oci` all OCI hosts. To
+deploy from CI after each new image, see [Run freelunch from CI](ci.md#5-deploy-from-github-actions).
 
 ## 8. Tear down
 
@@ -470,6 +480,9 @@ as `myapp-oci-main`. The machine you deploy from has to be on the same tailnet.
 | `500-InternalError, Out of host capacity` | OCI has no free Arm capacity right now. `freelunch apply oci --wait-for-capacity` keeps trying |
 | `session expired. Sign in again: ...` | Run the command it prints, then the one that stopped. A session ends hours after you sign in (`freelunch doctor` says when); an API key doesn't expire (`oci setup bootstrap`) |
 | `401-NotAuthenticated` from OCI | A new API key can take a few minutes to work everywhere, and until then a plan stops halfway: wait and run it again. Otherwise check `user`, `fingerprint` and `key_file` in the profile in `~/.oci/config`, and that `oci_config_profile` names it. `freelunch doctor` shows OCI's answer |
+| `401-NotAuthenticated, Date ... is not within allowed clock skew` | The machine slept between signing a request and sending it. A wait for capacity retries it; anything else, run it again |
+| `Saved plan is stale` | The state changed after the plan was made. `apply --plan <file> --wait-for-capacity` goes on with what the plan does; a plain `apply --plan` needs a new plan |
+| `state: oci changed both here ... and in the store` | Two machines changed the stack at the same time ([what to do](ci.md#how-the-copies-stay-in-step)) |
 | `400-LimitExceeded ... vcn-count` | The tenancy's other VCNs count too (two are free). OCI goes on counting a deleted one for a few minutes, so after a destroy or a replacement, wait before you plan again. `freelunch doctor` shows how many are left |
 | `deploy` waits for SSH and gives up | The VM's public IP in `freelunch inventory`, `ssh_source_cidrs`, and your key (`FREELUNCH_SSH_KEY`) |
 | `Permission denied (publickey)` | The key in `ssh_public_keys` must match the one `deploy` uses |

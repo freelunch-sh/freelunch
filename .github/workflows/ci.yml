@@ -64,6 +64,17 @@ jobs:
           bin/freelunch catalog
           git diff --exit-code || { echo "::error::run bin/freelunch catalog and commit the result"; exit 1; }
 
+  # The action that projects' workflows use (action.yml), with the version CI tests
+  action:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: the action runs the CLI
+        uses: ./
+        with:
+          run: list
+          version: ${{ env.TOFU_VERSION }}
+
   image:
     runs-on: ubuntu-24.04
     steps:

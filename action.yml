@@ -1,0 +1,52 @@
+# freelunch as a GitHub Action: runs a freelunch command in a job, with the project's state
+# from its state store and the files git doesn't have from the FREELUNCH_BUNDLE secret.
+# freelunch ci init writes workflows that use it; docs/ci.md has the rest.
+name: freelunch
+description: Run freelunch in a workflow, with the project's state store and the FREELUNCH_BUNDLE secret
+branding:
+  icon: cloud
+  color: green
+
+inputs:
+  run:
+    description: The freelunch command to run, e.g. deploy, status or ci resume
+    required: true
+  bundle:
+    description: The FREELUNCH_BUNDLE secret (freelunch ci secrets makes it)
+    required: false
+    default: ""
+  tool:
+    description: tofu or terraform, whichever the project uses
+    required: false
+    default: tofu
+  version:
+    description: Its version, the same as on the machine you work on; empty for the latest
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - if: inputs.tool == 'tofu'
+      uses: opentofu/setup-opentofu@v2
+      with:
+        tofu_version: ${{ inputs.version || 'latest' }}
+        tofu_wrapper: false
+    - if: inputs.tool == 'terraform'
+      uses: hashicorp/setup-terraform@v4
+      with:
+        terraform_version: ${{ inputs.version || 'latest' }}
+        terraform_wrapper: false
+    - shell: bash
+      env:
+        FREELUNCH_BUNDLE: ${{ inputs.bundle }}
+        FREELUNCH_TF: ${{ inputs.tool }}
+        FREELUNCH_RUN: ${{ inputs.run }}
+        # For ci resume, which turns the wait workflow off once the wait is over
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        freelunch="$GITHUB_ACTION_PATH/bin/freelunch"
+        if [ -n "$FREELUNCH_BUNDLE" ]; then "$freelunch" ci restore; fi
+        read -ra args <<< "$FREELUNCH_RUN"
+        "$freelunch" "${args[@]}"

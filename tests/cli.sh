@@ -7,6 +7,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLI="$ROOT/bin/freelunch"
+# The suite runs the same here and in CI: none of the CI system's variables, and none of
+# freelunch's state store or CI settings from your shell.
+unset CI GITHUB_ACTIONS GITHUB_WORKFLOW_REF GITHUB_RUN_NUMBER GITHUB_STEP_SUMMARY GITLAB_CI CI_PIPELINE_IID \
+  FREELUNCH_BUNDLE FREELUNCH_WAIT_ATTEMPT FREELUNCH_SSH_STRICT
+for v in $(compgen -v FREELUNCH_STATE_); do unset "$v"; done
+# The tofu/terraform the CLI would use, for the state store runs the fake one hands on
+REAL_TF="${FREELUNCH_TF:-$(command -v tofu || command -v terraform || true)}"
+REAL_TF="$(command -v "$REAL_TF" || true)"
+export REAL_TF
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 passed=0
@@ -49,17 +58,35 @@ EOF
 ssh-keygen -q -t ed25519 -N '' -C fake-host -f "$WORK/hostkey"
 printf '#!/bin/sh\nexit 0\n' > "$WORK/bin/cloud-init"
 # Records the arguments a stack run gets instead of running tofu/terraform. Like them, init
-# writes the dependency lock file next to the code (FAKE_LOCK is its content).
+# writes the dependency lock file next to the code (FAKE_LOCK is its content), and apply
+# writes the state: its serial goes up, unless the saved plan was stale.
 # FAKE_APPLY says how each apply in turn ends: ok, or the OCI errors it prints, e.g.
 # "capacity busy ok" or "capacity+limit". plan -out=<file> saves FAKE_PLAN there, as the
 # JSON that show -json prints; by default a plan that only creates an instance. It logs the
 # mode of a plan file that is there before it writes it. With FAKE_PLAN_AUTH, the plan gets
-# 401s halfway and fails, but saves what it has, like tofu/terraform.
+# 401s halfway and fails, but saves what it has, like tofu/terraform. FAKE_PLANS says how
+# each plan in turn ends: ok, or the error it fails with, e.g. "timeout skew ok".
+# The version and the CLI's state store runs (in a folder with a backend.tfbackend) go to
+# the real tofu/terraform, REAL_TF.
 cat > "$WORK/bin/fake-tf" <<'EOF'
 #!/usr/bin/env bash
 echo "TF_DATA_DIR=${TF_DATA_DIR:-} $*" >> "$FAKE_LOG"
 dir="${1#-chdir=}"
+if [[ "$1" == "version" || -f "$dir/backend.tfbackend" ]]; then exec "$REAL_TF" "$@"; fi
 creates='{"resource_changes":[{"address":"oci_core_instance.this","change":{"actions":["create"]}}]}'
+oci_error() {
+  case "$1" in
+    capacity) echo "│ Error: 500-InternalError, Out of host capacity." ;;
+    busy)     echo "│ Error: 429-TooManyRequests, Too many requests for the user" ;;
+    auth)     echo "│ Error: 401-NotAuthenticated, The required information to complete authentication was not provided or was incorrect." ;;
+    limit)    echo "│ Error: 400-LimitExceeded, The following service limits were exceeded: standard-a1-core-count" ;;
+    vcns)     echo "│ Error: 400-LimitExceeded, The following service limits were exceeded: vcn-count. Request a service limit increase from the service limits page in the console." ;;
+    skew)     echo "│ Error: 401-NotAuthenticated, Date 'Sat, 24 Oct 2026 01:52:50 UTC' is not within allowed clock skew. Current 'Sat, 24 Oct 2026 06:57:39 UTC'" ;;
+    timeout)  echo "│ Error: Get \"https://iaas.uk-london-1.oraclecloud.com/20160918/shapes?compartmentId=x\": read tcp 10.0.0.2:50123->134.70.1.1:443: read: operation timed out" ;;
+    post)     echo "│ Error: Post \"https://iaas.uk-london-1.oraclecloud.com/20160918/instances\": read tcp 10.0.0.2:50124->134.70.1.1:443: read: connection reset by peer" ;;
+    stale)    echo "│ Error: Saved plan is stale" ;;
+  esac
+}
 case "${2:-}" in
   init)
     echo "lock before init: $(cat "$dir/.terraform.lock.hcl" 2>/dev/null || echo none)" >> "$FAKE_LOG"
@@ -69,17 +96,13 @@ case "${2:-}" in
     echo "$n" > "$FAKE_LOG.applies"
     read -ra ends <<< "${FAKE_APPLY:-ok}"
     end="${ends[n-1]:-ok}"
+    for a; do
+      state="${a#-state=}"
+      if [[ "$a" == -state=* && -f "$state" && "$end" != "stale" ]]; then jq '.serial += 1' "$state" > "$state.new" && mv "$state.new" "$state"; fi
+    done
     [[ "$end" != "ok" ]] || exit 0
     IFS=+ read -ra errors <<< "$end"
-    for e in "${errors[@]}"; do
-      case "$e" in
-        capacity) echo "│ Error: 500-InternalError, Out of host capacity." ;;
-        busy)     echo "│ Error: 429-TooManyRequests, Too many requests for the user" ;;
-        auth)     echo "│ Error: 401-NotAuthenticated, The required information to complete authentication was not provided or was incorrect." ;;
-        limit)    echo "│ Error: 400-LimitExceeded, The following service limits were exceeded: standard-a1-core-count" ;;
-        vcns)     echo "│ Error: 400-LimitExceeded, The following service limits were exceeded: vcn-count. Request a service limit increase from the service limits page in the console." ;;
-      esac
-    done
+    for e in "${errors[@]}"; do oci_error "$e"; done
     exit 1 ;;
   plan)
     for a; do
@@ -92,6 +115,11 @@ case "${2:-}" in
       echo "Plan: 5 to add, 0 to change, 5 to destroy."
       exit 1
     fi
+    n=$(( $(cat "$FAKE_LOG.plans" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$FAKE_LOG.plans"
+    read -ra ends <<< "${FAKE_PLANS:-ok}"
+    end="${ends[n-1]:-ok}"
+    if [[ "$end" != "ok" ]]; then oci_error "$end"; exit 1; fi
     echo "Plan: 1 to add, 0 to change, 0 to destroy." ;;
   show)
     for a; do plan="$a"; done
@@ -139,6 +167,18 @@ case "$1 ${2:-}" in
     exit 0 ;;
   "iam availability-domain")
     echo '{"data": [{"name": "Xyz:EU-FRANKFURT-1-AD-1"}, {"name": "Xyz:EU-FRANKFURT-1-AD-2"}, {"name": "Xyz:EU-FRANKFURT-1-AD-3"}]}'
+    exit 0 ;;
+  # Object Storage: the namespace axyz, and a bucket that exists once it was created
+  "os ns")
+    if [[ "$3" == "get" ]]; then echo '{"data": "axyz"}'; else echo '{"data": {"default-s3-compartment-id": "ocid1.compartment.oc1..s3", "namespace": "axyz"}}'; fi
+    exit 0 ;;
+  "os bucket")
+    if [[ "$3" == "create" ]]; then touch "$FAKE_LOG.bucket"; echo '{"data": {}}'; exit 0; fi
+    [[ -f "$FAKE_LOG.bucket" ]] && exit 0
+    printf 'ServiceError:\n{"code": "BucketNotFound", "message": "Either the bucket does not exist or you are not authorized", "status": 404}\n' >&2
+    exit 1 ;;
+  "iam customer-secret-key")
+    echo '{"data": {"id": "ak-from-oci", "key": "sk-from-oci", "lifecycle-state": "ACTIVE"}}'
     exit 0 ;;
   "limits resource-availability")
     for a; do
@@ -192,6 +232,34 @@ echo "post $a [$type] $body" >> "$FAKE_LOG"
 EOF
 chmod +x "$WORK/wait-bin/"*
 mkdir -p "$WORK/doctor-bin" && ln -s "$WORK/wait-bin/oci" "$WORK/doctor-bin/oci"
+# A machine that sleeps through every pause: sleep moves the clock that date +%s shows on,
+# by the pause and FAKE_SLEPT seconds more.
+mkdir -p "$WORK/sleepy-bin"
+cat > "$WORK/sleepy-bin/sleep" <<'EOF'
+#!/usr/bin/env bash
+echo "sleep $*" >> "$FAKE_LOG"
+echo $(( $(cat "$FAKE_LOG.clock" 2>/dev/null || echo 0) + ${1%.*} + ${FAKE_SLEPT:-0} )) > "$FAKE_LOG.clock"
+EOF
+cat > "$WORK/sleepy-bin/date" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "+%s" ]]; then echo $(( $(/bin/date +%s) + $(cat "$FAKE_LOG.clock" 2>/dev/null || echo 0) )); else exec /bin/date "$@"; fi
+EOF
+# A gh that logs what it is asked. The repository is me/shop, with the visibility in
+# FAKE_VISIBILITY (PRIVATE by default), and a secret it sets lands in $FAKE_GH/<name>.
+mkdir -p "$WORK/gh-bin"
+cat > "$WORK/gh-bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "gh $*" >> "$FAKE_LOG"
+case "$1 $2" in
+  "repo view")
+    if [[ "$*" == *visibility* ]]; then echo "${FAKE_VISIBILITY:-PRIVATE}"; else echo "me/shop"; fi ;;
+  "secret set")
+    mkdir -p "$FAKE_GH" && cat > "$FAKE_GH/$3" ;;
+  "workflow enable"|"workflow disable"|"workflow run") ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$WORK/sleepy-bin/"* "$WORK/gh-bin/gh"
 mkdir -p "$WORK/nf-bin" && ln -s "$WORK/wait-bin/sleep" "$WORK/nf-bin/sleep"
 # Secret stores: 1Password's op knows op://Private/GHCR/token, the macOS keychain knows
 # freelunch-cloudflare. Both log what they are asked.
@@ -1996,7 +2064,7 @@ test_init_again_updates_an_older_project() {
   printf 'apps = {\n  sidecar = {\n    host    = "oci-main"\n    compose = "../poc/sidecar/compose.yaml"\n  }\n  web = { host = "oci-main", compose = "../web/compose.yaml" }\n}\n' > "$p/.freelunch/apps.tfvars"
   touch "$p/poc/sidecar/compose.yaml"
   out="$(cd "$p" && "$CLI" init oci 2>&1)"
-  contains "$out" "added to .freelunch/.gitignore: */terraform.tfstate.* */.terraform/ *.env inventory.json known_hosts */wait.log */wait.state *.tfplan"
+  contains "$out" "added to .freelunch/.gitignore: */terraform.tfstate.* */.terraform/ *.env inventory.json known_hosts */wait.log */wait.state */approved.json *.tfplan"
   contains "$out" "kept .freelunch/apps.tfvars"
   equals "$(head -1 "$p/.freelunch/.gitignore")" "# mine"
   git -C "$p" init -q
@@ -2036,7 +2104,407 @@ test_doctor_before_the_hosts_exist() {
   absent "$p/.freelunch/hybrid"
 }
 
+# A machine that sleeps between signing a request and sending it gets a 401 for the clock
+# skew, and one that has just woken may have no network yet. Planning writes nothing, so
+# both are retried there; while applying, so are a clock skew and a failed read. A failed
+# write is not: what it was writing may exist now.
+test_capacity_retries_transient_errors() {
+  local p="$WORK/transient" out
+  capacity_project "$p"
+  out="$(FAKE_APPLY="capacity ok" FAKE_PLANS="timeout skew ok" apply_in "$p" oci --wait-for-capacity 2>&1)"
+  contains "$out" "oci: OCI couldn't be reached (read: operation timed out); attempt 3 in"
+  contains "$out" "oci: OCI turned down a request signed before the machine slept and sent after it woke (clock skew); attempt 4 in"
+  contains "$out" "oci: applied on attempt 4"
+  rm "$p/fake.log"*
+  out="$(FAKE_APPLY="capacity timeout skew ok" apply_in "$p" oci --wait-for-capacity 2>&1)"
+  contains "$out" "oci: applied on attempt 4"
+  rm "$p/fake.log"*
+  if out="$(FAKE_APPLY="capacity post" apply_in "$p" oci --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "not for lack of capacity, so it is not retried"
+  # The first attempt of a wait you approve at the prompt may fail before you did.
+  rm "$p/fake.log"*
+  FAKE_APPLY="skew ok" fails apply_in "$p" oci --wait-for-capacity
+  fails grep -q '^sleep ' "$p/fake.log"
+}
+
+# An attempt that made part of the reviewed plan leaves the plan stale. The wait plans again
+# and goes on with the rest, and so does a wait started again with the same plan, without
+# a new review.
+test_reviewed_plan_goes_on_when_stale() {
+  local p="$WORK/stale" out
+  capacity_project "$p"
+  FAKE_PLAN="$(plan_with "module.network.oci_core_vcn.this create" 'oci_core_instance.this["main"] create')" \
+    freelunch_in "$p" plan oci --out .freelunch/oci/reviewed.tfplan
+  rm "$p/fake.log"*
+  out="$(FAKE_APPLY="stale ok" FAKE_PLAN="$(plan_with 'oci_core_instance.this["main"] create')" \
+    freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity < /dev/null 2>&1)"
+  contains "$out" "oci: the state changed since the plan was reviewed (an earlier attempt made part of it), so attempt 1 plans again and applies only what the reviewed plan does"
+  contains "$out" "oci: attempt 1: Plan: 1 to add"
+  fails grep -q '^sleep ' "$p/fake.log"
+  equals "$(grep -c '/stack apply ' "$p/fake.log")" 2
+  # Still nothing the reviewed plan doesn't do.
+  rm "$p/fake.log"*
+  if out="$(FAKE_APPLY="stale ok" FAKE_PLAN="$(plan_with 'oci_core_instance.this["extra"] create')" \
+    freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity < /dev/null 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "changes what the reviewed plan doesn't: oci_core_instance.this[\"extra\"] (create)"
+}
+
+# A closed lid stops a wait for hours, with no attempts meanwhile; the wait says so.
+test_wait_notices_a_sleeping_machine() {
+  local p="$WORK/sleepy" out
+  capacity_project "$p"
+  out="$(cd "$p" && HOME="$p/home" PATH="$WORK/sleepy-bin:$WORK/wait-bin:$PATH" FAKE_LOG="$p/fake.log" FAKE_SLEPT=18000 \
+    FREELUNCH_TF="$WORK/bin/fake-tf" FAKE_APPLY="capacity ok" "$p-checkout/bin/freelunch" apply oci --wait-for-capacity 2>&1)"
+  contains "$out" "oci: this machine slept for 5h 0m of that pause, with no attempts meanwhile. A long wait needs a machine that stays on: freelunch ci wait oci hands it to GitHub Actions (docs/ci.md)"
+  out="$(FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity 2>&1)"
+  lacks "$out" "slept"
+}
+
+# approve <dir> "<address> <actions> [availability domain]"...: an approval of those changes
+# for the project's oci stack, as freelunch ci wait writes it
+approve() {
+  local dir="$1"; shift
+  plan_with "$@" | jq --arg t "$(sha256 "$dir/.freelunch/oci/terraform.tfvars")" \
+    '{stack: "oci", made: "2026-10-24T10:00:00Z", plan: "reviewed.tfplan", tfvars: $t, changes: [.resource_changes[] | {address, actions: .change.actions}]}' \
+    > "$dir/.freelunch/oci/approved.json"
+}
+sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+
+# A run that goes on with an earlier run's wait starts at that run's attempt, in the
+# availability domain that goes with it, and where FREELUNCH_CAPACITY_TIMEOUT ends it, it
+# pauses: exit status 75, and no notification.
+test_wait_goes_on_from_an_earlier_run() {
+  local p="$WORK/resume" out rc=0 main
+  capacity_project "$p"
+  approve "$p" 'oci_core_instance.this["main"] create'
+  main="$(plan_with 'oci_core_instance.this["main"] create Xyz:EU-FRANKFURT-1-AD-1')"
+  out="$(FREELUNCH_WAIT_ATTEMPT=7 FREELUNCH_CAPACITY_TIMEOUT=0 FAKE_APPLY=capacity FAKE_PLAN="$main" \
+    apply_in "$p" oci --plan .freelunch/oci/approved.json --wait-for-capacity 2>&1)" || rc=$?
+  equals "$rc" 75
+  grep -q -- "/stack plan .*-var=availability_domain_offset=6$" "$p/fake.log"
+  contains "$out" "oci: out of host capacity in EU-FRANKFURT-1-AD-1 on attempt 7; the next run goes on with attempt 8"
+  grep -qx 'state=paused' "$p/.freelunch/oci/wait.state"
+  fails grep -q '^desktop: ' "$p/fake.log"
+  contains "$(freelunch_in "$p" status)" "oci: paused "
+  # The next run gets the host, and says so.
+  rm "$p/fake.log"*
+  FREELUNCH_WAIT_ATTEMPT=8 FREELUNCH_CAPACITY_TIMEOUT=0 FAKE_PLAN="$main" apply_in "$p" oci --plan .freelunch/oci/approved.json --wait-for-capacity
+  grep -q '^desktop: oci: got the host on attempt 8 in EU-FRANKFURT-1-AD-1' "$p/fake.log"
+  # An approval goes with the tfvars it was made with, and with a wait only.
+  echo '# changed' >> "$p/.freelunch/oci/terraform.tfvars"
+  if out="$(FREELUNCH_WAIT_ATTEMPT=9 FAKE_PLAN="$main" apply_in "$p" oci --plan .freelunch/oci/approved.json --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "has changed since the plan was approved"
+  if out="$(apply_in "$p" oci --plan .freelunch/oci/approved.json 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "goes with --wait-for-capacity"
+  # Going on from another run takes a reviewed plan or an approval.
+  FREELUNCH_WAIT_ATTEMPT=3 fails apply_in "$p" oci --wait-for-capacity
+}
+
+# state_store <dir>: a state store for a project: a folder stands in for the bucket
+# (<dir>-store), through the local backend, with a passphrase when the tool can encrypt
+state_store() {
+  mkdir -p "$1-store"
+  printf '# A folder stands in for the bucket.\npath = "%s/{stack}.tfstate"\n' "$1-store" > "$1/.freelunch/state.local.tfbackend"
+  if CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu; then
+    echo "FREELUNCH_STATE_PASSPHRASE=correct horse battery staple" >> "$1/.freelunch/.env"
+  else
+    echo "FREELUNCH_STATE_PASSPHRASE=none" >> "$1/.freelunch/.env"
+  fi
+}
+
+# with_ip <state file> <ip>: the state as an apply that moved oci-main to <ip> leaves it
+with_ip() { jq --arg ip "$2" '.serial += 1 | .outputs.hosts.value[0].public_ip = $ip' "$1" > "$1.new" && mv "$1.new" "$1"; }
+
+# With a state store, a command starts from the store's copy of each stack's state when it
+# is newer, and one that applies copies it back, so another machine sees what one did. Two
+# that changed the same stack at once are stopped, not merged.
+test_state_store_keeps_a_copy_of_each_stack() {
+  local p="$WORK/store" q="$WORK/store-clone" out
+  new_project "$p"
+  state_store "$p"
+  out="$(in_dir "$p" "$CLI" state 2>&1)"
+  contains "$out" "  oci          here only (serial 1); freelunch state push copies it to the store"
+  out="$(in_dir "$p" "$CLI" state push 2>&1)"
+  contains "$out" "oci: copied the state to the store"
+  contains "$out" "cloudflare: copied the state to the store"
+  exists "$p-store/oci.tfstate"
+  if grep -q OpenTofu <<< "$(CHECKPOINT_DISABLE=1 "$REAL_TF" version)"; then
+    fails grep -q '203.0.113.10' "$p-store/oci.tfstate"
+    contains "$(in_dir "$p" "$CLI" state 2>&1)" "encrypted)"
+  fi
+  contains "$(in_dir "$p" "$CLI" state 2>&1)" "  oci          in step (serial"
+  # Another clone, with the files git has and those the bundle brings, but no state.
+  mkdir -p "$q"
+  cp -R "$p/.freelunch" "$p/compose.yaml" "$q/"
+  rm "$q/.freelunch"/*/terraform.tfstate*
+  out="$(in_dir "$q" "$CLI" output oci -json hosts 2>&1)"
+  contains "$out" "oci: took the store's state"
+  contains "$out" '"public_ip":"203.0.113.10"'
+  # What one changes reaches the other.
+  with_ip "$q/.freelunch/oci/terraform.tfstate" 203.0.113.99
+  in_dir "$q" "$CLI" state push oci
+  out="$(in_dir "$p" "$CLI" output oci -json hosts 2>&1)"
+  contains "$out" "oci: took the store's state"
+  contains "$out" '"public_ip":"203.0.113.99"'
+  # Both changed it: commands stop, and --force keeps one.
+  with_ip "$p/.freelunch/oci/terraform.tfstate" 203.0.113.50
+  with_ip "$q/.freelunch/oci/terraform.tfstate" 203.0.113.60
+  in_dir "$q" "$CLI" state push oci
+  if out="$(in_dir "$p" "$CLI" output oci 2>&1)"; then echo "output should have failed"; return 1; fi
+  contains "$out" "state: oci changed both here (serial"
+  contains "$(in_dir "$p" "$CLI" state 2>&1)" "  oci          changed here and in the store since the last copy"
+  in_dir "$p" "$CLI" state pull oci --force
+  equals "$(jq -r '.outputs.hosts.value[0].public_ip' "$p/.freelunch/oci/terraform.tfstate")" 203.0.113.60
+  # A store that holds another state is never taken for this one.
+  jq '.lineage = "somebody-else"' "$p/.freelunch/cloudflare/terraform.tfstate" > "$p/x" && mv "$p/x" "$p/.freelunch/cloudflare/terraform.tfstate"
+  if out="$(in_dir "$p" "$CLI" output cloudflare 2>&1)"; then echo "output should have failed"; return 1; fi
+  contains "$out" "the store's copy of cloudflare is another state"
+  # Without the passphrase, nothing goes there.
+  sed -i.bak '/FREELUNCH_STATE_PASSPHRASE/d' "$q/.freelunch/.env"
+  if out="$(in_dir "$q" "$CLI" status 2>&1)"; then echo "status should have failed"; return 1; fi
+  contains "$out" "FREELUNCH_STATE_PASSPHRASE is not set"
+}
+
+# A wait copies the state to the store after each attempt that changed it, so a run that
+# ends between attempts loses nothing.
+test_waits_copy_their_state_to_the_store() {
+  local p="$WORK/store-wait" out
+  capacity_project "$p"
+  state_store "$p"
+  out="$(FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity 2>&1)"
+  equals "$(grep -c '==> oci: copied the state to the store' <<< "$out")" 3
+  contains "$(freelunch_in "$p" state)" "  oci          in step (serial"
+  # apply copies what it did too.
+  out="$(apply_in "$p" oci 2>&1)"
+  contains "$out" "oci: copied the state to the store"
+}
+
+# ci_in <dir> <command...>: run the CLI there with its own home folder, the fake gh, OCI
+# CLI and secret stores, and none of your credentials
+ci_in() {
+  local dir="$1"; shift
+  (cd "$dir" && unset CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID NORTHFLANK_API_TOKEN GHCR_TOKEN FREELUNCH_NOTIFY FREELUNCH_SSH_KEY &&
+    HOME="$dir/home" SSH_AUTH_SOCK="" PATH="$WORK/gh-bin:$WORK/secret-bin:$WORK/wait-bin:$PATH" FAKE_LOG="$dir/fake.log" FAKE_GH="$dir/gh" \
+    FREELUNCH_TF="${TEST_TF:-$REAL_TF}" "${TEST_CLI:-$CLI}" "$@")
+}
+
+# The bundle holds what CI needs and git doesn't have, and ci restore puts each file back
+# where it was: tfvars, .env with the keychain's secret in it, app env files, known_hosts,
+# the OCI profile and its key, and the SSH key for deploy. State stays out.
+test_ci_secrets_bundle_what_git_leaves_out() {
+  local p="$WORK/bundle" q="$WORK/bundle-ci" out bundle
+  doctor_project "$p"
+  state_store "$p"
+  printf 'CLOUDFLARE_API_TOKEN=keychain:freelunch-cloudflare\n' >> "$p/.freelunch/.env"
+  echo "203.0.113.10 $(cut -d' ' -f1,2 "$WORK/hostkey.pub")" > "$p/.freelunch/known_hosts"
+  echo "-----BEGIN PRIVATE KEY-----" > "$p/home/.oci/key.pem"
+  bundle="$(cd "$p" && unset CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID GHCR_TOKEN FREELUNCH_NOTIFY FREELUNCH_SSH_KEY &&
+    HOME="$p/home" SSH_AUTH_SOCK="" PATH="$WORK/secret-bin:$PATH" FAKE_LOG="$p/fake.log" NORTHFLANK_API_TOKEN=nf-from-shell \
+    "$CLI" ci secrets --print 2> "$p/err")"
+  contains "$(cat "$p/err")" "the bundle for FREELUNCH_BUNDLE"
+  # A fresh checkout in CI: what git has, and a home folder of its own.
+  mkdir -p "$q/home" "$q/.freelunch/oci" "$q/.freelunch/cloudflare"
+  cp "$p/compose.yaml" "$q/"
+  cp "$p/.freelunch/apps.tfvars" "$p/.freelunch/state.local.tfbackend" "$q/.freelunch/"
+  out="$(cd "$q" && HOME="$q/home" FREELUNCH_BUNDLE="$bundle" "$CLI" ci restore 2>&1)"
+  contains "$out" "restored 8 files from FREELUNCH_BUNDLE"
+  cmp "$p/.freelunch/oci/terraform.tfvars" "$q/.freelunch/oci/terraform.tfvars"
+  cmp "$p/.freelunch/cloudflare/terraform.tfvars" "$q/.freelunch/cloudflare/terraform.tfvars"
+  cmp "$p/.freelunch/api.env" "$q/.freelunch/api.env"
+  cmp "$p/.freelunch/known_hosts" "$q/.freelunch/known_hosts"
+  cmp "$p/home/.ssh/id_ed25519" "$q/home/.ssh/freelunch_deploy"
+  cmp "$p/home/.oci/key.pem" "$q/home/.oci/freelunch_api_key.pem"
+  equals "$(mode "$q/home/.ssh/freelunch_deploy")" "-rw-------"
+  grep -qx 'CLOUDFLARE_API_TOKEN=cf-from-keychain' "$q/.freelunch/.env"
+  grep -qx 'NORTHFLANK_API_TOKEN=nf-from-shell' "$q/.freelunch/.env"
+  grep -qx 'FREELUNCH_SSH_KEY=~/.ssh/freelunch_deploy' "$q/.freelunch/.env"
+  grep -qx 'FREELUNCH_SSH_STRICT=1' "$q/.freelunch/.env"
+  grep -q '^FREELUNCH_STATE_PASSPHRASE=' "$q/.freelunch/.env"
+  grep -qx 'key_file=~/.oci/freelunch_api_key.pem' "$q/home/.oci/config"
+  grep -qx 'user=ocid1.user.oc1..me' "$q/home/.oci/config"
+  absent "$q/.freelunch/oci/terraform.tfstate"
+  # Outside CI, restore keeps what a machine has already, unless --force; in CI it writes all.
+  echo "[mine]" > "$q/home/.oci/config"
+  out="$(cd "$q" && HOME="$q/home" FREELUNCH_BUNDLE="$bundle" "$CLI" ci restore 2>&1)"
+  contains "$out" "restored 7 files from FREELUNCH_BUNDLE, and kept 1 that were there"
+  equals "$(cat "$q/home/.oci/config")" "[mine]"
+  (cd "$q" && HOME="$q/home" FREELUNCH_BUNDLE="$bundle" "$CLI" ci restore --force) 2>/dev/null
+  grep -qx 'key_file=~/.oci/freelunch_api_key.pem' "$q/home/.oci/config"
+  echo "[mine]" > "$q/home/.oci/config"
+  (cd "$q" && HOME="$q/home" CI=true FREELUNCH_BUNDLE="$bundle" "$CLI" ci restore) 2>/dev/null
+  grep -qx 'key_file=~/.oci/freelunch_api_key.pem' "$q/home/.oci/config"
+  # In GitHub Actions, the values of env files stay out of the log.
+  out="$(cd "$q" && HOME="$q/home" GITHUB_ACTIONS=true FREELUNCH_BUNDLE="$bundle" "$CLI" ci restore 2>/dev/null)"
+  contains "$out" "::add-mask::cf-from-keychain"
+  contains "$out" "::add-mask::s3cret-value"
+  # gh puts it in the repository's secrets, read from stdin.
+  ci_in "$p" ci secrets
+  grep -qx 'gh secret set FREELUNCH_BUNDLE --repo me/shop' "$p/fake.log"
+  exists "$p/gh/FREELUNCH_BUNDLE"
+  # A bundle that would write anywhere else is refused, and so is a session token, which CI
+  # couldn't refresh.
+  bundle="$(printf 'freelunch-bundle 1\nF project/../../outside\neA==\n' | gzip | base64 | tr -d '\n')"
+  if out="$(cd "$q" && HOME="$q/home" FREELUNCH_BUNDLE="$bundle" "$CLI" ci restore 2>&1)"; then echo "restore should have failed"; return 1; fi
+  contains "$out" "the bundle has a file freelunch doesn't put back: project/../../outside"
+  absent "$WORK/outside"
+  session_profile "$p" tradio
+  if out="$(ci_in "$p" ci secrets --print 2>&1)"; then echo "ci secrets should have failed"; return 1; fi
+  contains "$out" "signs in with a session token"
+  # CI needs the state in a store.
+  rm "$p/.freelunch/state.local.tfbackend"
+  if out="$(ci_in "$p" ci secrets --print 2>&1)"; then echo "ci secrets should have failed"; return 1; fi
+  contains "$out" "freelunch state init oci"
+}
+
+# ci init writes a workflow that waits for capacity, every half hour in a private repository
+# and every quarter of an hour in a public one, and one that deploys after a new image. In a
+# submodule, they use its copy of the action.
+test_ci_init_writes_the_workflows() {
+  local p="$WORK/ci-init" out wait
+  mkdir -p "$p" && (cd "$p" && "$CLI" init >/dev/null 2>&1)
+  out="$(ci_in "$p" ci init 2>&1)"
+  wait="$p/.github/workflows/freelunch-wait.yml"
+  grep -q '    - cron: "11,41 \* \* \* \*" # every half hour' "$wait"
+  grep -q '          run: ci resume' "$wait"
+  grep -q '      - uses: freelunch-sh/freelunch@' "$wait"
+  grep -qx "          tool: $(basename "$REAL_TF")" "$wait"
+  grep -q '  actions: write' "$wait"
+  grep -q "          run: \${{ inputs.run || 'deploy' }}" "$p/.github/workflows/freelunch.yml"
+  fails grep -q '^  workflow_run:' "$p/.github/workflows/freelunch.yml"
+  contains "$out" "freelunch state init oci (or r2, b2, gitlab)"
+  if command -v actionlint >/dev/null; then actionlint "$wait" "$p/.github/workflows/freelunch.yml"; fi
+  rm -r "$p/.github"
+  mkdir -p "$p/.github/workflows" && touch "$p/.github/workflows/image.yml"
+  FAKE_VISIBILITY=PUBLIC ci_in "$p" ci init >/dev/null 2>&1
+  grep -q '    - cron: "4,19,34,49 \* \* \* \*" # every quarter of an hour' "$wait"
+  grep -q '    workflows: \[image\]' "$p/.github/workflows/freelunch.yml"
+  # freelunch as a submodule of the project
+  rm -r "$p/.github"
+  scratch_checkout "$p/freelunch" oci
+  TEST_CLI="$p/freelunch/bin/freelunch" ci_in "$p" ci init >/dev/null 2>&1
+  grep -q '      - uses: ./freelunch$' "$wait"
+  grep -q '          submodules: true' "$wait"
+  # GitLab
+  ci_in "$p" ci init gitlab >/dev/null 2>&1
+  grep -q '    - /opt/freelunch/bin/freelunch ci restore' "$p/.gitlab-ci.yml"
+}
+
+# ci wait approves what a reviewed plan changes, puts the approval in the bundle and starts
+# the wait workflow. Meanwhile this machine doesn't apply the stack, until the state shows
+# the host; --cancel stops it.
+test_ci_wait_hands_a_reviewed_plan_to_ci() {
+  local p="$WORK/ci-wait" out plan
+  capacity_project "$p"
+  state_store "$p"
+  mkdir -p "$p/home/.oci" "$p/.github/workflows"
+  printf '[DEFAULT]\nuser=ocid1.user.oc1..me\nfingerprint=aa:bb\nkey_file=~/.oci/key.pem\ntenancy=ocid1.tenancy.oc1..me\nregion=eu-frankfurt-1\n' > "$p/home/.oci/config"
+  touch "$p/home/.oci/key.pem" "$p/.github/workflows/freelunch-wait.yml"
+  plan="$(plan_with 'module.network.oci_core_vcn.this create' 'oci_core_instance.this["main"] create')"
+  FAKE_PLAN="$plan" freelunch_in "$p" plan oci --out .freelunch/oci/reviewed.tfplan
+  out="$(TEST_TF="$WORK/bin/fake-tf" TEST_CLI="$p-checkout/bin/freelunch" ci_in "$p" ci wait oci --plan .freelunch/oci/reviewed.tfplan 2>&1)"
+  contains "$out" "oci: approved for CI: module.network.oci_core_vcn.this (create), oci_core_instance.this[\"main\"] (create)"
+  equals "$(jq -r '.stack, .plan, (.changes | length)' "$p/.freelunch/oci/approved.json" | paste -sd' ' -)" "oci reviewed.tfplan 2"
+  equals "$(jq -r .tfvars "$p/.freelunch/oci/approved.json")" "$(sha256 "$p/.freelunch/oci/terraform.tfvars")"
+  grep -qx 'gh workflow enable freelunch-wait.yml' "$p/fake.log"
+  grep -qx 'gh workflow run freelunch-wait.yml' "$p/fake.log"
+  contains "$(base64 -d < "$p/gh/FREELUNCH_BUNDLE" | gunzip)" "F project/.freelunch/oci/approved.json"
+  exists "$p-store/oci.tfstate"
+  # This machine leaves the stack to CI meanwhile.
+  contains "$(freelunch_in "$p" status)" "oci: waiting for capacity in CI since 2026-"
+  if out="$(apply_in "$p" oci 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "CI waits for capacity for this stack"
+  out="$(TEST_TF="$WORK/bin/fake-tf" TEST_CLI="$p-checkout/bin/freelunch" ci_in "$p" ci wait oci --cancel 2>&1)"
+  contains "$out" "oci: CI stopped waiting"
+  grep -qx 'gh workflow disable freelunch-wait.yml' "$p/fake.log"
+  absent "$p/.freelunch/oci/approved.json"
+  # A plan older than the tfvars doesn't show what CI would apply.
+  touch -t 202601010000 "$p/.freelunch/oci/reviewed.tfplan"
+  if out="$(TEST_TF="$WORK/bin/fake-tf" TEST_CLI="$p-checkout/bin/freelunch" ci_in "$p" ci wait oci --plan .freelunch/oci/reviewed.tfplan 2>&1)"; then echo "ci wait should have failed"; return 1; fi
+  contains "$out" "changed after the plan was made"
+  # Once the state has what the plan made, the wait in CI is over.
+  approve "$p" 'oci_core_instance.this["main"] create'
+  jq '.serial += 1 | .resources = [{mode: "managed", type: "oci_core_instance", name: "this", provider: "provider[\"registry.terraform.io/oracle/oci\"]",
+      instances: [{index_key: "main", schema_version: 0, attributes: {id: "ocid1.instance.oc1..a"}, sensitive_attributes: []}]}]' \
+    "$p/.freelunch/oci/terraform.tfstate" > "$p/x" && mv "$p/x" "$p/.freelunch/oci/terraform.tfstate"
+  contains "$(freelunch_in "$p" status)" "oci: the wait in CI is over"
+  absent "$p/.freelunch/oci/approved.json"
+}
+
+# ci resume makes an attempt per run, numbered after the run, for each approved wait. While
+# OCI is out of capacity the run passes, quietly; once the host exists it says so and turns
+# the wait workflow off, as it does when nothing is approved.
+test_ci_resume_makes_an_attempt_per_run() {
+  local p="$WORK/ci-resume" out main
+  capacity_project "$p"
+  approve "$p" 'oci_core_instance.this["main"] create'
+  main="$(plan_with 'oci_core_instance.this["main"] create Xyz:EU-FRANKFURT-1-AD-3')"
+  out="$(GITHUB_ACTIONS=true GITHUB_RUN_NUMBER=12 GITHUB_WORKFLOW_REF=me/shop/.github/workflows/freelunch-wait.yml@refs/heads/main \
+    GITHUB_STEP_SUMMARY="$p/summary.md" FAKE_APPLY=capacity FAKE_PLAN="$main" TEST_TF="$WORK/bin/fake-tf" TEST_CLI="$p-checkout/bin/freelunch" \
+    ci_in "$p" ci resume 2>&1)"
+  contains "$out" "oci: out of host capacity in EU-FRANKFURT-1-AD-3 on attempt 12; the next run goes on with attempt 13"
+  grep -q -- '/stack plan .*-var=availability_domain_offset=11$' "$p/fake.log"
+  fails grep -q -e '^gh workflow disable' -e '^desktop: ' "$p/fake.log"
+  grep -q 'oci: still waiting after attempt 12' "$p/summary.md"
+  rm "$p/fake.log"*
+  out="$(GITHUB_ACTIONS=true GITHUB_RUN_NUMBER=13 GITHUB_WORKFLOW_REF=me/shop/.github/workflows/freelunch-wait.yml@refs/heads/main \
+    FAKE_PLAN="$main" TEST_TF="$WORK/bin/fake-tf" TEST_CLI="$p-checkout/bin/freelunch" ci_in "$p" ci resume 2>&1)"
+  contains "$out" "oci: the wait is over, on attempt 13"
+  grep -q '^desktop: oci: got the host on attempt 13' "$p/fake.log"
+  grep -qx 'gh workflow disable freelunch-wait.yml' "$p/fake.log"
+  # A wait that stops for another reason fails the run.
+  rm "$p/fake.log"*
+  if out="$(FAKE_APPLY=auth FAKE_PLAN="$main" TEST_TF="$WORK/bin/fake-tf" TEST_CLI="$p-checkout/bin/freelunch" ci_in "$p" ci resume 2>&1)"; then echo "ci resume should have failed"; return 1; fi
+  contains "$out" "oci: the wait stopped on attempt 1"
+  # Nothing approved: nothing to do, and the schedule goes off.
+  rm "$p/fake.log"* "$p/.freelunch/oci/approved.json"
+  out="$(GITHUB_ACTIONS=true GITHUB_WORKFLOW_REF=me/shop/.github/workflows/freelunch-wait.yml@refs/heads/main \
+    TEST_TF="$WORK/bin/fake-tf" TEST_CLI="$p-checkout/bin/freelunch" ci_in "$p" ci resume 2>&1)"
+  contains "$out" "nothing to wait for"
+  grep -qx 'gh workflow disable freelunch-wait.yml' "$p/fake.log"
+  fails grep -q '/stack ' "$p/fake.log"
+}
+
+# In CI, deploy talks only to hosts whose key known_hosts has.
+test_deploy_in_ci_only_talks_to_pinned_hosts() {
+  local p="$WORK/strict" out key
+  new_project "$p"
+  if out="$(GHCR_TOKEN=x FREELUNCH_SSH_STRICT=1 deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "oci-main: its host key isn't pinned in .freelunch/known_hosts"
+  fails grep -q '^ssh ' "$p/fake.log"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  printf '203.0.113.10 %s\n203.0.113.11 %s\n' "$key" "$key" > "$p/.freelunch/known_hosts"
+  GHCR_TOKEN=x FREELUNCH_SSH_STRICT=1 deploy_in "$p" >/dev/null 2>&1
+  grep -q 'StrictHostKeyChecking=yes' "$p/fake.log"
+}
+
+# state init oci makes a private, versioned bucket in the tenancy and a key for its S3 API,
+# and writes the backend settings; the others write what to fill in.
+test_state_init_sets_up_a_store() {
+  local p="$WORK/state-init" out
+  doctor_project "$p"
+  out="$(PATH="$WORK/wait-bin:$PATH" ci_in "$p" state init oci 2>&1)"
+  contains "$out" "oci: made the private bucket state-init-freelunch-state in eu-frankfurt-1, with versioning"
+  grep -q '^oci os bucket create -c ocid1.compartment.oc1..s3 --name state-init-freelunch-state --versioning Enabled' "$p/fake.log"
+  grep -q '^oci iam customer-secret-key create --user-id ocid1.user.oc1..me ' "$p/fake.log"
+  grep -qx 'FREELUNCH_STATE_AWS_ACCESS_KEY_ID=ak-from-oci' "$p/.freelunch/.env"
+  grep -qx 'FREELUNCH_STATE_AWS_SECRET_ACCESS_KEY=sk-from-oci' "$p/.freelunch/.env"
+  grep -q '^FREELUNCH_STATE_PASSPHRASE=' "$p/.freelunch/.env"
+  grep -q 's3 = "https://axyz.compat.objectstorage.eu-frankfurt-1.oraclecloud.com"' "$p/.freelunch/state.s3.tfbackend"
+  grep -q 'key    = "{stack}.tfstate"' "$p/.freelunch/state.s3.tfbackend"
+  # Once only.
+  fails ci_in "$p" state init oci
+  rm "$p/.freelunch/state.s3.tfbackend"
+  ci_in "$p" state init gitlab >/dev/null 2>&1
+  grep -q 'terraform/state/{stack}/lock' "$p/.freelunch/state.http.tfbackend"
+  rm "$p/.freelunch/state.http.tfbackend"
+  ci_in "$p" state init r2 >/dev/null 2>&1
+  grep -q 'r2.cloudflarestorage.com' "$p/.freelunch/state.s3.tfbackend"
+  rm "$p/.freelunch/state.s3.tfbackend"
+  fails ci_in "$p" state init dropbox
+}
+
+# tests/cli.sh <pattern>: only the tests whose name matches the pattern (grep -E)
 echo "tests/cli.sh"
-for t in $(declare -F | awk '{print $3}' | grep '^test_' | sed 's/^test_//'); do run_test "$t"; done
+for t in $(declare -F | awk '{print $3}' | grep '^test_' | sed 's/^test_//' | grep -E "${1:-.}"); do run_test "$t"; done
 echo "$passed passed, $failed failed"
 [ "$failed" -eq 0 ]

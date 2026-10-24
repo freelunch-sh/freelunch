@@ -9,4 +9,5 @@ inventory.json
 known_hosts
 */wait.log
 */wait.state
+*/approved.json
 *.tfplan

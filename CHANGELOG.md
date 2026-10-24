@@ -154,8 +154,47 @@ For a project set up with freelunch from `main` before 1.0.0:
   platforms (Koyeb, Render, Railway and the rest) moved to the `platform` layer. The GCP
   page notes that an external IPv6 address isn't billed, while ghcr.io has no IPv6 yet, and
   that Standard Tier's 200 GiB of free egress is per account, not per region.
+- **State store.** A project can keep a copy of every stack's state where CI and its other
+  machines reach it: `.freelunch/state.<backend>.tfbackend`, the settings of any
+  tofu/terraform backend with `{stack}` in the key. `freelunch state init oci` makes a
+  private, versioned bucket in the tenancy's Object Storage (20 GB Always Free) and a
+  Customer Secret Key for its S3 API; `r2`, `b2` and `gitlab` write the settings to fill in.
+  Commands that read state take the store's copy when it is newer, and apply, destroy and
+  each attempt of a wait copy theirs back. A copy never overwrites a newer one, and when two
+  machines changed a stack at once, commands stop until `freelunch state push --force` or
+  `pull --force` keeps one. The copy is encrypted with OpenTofu's state encryption and
+  `FREELUNCH_STATE_PASSPHRASE`, which `state init` makes. `freelunch state` shows where each
+  stack stands, and `doctor` checks the store. The store's credentials
+  (`FREELUNCH_STATE_<NAME>`) reach its runs only.
+- **Run freelunch from CI** ([docs/ci.md](docs/ci.md)). A GitHub Action (`action.yml`,
+  `uses: freelunch-sh/freelunch@<tag>`, or `./freelunch` for a submodule) sets up tofu or
+  terraform and runs a command. `freelunch ci init` writes two workflows: one that waits for
+  capacity on a schedule, and one that deploys after each new image of `main` and runs any
+  command on demand (`ci init gitlab` writes a GitLab pipeline). `freelunch ci secrets` puts
+  what git doesn't have into one secret, `FREELUNCH_BUNDLE`: tfvars, `.env` with the
+  secrets from 1Password or the keychain read, app env files, `known_hosts`, the OCI profile
+  and its API key, and the deploy key; `ci restore` writes them back in the job, and masks
+  the env files' values in the log.
+- **A wait for capacity in GitHub Actions**, for a wait that outlasts a laptop:
+  `freelunch ci wait <stack> --plan <file>` approves what a plan reviewed here changes,
+  puts the approval in the bundle and starts the wait workflow. Each run makes one attempt
+  (`ci resume`), in the next availability domain, and applies only what the approval
+  lists, with the tfvars it was made with; the workflow turns itself off once the host
+  exists. Meanwhile `status` shows the wait, and `apply` and `destroy` of that stack stop
+  here; `ci wait --cancel` ends it. `FREELUNCH_WAIT_ATTEMPT` lets any scheduler go on with
+  a wait from run to run, and such a run exits with 75 where `FREELUNCH_CAPACITY_TIMEOUT`
+  pauses it.
 
 ### Changed
+
+- `apply --wait-for-capacity` also retries what leaves nothing half done: a 401 for clock
+  skew, from a request signed before the machine slept, and a network failure while
+  planning, or on a read while applying. An attempt that made part of a reviewed plan no
+  longer ends the wait, or one started again with that plan: it plans again and applies
+  only what the reviewed plan does. A wait whose machine slept through a pause says so, and
+  `--detach` says that a long wait needs a machine that stays on.
+- In CI, `deploy` talks only to hosts whose key `known_hosts` has (`FREELUNCH_SSH_STRICT=1`).
+- `freelunch init` adds `*/approved.json` to `.freelunch/.gitignore`.
 
 - The CLI loads credentials from `.freelunch/.env` (or `.env` in the checkout); variables
   already set in the shell win. A value can name a secret instead of holding it:
