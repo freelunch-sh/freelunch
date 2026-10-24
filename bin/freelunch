@@ -2719,7 +2719,8 @@ northflank_body() {
       healthChecks: (if $s.healthcheck == null then [] else [{
         protocol: "CMD", type: "readinessProbe", cmd: $s.healthcheck.cmd,
         initialDelaySeconds: $s.healthcheck.initial_delay, periodSeconds: $s.healthcheck.interval,
-        timeoutSeconds: $s.healthcheck.timeout, failureThreshold: $s.healthcheck.retries
+        timeoutSeconds: $s.healthcheck.timeout, failureThreshold: $s.healthcheck.retries,
+        successThreshold: 1
       }] end)
     }'
 }
@@ -2741,8 +2742,47 @@ northflank_tunnel_body() {
       ports: [],
       runtimeEnvironment: {TUNNEL_TOKEN: rtrimstr("\n")},
       healthChecks: [{protocol: "HTTP", type: "readinessProbe", path: "/ready", port: 20241,
-        initialDelaySeconds: 5, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 6}]
+        initialDelaySeconds: 5, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 6, successThreshold: 1}]
     }' "$1"
+}
+
+# nf_body_problems <body file> <service>: what Northflank's payload validation turns down in
+# a service body, a line each: the fields it requires and their ranges. Its API reference marks
+# successThreshold optional, but a readiness check without it gets a 400.
+nf_body_problems() {
+  jq -r --arg s "$2" '
+    def need($o; $at; $keys): $keys[] as $k | select($o[$k] == null) | "\($at)\($k) is required";
+    def within($o; $at; $k; $lo; $hi): select($o[$k] != null and ($o[$k] < $lo or $o[$k] > $hi)) | "\($at)\($k) is \($o[$k]), outside \($lo) to \($hi)";
+    "  \($s): " + (need(.; ""; ["name", "billing", "deployment"]),
+    ((.ports // []) | to_entries[] | need(.value; "ports.\(.key)."; ["name", "internalPort"])),
+    ((.healthChecks // []) | to_entries[] | "healthChecks.\(.key)." as $at | .value as $h
+      | need($h; $at; ["protocol", "type", "initialDelaySeconds", "periodSeconds", "timeoutSeconds", "failureThreshold", "successThreshold"]),
+        (if $h.protocol == "HTTP" then need($h; $at; ["path", "port"]) elif $h.protocol == "CMD" then need($h; $at; ["cmd"]) else empty end),
+        within($h; $at; "initialDelaySeconds"; 1; 1800), within($h; $at; "periodSeconds"; 10; 600),
+        within($h; $at; "timeoutSeconds"; 1; 60), within($h; $at; "failureThreshold"; 1; 255),
+        within($h; $at; "successThreshold"; 1; 255)))' "$1"
+}
+
+# northflank_check <target>: stop before anything is sent when a service body for the
+# target isn't one Northflank takes. The bodies are made as deploy makes them, without the
+# image digests, registry logins and secrets, which don't change what is checked.
+northflank_check() {
+  local host="$1" name problems="" p
+  echo '{}' > "$TMP/check.env"
+  while IFS= read -r name; do
+    jq --arg h "$host" --arg n "$name" '.[$h].services[$n]' "$TMP/platforms.json" > "$TMP/check.spec"
+    northflank_body "$name" plan image "" "$TMP/check.spec" "$TMP/check.env" > "$TMP/check.json"
+    p="$(nf_body_problems "$TMP/check.json" "$name")"
+    [[ -z "$p" ]] || problems="$problems$p"$'\n'
+  done < <(jq -r --arg h "$host" '.[$h].apps | keys[]' "$TMP/targets.json")
+  if [[ "$(jq -r --arg h "$host" '.[$h].tunnel' "$TMP/targets.json")" == "true" ]]; then
+    printf 'token' > "$TMP/check.token"
+    northflank_tunnel_body "$TMP/check.token" > "$TMP/check.json"
+    p="$(nf_body_problems "$TMP/check.json" cloudflared)"
+    [[ -z "$p" ]] || problems="$problems$p"$'\n'
+  fi
+  rm -f "$TMP"/check.*
+  [[ -z "$problems" ]] || die "$host: Northflank would turn these services down, so nothing was sent (this is a freelunch bug: please report it):"$'\n'"${problems%$'\n'}"
 }
 
 # redact_body: a service body without its secrets, for the dry run
@@ -2781,6 +2821,7 @@ northflank_deploy() {
   local services=() creds="" others uid=""
   project="$(jq -r --arg h "$host" '.[$h].id' "$TMP/platforms.json")"
   plan="$(jq -r --arg h "$host" '.[$h].size' "$TMP/platforms.json")"
+  northflank_check "$host"
   if [[ "$dry_run" == 1 ]]; then
     log "$host: would send this to Northflank, project $project (dry run, secrets left out)"
   else
