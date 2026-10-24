@@ -11,8 +11,9 @@ tenancy_ocid = "ocid1.tenancy.oc1..aaaaaaaa..."  # grep tenancy ~/.oci/config
 # Credentials come from the DEFAULT profile in ~/.oci/config. To use another one, such as
 # the API key that `oci setup bootstrap --profile-name freelunch` creates:
 # oci_config_profile = "freelunch"
-# A session from `oci session authenticate` lasts 24 hours at most. For one, set its
-# profile above and add:
+# A session from `oci session authenticate` ends hours after you sign in, as many as the
+# tenancy allows (8 is common; freelunch doctor shows when). For one, set its profile above
+# and add:
 # oci_auth = "SecurityToken"
 
 ssh_public_keys = [

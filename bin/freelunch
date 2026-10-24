@@ -56,20 +56,23 @@ Infrastructure:
   list                    Show every provider with status, layer and deployment state
   plan    <p...|all>      Plan provider stacks. --show-user-data also prints the cloud-init of
                           each host in the plan, with secrets left out. --out <file> saves the
-                          plan of one stack for apply --plan
+                          plan of one stack for apply --plan, and says what the plan replaces
+                          or destroys
   apply   <p...|all>      Apply provider stacks (hosts and platforms, then services), refresh
                           hybrid, then glue. A platform's apply also makes the target there.
                           --plan <file> applies a saved plan without a prompt.
                           --wait-for-capacity retries hosts until OCI has the capacity for them,
                           each time in the next availability domain; with --detach it waits in
-                          the background, logging to .freelunch/<stack>/wait.log
+                          the background, logging to .freelunch/<stack>/wait.log (on a Mac,
+                          caffeinate keeps it awake until then)
   destroy <p...|all>      Destroy provider stacks in reverse layer order, then refresh hybrid. On
                           a platform it also deletes what apply and deploy made there
   status                  Hosts and platforms, the apps on each one and whether they run,
                           tunnels and their URLs, service token expiry, and capacity waits
-  doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in, the
-                          Northflank token, SSH keys, images and their registry logins, the
-                          Cloudflare token and zone
+  doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in and
+                          what the tenancy's limits leave, the Northflank token, SSH keys,
+                          images and their registry logins, the Cloudflare token and zone. It
+                          changes nothing
   hybrid                  Re-aggregate deployed host and platform stacks into the hybrid inventory
   inventory               Write inventory.json (all hosts across providers)
   output <stack> [args]   Print a stack's outputs from its state, e.g. output cloudflare -json
@@ -195,7 +198,14 @@ resolve_env_refs() {
 state_root()   { if [[ -n "$PROJECT" ]]; then echo "$PROJECT"; else echo "$ROOT"; fi; }
 stack_dir()    { echo "$PROVIDERS_DIR/$1/stack"; }
 config_dir()   { if [[ -n "$PROJECT" ]]; then echo "$PROJECT/$1"; else stack_dir "$1"; fi; }
-hybrid_state() { if [[ -n "$PROJECT" ]]; then echo "$PROJECT/hybrid/terraform.tfstate"; else echo "$ROOT/hybrid/terraform.tfstate"; fi; }
+# With SCRATCH_HYBRID=1 (doctor) the inventory is built in TMP, so nothing in the project
+# or the checkout changes.
+SCRATCH_HYBRID=0
+hybrid_state() {
+  if [[ $SCRATCH_HYBRID -eq 1 ]]; then echo "$TMP/hybrid.tfstate"
+  elif [[ -n "$PROJECT" ]]; then echo "$PROJECT/hybrid/terraform.tfstate"
+  else echo "$ROOT/hybrid/terraform.tfstate"; fi
+}
 
 is_configured() { [[ -f "$(config_dir "$1")/terraform.tfvars" ]]; }
 is_deployed() {
@@ -296,6 +306,62 @@ tfvar() { # tfvar <file> <name>: a string variable set on one line of a tfvars f
   sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -1
 }
 
+# tfvars_map <file> <variable> <field...>: a line per entry of a map of objects in a tfvars
+# file, such as apps or instances: its key, then each field's value (string or number, empty
+# when it isn't set), tab-separated. It reads the flat entries freelunch's examples have,
+# one per line or over several lines, for checks before tofu/terraform run; they stay the
+# real parser.
+tfvars_map() {
+  local file="$1" var="$2"; shift 2
+  [[ -f "$file" ]] || return 0
+  awk -v var="$var" -v fields="$*" '
+    function emit(   i, v, out) {
+      out = key
+      for (i = 1; i <= n; i++) {
+        v = ""
+        if (match(text, "(^|[^A-Za-z0-9_])" f[i] "[ \t]*=[ \t]*(\"[^\"]*\"|[0-9.]+)")) {
+          v = substr(text, RSTART, RLENGTH)
+          sub(/^[^=]*=[ \t]*/, "", v)
+          gsub(/"/, "", v)
+        }
+        out = out "\t" v
+      }
+      print out
+    }
+    BEGIN { n = split(fields, f, " ") }
+    { sub(/#.*/, "") }
+    !inside {
+      if ($0 ~ "^[ \t]*" var "[ \t]*=[ \t]*[{]") { inside = 1; depth = 0 } else next
+    }
+    {
+      line = $0
+      if (depth == 1 && key == "" && match(line, /^[ \t]*"?[A-Za-z0-9_.-]+"?[ \t]*=[ \t]*[{]/)) {
+        key = substr(line, RSTART, RLENGTH)
+        sub(/^[ \t]*"?/, "", key)
+        sub(/"?[ \t]*=.*$/, "", key)
+        text = ""
+      }
+      if (key != "") text = text " " line
+      depth += gsub(/[{]/, "{", line) - gsub(/[}]/, "}", line)
+      if (key != "" && depth <= 1) { emit(); key = "" }
+      if (depth <= 0) exit
+    }' "$file"
+}
+
+# oci_instances <tfvars>: key, shape and OCPUs of each instance the oci stack asks for, with
+# the defaults of var.instances in providers/oci/stack/variables.tf
+oci_instances() {
+  local key shape ocpus found=0
+  while IFS=$'\t' read -r key shape ocpus; do
+    found=1
+    printf '%s\t%s\t%s\n' "$key" "${shape:-VM.Standard.A1.Flex}" "${ocpus:-2}"
+  done < <(tfvars_map "$1" instances shape ocpus)
+  [[ $found -eq 1 ]] || printf 'main\tVM.Standard.A1.Flex\t2\n'
+}
+
+# shape_arch <OCI shape>: arm64 for Ampere shapes (A1 and later), amd64 for the others
+shape_arch() { if [[ "$1" =~ \.A[0-9]+\. ]]; then echo arm64; else echo amd64; fi; }
+
 # The profile to check before an oci run when the stack signs in with a session token,
 # which expires an hour after its last refresh. Nothing for an API key.
 oci_session_profile() { # oci_session_profile <tfvars>
@@ -307,19 +373,29 @@ oci_session_profile() { # oci_session_profile <tfvars>
   echo "${profile:-${TF_VAR_oci_config_profile:-DEFAULT}}"
 }
 
-# oci_token_expiry <profile>: when the profile's session token expires (seconds since the
-# epoch), read from the token itself. Empty when there is no token to read.
-oci_token_expiry() {
+# oci_token_claim <profile> <claim>: a claim of the profile's session token (seconds since
+# the epoch for exp and sess_exp), read from the token itself. Empty when there is none.
+# exp is when the token expires, an hour after its last refresh; sess_exp is when the
+# session ends and can't be refreshed any more, as many hours after signing in as the
+# tenancy allows.
+oci_token_claim() {
   local file
   file="$(awk -v p="[$1]" '$0 == p { s = 1; next } /^\[/ { s = 0 } s && /^security_token_file[ \t]*=/ { sub(/^[^=]*=[ \t]*/, ""); print; exit }' "$HOME/.oci/config" 2>/dev/null)"
   file="${file/#\~/$HOME}"
   [[ -n "$file" && -f "$file" ]] || return 0
-  jq -Rr 'split(".")[1] | gsub("-"; "+") | gsub("_"; "/") | @base64d | fromjson | .exp // empty' < "$file" 2>/dev/null || true
+  jq -Rr --arg c "$2" 'split(".")[1] | gsub("-"; "+") | gsub("_"; "/") | @base64d | fromjson | .[$c] // empty' < "$file" 2>/dev/null || true
+}
+
+# session_end <profile>: when the profile's session ends (seconds since the epoch), or nothing
+session_end() {
+  local end
+  end="$(oci_token_claim "$1" sess_exp)"
+  [[ ! "$end" =~ ^[0-9]+$ ]] || echo "$end"
 }
 
 # check_oci_session <profile> [why]: refresh the session, or stop with the command that
-# signs in again. A refresh works only while the session is valid, and for 24 hours after
-# signing in at most. Without the OCI CLI, the token's own expiry is checked instead.
+# signs in again. A refresh works only while the token is valid and until the session ends.
+# Without the OCI CLI, the token's own expiry is checked instead.
 check_oci_session() {
   local out exp
   if command -v oci >/dev/null; then
@@ -329,10 +405,55 @@ check_oci_session() {
       die "oci: can't refresh the session of profile $1 (see above)"
     fi
   else
-    exp="$(oci_token_expiry "$1")"
+    exp="$(oci_token_claim "$1" exp)"
     if [[ ! "$exp" =~ ^[0-9]+$ || "$exp" -gt "$(date +%s)" ]]; then return 0; fi
   fi
   die "oci: ${2:-session expired}. Sign in again: oci session authenticate --profile-name $1"
+}
+
+# oci_args <tfvars>: OCI_ARGS, the profile, region and sign-in the OCI CLI needs to act as
+# the stack does
+OCI_ARGS=()
+oci_args() {
+  local profile region
+  profile="$(tfvar "$1" oci_config_profile)"
+  region="$(tfvar "$1" region)"
+  OCI_ARGS=(--profile "${profile:-${TF_VAR_oci_config_profile:-DEFAULT}}")
+  [[ -z "$region" ]] || OCI_ARGS+=(--region "$region")
+  [[ -z "$(oci_session_profile "$1")" ]] || OCI_ARGS+=(--auth security_token)
+}
+
+# oci_error <output>: what an OCI CLI error says, e.g. "401 NotAuthenticated: The required
+# information ...", from the JSON of a ServiceError, or else its first line
+oci_error() {
+  awk 'found || /\{/ { if (!found) sub(/^[^{]*/, ""); found = 1; print }' <<< "$1" \
+    | jq -er '"\([.status, .code] | map(select(. != null) | tostring) | join(" ")): \(.message)"' 2>/dev/null \
+    || grep -m1 -v '^[[:space:]]*$' <<< "$1" | sed 's/^[[:space:]]*//'
+}
+
+# oci_limit <tenancy> <service> <limit> [availability domain]: "available used" of one of
+# the tenancy's service limits, with OCI_ARGS. It counts every project in the tenancy.
+oci_limit() {
+  local out ad=()
+  [[ -z "${4:-}" ]] || ad=(--availability-domain "$4")
+  out="$(oci limits resource-availability get -c "$1" --service-name "$2" --limit-name "$3" ${ad[@]+"${ad[@]}"} "${OCI_ARGS[@]}" 2>&1)" \
+    && jq -er '.data | "\(.available // empty) \(.used // 0)"' <<< "$out" 2>/dev/null && return 0
+  echo "$out"
+  return 1
+}
+
+# oci_hints <output>: what to do about the OCI errors in the output of a failed run
+oci_hints() {
+  local limits
+  if grep -q '401-NotAuthenticated' "$1"; then
+    log "OCI turned down the sign-in (401-NotAuthenticated), so what the run printed above is incomplete. A new API key can take a few minutes to work everywhere; freelunch doctor checks the sign-in"
+  fi
+  limits="$(sed -n 's/.*service limits were exceeded: \([a-z0-9, -]*\).*/\1/p' "$1" | tr -d ' ' | tr ',' '\n' | sort -u | paste -sd, - | sed 's/,/, /g')"
+  [[ -n "$limits" ]] || return 0
+  log "the tenancy has reached OCI's limit for $limits; freelunch doctor shows what is left"
+  if [[ "$limits" == *vcn-count* ]]; then
+    log "OCI goes on counting a deleted VCN for a while, so after a destroy or a replacement, wait a few minutes before you plan again"
+  fi
 }
 
 # --- waiting for capacity -------------------------------------------------------------
@@ -351,7 +472,7 @@ CHANGES='[.resource_changes[]? | select(.change.actions != ["no-op"] and .change
 
 # A wait records how it goes in <stack config>/wait.state, for freelunch status. WAIT is
 # that file while a wait runs; if the CLI stops before the host exists, on_exit marks it.
-WAIT_PROVIDER="" WAIT_STARTED="" WAIT_ATTEMPT=0 WAIT_TRIES=0 WAIT_AD="" WAIT_INTERRUPTED=0 SLEEP_PID=""
+WAIT_PROVIDER="" WAIT_STARTED="" WAIT_ATTEMPT=0 WAIT_TRIES=0 WAIT_AD="" WAIT_INTERRUPTED=0 WAIT_SESSION="" SLEEP_PID=""
 
 # tee that ignores Ctrl-C. tofu/terraform keep printing while they stop and save the
 # state; with tee gone, their next line would kill them (SIGPIPE).
@@ -377,11 +498,12 @@ host_addresses() {
 }
 
 # wait_state <waiting|done|stopped> <what happened> [next attempt, seconds since the epoch].
-# attempt is how many attempts were made, the one running included (WAIT_TRIES).
+# attempt is how many attempts were made, the one running included (WAIT_TRIES), and session
+# when the OCI session ends.
 wait_state() {
   [[ -n "$WAIT" ]] || return 0
-  printf 'state=%s\npid=%s\nstarted=%s\nupdated=%s\nattempt=%s\nlast=%s\nnext=%s\nlog=%s\n' \
-    "$1" "$$" "$WAIT_STARTED" "$(date +%s)" "$WAIT_TRIES" "$2" "${3:-}" "${FREELUNCH_WAIT_LOG:-}" > "$WAIT.new"
+  printf 'state=%s\npid=%s\nstarted=%s\nupdated=%s\nattempt=%s\nlast=%s\nnext=%s\nlog=%s\nsession=%s\n' \
+    "$1" "$$" "$WAIT_STARTED" "$(date +%s)" "$WAIT_TRIES" "$2" "${3:-}" "${FREELUNCH_WAIT_LOG:-}" "$WAIT_SESSION" > "$WAIT.new"
   mv "$WAIT.new" "$WAIT"
 }
 
@@ -444,6 +566,12 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan, or ""
   if pid="$(wait_pid "$p")" && [[ "$pid" != "$$" ]]; then die "$p: a wait for capacity is running already (pid $pid); freelunch status shows how it goes"; fi
 
   WAIT="$(config_dir "$p")/wait.state" WAIT_PROVIDER="$p" WAIT_STARTED="$(date +%s)" WAIT_ATTEMPT=1
+  # A session can be refreshed until it ends, as many hours after signing in as the tenancy
+  # allows; the token says when.
+  [[ -z "$profile" ]] || WAIT_SESSION="$(session_end "$profile")"
+  if [[ -n "$WAIT_SESSION" ]]; then
+    log "$p: the session of profile $profile ends at $(fmt_time "$WAIT_SESSION"), in $(fmt_duration $((WAIT_SESSION - $(date +%s)))), and the wait with it. An API key doesn't expire (oci setup bootstrap)"
+  fi
   wait_state waiting "starting"
   prepare_stack apply "$p"
   while IFS= read -r a; do
@@ -466,9 +594,15 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan, or ""
 
   delay="$interval"
   while :; do
-    # prepare_stack checked the session before the first attempt.
+    # prepare_stack checked the session before the first attempt. A token that expired before
+    # the session's end missed its refresh, which happens when the machine sleeps an hour.
     if [[ -n "$profile" && $WAIT_ATTEMPT -gt 1 ]]; then
-      check_oci_session "$profile" "the session expired after $((WAIT_ATTEMPT - 1)) attempt(s). A session lasts 24 hours at most, so for a longer wait use an API key (oci setup bootstrap)"
+      if [[ -n "$WAIT_SESSION" && $(date +%s) -lt $WAIT_SESSION ]]; then
+        why="the session token expired after $((WAIT_ATTEMPT - 1)) attempt(s), before the session ends at $(fmt_time "$WAIT_SESSION"): it has to be refreshed within the hour, which a machine that sleeps can't do"
+      else
+        why="the session ended after $((WAIT_ATTEMPT - 1)) attempt(s)${WAIT_SESSION:+, at $(fmt_time "$WAIT_SESSION")}. For a longer wait use an API key (oci setup bootstrap)"
+      fi
+      check_oci_session "$profile" "$why"
     fi
     WAIT_TRIES=$WAIT_ATTEMPT
     wait_state waiting "attempt $WAIT_ATTEMPT is running"
@@ -501,7 +635,8 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan, or ""
     case "$(retry_reason "$out")" in
       capacity) delay="$interval"; why="out of host capacity" ;;
       busy)     delay=$((delay * 2 > cap ? cap : delay * 2)); why="OCI asks for fewer requests (TooManyRequests)" ;;
-      *)        die "$p: apply failed, and not for lack of capacity, so it is not retried (see the output above)" ;;
+      *)        oci_hints "$out"
+                die "$p: apply failed, and not for lack of capacity, so it is not retried (see the output above)" ;;
     esac
     pause=$((delay + RANDOM % (delay / 5 + 1)))
     if [[ -n "$deadline" && $((SECONDS + pause)) -gt $deadline ]]; then
@@ -533,6 +668,15 @@ detach_wait() {
   pid=$!
   log "$p: waiting for capacity in the background (pid $pid); it notifies you when the host exists"
   log "freelunch status shows the attempts, $(rel "$log_file") the output, and kill $pid stops it"
+  # A machine that sleeps pauses the wait, and one that sleeps for more than an hour lets a
+  # session token expire, which ends it. On a Mac, caffeinate keeps it awake (closing the
+  # lid still puts it to sleep) and stops by itself when the wait ends.
+  if command -v caffeinate >/dev/null; then
+    nohup caffeinate -i -w "$pid" >/dev/null 2>&1 < /dev/null &
+    log "$p: caffeinate keeps the Mac awake until the wait ends (kill $! lets it sleep)"
+  elif [[ "$p" == "oci" && -n "$(oci_session_profile "$(config_dir oci)/terraform.tfvars")" ]]; then
+    log "$p: keep this machine awake while it waits. A session token expires an hour after its last refresh, so sleeping longer than that ends the wait"
+  fi
 }
 
 # apply_once <provider> <saved plan, or ""> [extra args]: apply that plan without a prompt,
@@ -556,7 +700,34 @@ apply_host() {
     capacity) die "$p: out of host capacity. $again tries again until the host exists" ;;
     busy)     die "$p: too many requests. $again waits and tries again" ;;
   esac
+  oci_hints "$TMP/$p.out"
   exit 1
+}
+
+# plan_warnings <provider> <saved plan>: what a long plan makes easy to miss: what it destroys
+# or replaces (and everything that goes with it), and for OCI, a VCN the tenancy has no
+# room for
+plan_warnings() {
+  local json replaced destroyed tfvars tenancy out avail used
+  json="$TMP/$1.plan.json"
+  tf_for "$1" "$(stack_dir "$1")" show -json "$2" > "$json" 2>/dev/null || return 0
+  replaced="$(jq -r '[.resource_changes[]? | select(.change.actions | index("delete") and index("create")) | .address] | join(", ")' "$json")"
+  destroyed="$(jq -r '[.resource_changes[]? | select(.change.actions == ["delete"]) | .address] | join(", ")' "$json")"
+  [[ -z "$replaced" ]] || log "$1: this plan replaces $replaced. Each one is destroyed and created again, along with what is in it (a VCN takes its hosts with it)"
+  [[ -z "$destroyed" ]] || log "$1: this plan destroys $destroyed"
+  [[ "$1" == "oci" ]] && command -v oci >/dev/null || return 0
+  jq -e 'any(.resource_changes[]?; (.address | test("(^|\\.)oci_core_vcn\\.")) and (.change.actions | index("create")))' "$json" >/dev/null || return 0
+  tfvars="$(config_dir oci)/terraform.tfvars"
+  tenancy="$(tfvar "$tfvars" tenancy_ocid)"
+  oci_args "$tfvars"
+  out="$(oci_limit "$tenancy" vcn vcn-count)" || return 0
+  read -r avail used <<< "$out"
+  [[ $avail -lt 1 ]] || return 0
+  if [[ -n "$replaced" && "$replaced" == *oci_core_vcn.* ]]; then
+    log "$1: the tenancy has no VCN to spare in $(tfvar "$tfvars" region) ($used in use), and OCI goes on counting a deleted VCN for a while, so the new one would fail with LimitExceeded. Destroy first (freelunch destroy oci), and plan again a few minutes later"
+  else
+    log "$1: the tenancy has no VCN left in $(tfvar "$tfvars" region) ($used in use), so creating this one would fail with LimitExceeded. Delete one you don't use first"
+  fi
 }
 
 # saved_plan <provider> <file>: after plan --out
@@ -653,17 +824,24 @@ deployed_json() { # deployed_json <layer>: the deployed stacks of that layer, as
   printf ']'
 }
 
+# hybrid_tf <args...>: tofu/terraform in hybrid/, with its .terraform/ in the project, or in
+# TMP for SCRATCH_HYBRID
+hybrid_tf() {
+  if [[ $SCRATCH_HYBRID -eq 1 ]]; then TF_DATA_DIR="$TMP/hybrid.terraform" tf_in "$ROOT/hybrid" "$@"; else tf_for hybrid "$ROOT/hybrid" "$@"; fi
+}
+
 cmd_hybrid() {
   need_tf
   local hosts platforms state=() vars=()
   hosts="$(deployed_json host)"
   platforms="$(deployed_json platform)"
   check_checkout_tfvars "$ROOT/hybrid"
-  if [[ -n "$PROJECT" ]]; then state=(-state="$(hybrid_state)"); vars=(-var "state_dir=$PROJECT"); fi
+  if [[ -n "$PROJECT" || $SCRATCH_HYBRID -eq 1 ]]; then state=(-state="$(hybrid_state)"); fi
+  [[ -z "$PROJECT" ]] || vars=(-var "state_dir=$PROJECT")
   log "hybrid: aggregating $hosts$([[ "$platforms" == "[]" ]] || echo ", platforms $platforms")"
-  tf_for hybrid "$ROOT/hybrid" init -input=false -upgrade=false >/dev/null
-  tf_for hybrid "$ROOT/hybrid" apply -input=false -auto-approve ${state[@]+"${state[@]}"} ${vars[@]+"${vars[@]}"} -var "host_providers=$hosts" -var "platform_providers=$platforms" >/dev/null
-  tf_for hybrid "$ROOT/hybrid" output ${state[@]+"${state[@]}"} hosts_by_provider
+  hybrid_tf init -input=false -upgrade=false >/dev/null
+  hybrid_tf apply -input=false -auto-approve ${state[@]+"${state[@]}"} ${vars[@]+"${vars[@]}"} -var "host_providers=$hosts" -var "platform_providers=$platforms" >/dev/null
+  hybrid_tf output ${state[@]+"${state[@]}"} hosts_by_provider
 }
 
 cmd_inventory() {
@@ -697,7 +875,7 @@ cmd_output() { # cmd_output <stack|hybrid> [tofu/terraform output args]
 cmd_lifecycle() { # plan|apply|destroy
   need_tf
   local action="$1"; shift
-  local names=() extra=() wait_for_capacity=0 user_data=0 detach=0 out="" saved="" plan_file="" a child=()
+  local names=() extra=() wait_for_capacity=0 user_data=0 detach=0 out="" saved="" plan_file="" a child=() to=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --)                  shift; extra=("$@"); break ;;
@@ -749,14 +927,26 @@ cmd_lifecycle() { # plan|apply|destroy
 
   case "$action" in
     plan)
+      [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
       for a in ${hosts[@]+"${hosts[@]}"} ${platforms[@]+"${platforms[@]}"} ${services[@]+"${services[@]}"} ${glue[@]+"${glue[@]}"}; do
         saved="$out"
-        if [[ -z "$saved" && $user_data -eq 1 && "$(meta "$a" layer)" == "host" ]]; then
-          [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-          saved="$TMP/$a.tfplan"
+        [[ -n "$saved" || $user_data -eq 0 || "$(meta "$a" layer)" != "host" ]] || saved="$TMP/$a.tfplan"
+        if [[ -n "$saved" ]]; then
+          # A plan holds the stack's variables and state, so nobody else may read it, not
+          # even while it is written. tofu/terraform keep the mode of a file that exists.
+          rm -f "$saved"
+          (umask 077 && : > "$saved")
         fi
-        if [[ -z "$saved" ]]; then run_stack plan "$a" ${extra[@]+"${extra[@]}"}; continue; fi
-        run_stack plan "$a" -out="$saved" ${extra[@]+"${extra[@]}"}
+        to=()
+        [[ -z "$saved" ]] || to=(-out="$saved")
+        if ! run_stack plan "$a" ${to[@]+"${to[@]}"} ${extra[@]+"${extra[@]}"} 2>&1 | keep "$TMP/$a.plan.out"; then
+          # A failed plan is saved too, half of it, and must not be applied.
+          [[ -z "$saved" ]] || rm -f "$saved"
+          oci_hints "$TMP/$a.plan.out"
+          exit 1
+        fi
+        [[ -n "$saved" ]] || continue
+        plan_warnings "$a" "$saved"
         [[ $user_data -eq 0 || "$(meta "$a" layer)" != "host" ]] || show_user_data "$a" "$saved"
         [[ -z "$out" ]] || saved_plan "$a" "$saved"
       done ;;
@@ -818,7 +1008,7 @@ fmt_duration() { # fmt_duration <seconds>: 2d 3h, 1h 5m, 4m 10s or 12s
 }
 
 show_wait() { # show_wait <provider> <wait.state>
-  local p="$1" key value state="" pid="" started=0 updated=0 attempt=0 last="" next="" log_file="" now
+  local p="$1" key value state="" pid="" started=0 updated=0 attempt=0 last="" next="" log_file="" session="" now
   while IFS='=' read -r key value; do
     case "$key" in
       state)   state="$value" ;;
@@ -829,6 +1019,7 @@ show_wait() { # show_wait <provider> <wait.state>
       last)    last="${value#"$p: "}" ;;
       next)    next="$value" ;;
       log)     log_file="$value" ;;
+      session) session="$value" ;;
     esac
   done < "$2"
   now="$(date +%s)"
@@ -838,6 +1029,7 @@ show_wait() { # show_wait <provider> <wait.state>
         echo "$p: waiting for capacity for $(fmt_duration $((now - started))), $(attempts "$attempt") so far (pid $pid)"
         echo "  last: $last"
         if [[ -n "$next" && $next -gt $now ]]; then echo "  next attempt: $(fmt_time "$next"), in $(fmt_duration $((next - now)))"; fi
+        if [[ -n "$session" && $session -gt $now ]]; then echo "  the session ends: $(fmt_time "$session"), in $(fmt_duration $((session - now))), and the wait with it"; fi
       else
         echo "$p: the wait for capacity ended unexpectedly after $(attempts "$attempt"), $(fmt_time "$updated") (pid $pid is gone)"
         echo "  last: $last"
@@ -888,15 +1080,28 @@ REMOTE_STATUS='for d in /opt/freelunch/apps/*/; do
   (cd "$d" && docker compose ps -a --format "{{.Service}}|{{.State}}|{{.Health}}") | sed "s/^/$app|/"
 done'
 
+# status_hosts: the hosts, or why there are none yet. Fails with 1 when no host stack is
+# configured or deployed, and with 2 when one is but has no host yet.
 status_hosts() {
-  local p lines=""
+  local p out lines="" stacks=()
   for p in $(all_providers); do
-    if [[ "$(meta "$p" layer)" != "host" || ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
-    lines="$lines$(jq -r '.outputs.hosts.value[]? | "  \("\(.provider)-\(.name)" | . + (" " * ([14 - length, 1] | max)))\(.public_ip // .private_ip // "-")  \(.arch)  \(.size)"' "$(config_dir "$p")/terraform.tfstate")"$'\n'
+    [[ "$(meta "$p" layer)" == "host" && -d "$(stack_dir "$p")" ]] || continue
+    if is_deployed "$p"; then
+      out="$(jq -r '.outputs.hosts.value[]? | "  \("\(.provider)-\(.name)" | . + (" " * ([14 - length, 1] | max)))\(.public_ip // .private_ip // "-")  \(.arch)  \(.size)"' "$(config_dir "$p")/terraform.tfstate")"
+      [[ -z "$out" ]] || lines="$lines$out"$'\n'
+    elif ! is_configured "$p"; then
+      continue
+    fi
+    stacks+=("$p")
   done
-  [[ -n "$lines" ]] || return 1
+  [[ ${#stacks[@]} -gt 0 ]] || return 1
   echo "Hosts"
-  printf '%s' "$lines"
+  if [[ -n "$lines" ]]; then printf '%s' "$lines"; return 0; fi
+  for p in "${stacks[@]}"; do
+    if wait_pid "$p" >/dev/null; then echo "  none yet ($p: waiting for capacity)"
+    else echo "  none yet ($p: freelunch apply $p)"; fi
+  done
+  return 2
 }
 
 status_platforms() {
@@ -956,10 +1161,17 @@ status_apps() {
   done
 }
 
-status_tunnels() {
+status_tunnels() { # status_tunnels <0 when there are hosts>
   local state tfvars account zone host id out text urls token="${CLOUDFLARE_API_TOKEN:-}"
   state="$(config_dir cloudflare)/terraform.tfstate"
-  [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare || return 0
+  [[ -d "$(stack_dir cloudflare)" ]] || return 0
+  if ! is_deployed cloudflare; then
+    is_configured cloudflare || return 0
+    echo "Tunnels"
+    if [[ "$1" -eq 0 ]]; then echo "  cloudflare: configured, not applied (freelunch apply cloudflare)"
+    else echo "  cloudflare: configured, not applied (after the hosts: freelunch apply cloudflare)"; fi
+    return 0
+  fi
   tfvars="$(config_dir cloudflare)/terraform.tfvars"
   account="$(tfvar "$tfvars" account_id 2>/dev/null || true)"
   zone="$(tfvar "$tfvars" zone 2>/dev/null || true)"
@@ -1009,15 +1221,16 @@ status_waits() {
 cmd_status() {
   local found=0
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-  if status_hosts; then found=1; fi
-  if status_platforms; then found=1; fi
-  if [[ $found -eq 0 ]]; then
+  status_hosts || found=$?
+  # A platform is somewhere to deploy to, like a host that exists.
+  if status_platforms; then found=0; fi
+  if [[ $found -eq 1 ]]; then
     echo "Nothing is deployed here yet."
     status_waits
     return 0
   fi
-  status_apps
-  status_tunnels
+  [[ $found -ne 0 ]] || status_apps
+  status_tunnels "$found"
   status_tokens
   status_waits
 }
@@ -1126,6 +1339,24 @@ with_name() {
     }' "$2"
 }
 
+# project_gitignore: the .gitignore of a project folder
+project_gitignore() {
+  cat <<'EOF'
+# Written by freelunch init: local config, state and secrets stay out of git.
+*/terraform.tfvars
+*/terraform.tfstate
+*/terraform.tfstate.*
+*/.terraform/
+.env
+*.env
+inventory.json
+known_hosts
+*/wait.log
+*/wait.state
+*.tfplan
+EOF
+}
+
 # route_example <stack> <target> <app> <platform 0|1>: a stack's example as it is, except
 # that the cloudflare one routes to the project's target, and names the app on a platform
 route_example() {
@@ -1134,7 +1365,7 @@ route_example() {
 }
 
 cmd_init() {
-  local base cfg s src name="" workflow=0 stacks=()
+  local base cfg s src name="" workflow=0 missing stacks=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name)   [[ $# -gt 1 ]] || die "init: --name takes a name"; name="$2"; shift ;;
@@ -1165,20 +1396,13 @@ cmd_init() {
   done
 
   mkdir -p "$cfg"
-  write_new "$cfg/.gitignore" <<'EOF'
-# Written by freelunch init: local config, state and secrets stay out of git.
-*/terraform.tfvars
-*/terraform.tfstate
-*/terraform.tfstate.*
-*/.terraform/
-.env
-*.env
-inventory.json
-known_hosts
-*/wait.log
-*/wait.state
-*.tfplan
-EOF
+  project_gitignore | write_new "$cfg/.gitignore"
+  # A .gitignore from an earlier freelunch lacks the files that came since.
+  missing="$(project_gitignore | grep -v '^#' | grep -vxF -f "$cfg/.gitignore" || true)"
+  if [[ -n "$missing" ]]; then
+    printf '\n# Added by freelunch init\n%s\n' "$missing" >> "$cfg/.gitignore"
+    log "added to $(rel "$cfg/.gitignore"): $(paste -sd' ' - <<< "$missing")"
+  fi
 
   # The first host or platform runs the app. On a platform the app becomes a service named
   # after it, and those names are stricter: letters, digits and single hyphens.
@@ -1275,7 +1499,19 @@ EOF
 
   log "project name: $name (name_prefix in each stack's tfvars)"
   [[ $workflow -eq 0 ]] || image_workflow "$base" "${stacks[@]}"
-  [[ -f "$base/$compose" ]] || log "there is no $compose yet; apps.tfvars expects one"
+  # apps.tfvars may be one init kept, whose apps are somewhere else.
+  local entry path full
+  while IFS=$'\t' read -r entry path; do
+    full="$path"
+    [[ "$full" == /* ]] || full="$cfg/$path"
+    [[ -z "$path" || -f "$full" ]] && continue
+    case "$path" in
+      ../*) path="${path#../}" ;;
+      /*)   ;;
+      *)    path=".freelunch/$path" ;;
+    esac
+    log "there is no $path yet; apps.tfvars expects one for $entry"
+  done < <(tfvars_map "$cfg/apps.tfvars" apps compose)
   local applies=""
   for s in "${stacks[@]}"; do applies="${applies:+$applies, then }freelunch apply $s"; done
   cat >&2 <<EOF
@@ -1286,7 +1522,7 @@ Next steps:
   3. $applies
   4. freelunch deploy
 EOF
-  # API key profiles have a user= line; session profiles don't, and a session ends within a day.
+  # API key profiles have a user= line; session profiles don't, and a session ends hours after signing in.
   if [[ " ${stacks[*]} " == *" oci "* ]] && ! grep -qs '^user[[:space:]]*=' "$HOME/.oci/config"; then
     cat >&2 <<'EOF'
 
@@ -2298,24 +2534,18 @@ cmd_domain() {
 
 # oci_console_keys <instance id>: the SSH host keys an OCI instance printed to its console
 oci_console_keys() {
-  local tfvars profile region history out args=()
+  local tfvars session history out
   tfvars="$(config_dir oci)/terraform.tfvars"
-  profile="$(tfvar "$tfvars" oci_config_profile)"
-  profile="${profile:-${TF_VAR_oci_config_profile:-DEFAULT}}"
-  region="$(tfvar "$tfvars" region)"
   command -v oci >/dev/null || die "trust: reading an OCI console takes the OCI CLI (https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm)"
-  args=(--profile "$profile")
-  [[ -z "$region" ]] || args+=(--region "$region")
-  if [[ -n "$(oci_session_profile "$tfvars")" ]]; then
-    check_oci_session "$profile"
-    args+=(--auth security_token)
-  fi
-  history="$(oci compute console-history capture --instance-id "$1" --wait-for-state SUCCEEDED --query data.id --raw-output "${args[@]}")" \
+  session="$(oci_session_profile "$tfvars")"
+  [[ -z "$session" ]] || check_oci_session "$session"
+  oci_args "$tfvars"
+  history="$(oci compute console-history capture --instance-id "$1" --wait-for-state SUCCEEDED --query data.id --raw-output "${OCI_ARGS[@]}")" \
     || die "trust: can't capture the console of $1 (see above)"
-  out="$(oci compute console-history get-content --instance-console-history-id "$history" --length 1048576 --file - "${args[@]}")" \
+  out="$(oci compute console-history get-content --instance-console-history-id "$history" --length 1048576 --file - "${OCI_ARGS[@]}")" \
     || die "trust: can't read the console history $history (see above)"
   # A capture is a copy of the console on OCI's side; it isn't needed any more.
-  oci compute console-history delete --instance-console-history-id "$history" --force "${args[@]}" >/dev/null 2>&1 || true
+  oci compute console-history delete --instance-console-history-id "$history" --force "${OCI_ARGS[@]}" >/dev/null 2>&1 || true
   tr -d '\r' <<< "$out" | sed -n '/BEGIN SSH HOST KEY KEYS/,/END SSH HOST KEY KEYS/p' | grep -oE '^(ssh|ecdsa|sk)-[a-z0-9@.-]+ [A-Za-z0-9+/]+=*' | sort -u || true
 }
 
@@ -2380,8 +2610,9 @@ cmd_trust() {
 # --- doctor ---------------------------------------------------------------------------
 
 # Everything a project needs before plan, apply or deploy spend time on it: tools, cloud
-# sign-ins, SSH keys, images and the Cloudflare token and zone. Each check prints ok, warn
-# or fail. It only reads, at the providers too, and exits 1 when a check failed.
+# sign-ins and limits, SSH keys, images and the Cloudflare token and zone. Each check prints
+# ok, warn or fail. It only reads, at the providers and in the project (the inventory it
+# needs is built in a temp folder), and exits 1 when a check failed.
 FAILS=0 WARNS=0
 
 check() { # check <ok|warn|fail> <what>
@@ -2404,8 +2635,20 @@ doctor_tools() {
   elif is_configured oci; then check warn "no OCI CLI: it refreshes session tokens, and --wait-for-capacity with a session token needs it"; fi
 }
 
+# key_file <profile>: the key_file of a profile in ~/.oci/config
+key_file() {
+  awk -v p="[$1]" '$0 == p { s = 1; next } /^\[/ { s = 0 } s && /^key_file[ \t]*=/ { sub(/^[^=]*=[ \t]*/, ""); print; exit }' "$HOME/.oci/config" 2>/dev/null
+}
+
+# file_age <file>: seconds since the file changed
+file_age() {
+  local m
+  m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)" || return 1
+  echo $(($(date +%s) - m))
+}
+
 doctor_oci() {
-  local tfvars profile session tenancy region out home key login=()
+  local tfvars profile session tenancy region out home key end="" ends="" age hint=""
   tfvars="$(config_dir oci)/terraform.tfvars"
   profile="$(tfvar "$tfvars" oci_config_profile)"
   profile="${profile:-${TF_VAR_oci_config_profile:-DEFAULT}}"
@@ -2417,15 +2660,19 @@ doctor_oci() {
     check fail "$HOME/.oci/config has no profile $profile; oci setup bootstrap --profile-name $profile creates one"
     return 0
   fi
+  # The session can be refreshed until it ends, as many hours after signing in as the
+  # tenancy allows.
+  [[ -z "$session" ]] || end="$(session_end "$profile")"
+  [[ -z "$end" ]] || ends="; the session ends at $(fmt_time "$end"), in $(fmt_duration $((end > $(date +%s) ? end - $(date +%s) : 0)))"
   if ! command -v oci >/dev/null; then
     # Without the CLI, only what the provider will read can be checked.
     if [[ -n "$session" ]]; then
-      key="$(oci_token_expiry "$profile")"
+      key="$(oci_token_claim "$profile" exp)"
       if [[ "$key" =~ ^[0-9]+$ && $key -le $(date +%s) ]]; then check fail "the session of profile $profile has expired: oci session authenticate --profile-name $profile"
-      elif [[ "$key" =~ ^[0-9]+$ ]]; then check ok "the session of profile $profile is valid until $(fmt_time "$key") (not asked at OCI: no OCI CLI)"
+      elif [[ "$key" =~ ^[0-9]+$ ]]; then check ok "the session of profile $profile is valid until $(fmt_time "$key")$ends (not asked at OCI: no OCI CLI)"
       else check warn "can't read the session token of profile $profile"; fi
     else
-      key="$(awk -v p="[$profile]" '$0 == p { s = 1; next } /^\[/ { s = 0 } s && /^key_file[ \t]*=/ { sub(/^[^=]*=[ \t]*/, ""); print; exit }' "$HOME/.oci/config")"
+      key="$(key_file "$profile")"
       if [[ -f "${key/#\~/$HOME}" ]]; then check ok "profile $profile has its API key (not asked at OCI: no OCI CLI)"
       else check fail "the key_file of profile $profile is missing: ${key:-none set}"; fi
     fi
@@ -2433,14 +2680,14 @@ doctor_oci() {
   fi
   if [[ -n "$session" ]]; then
     if out="$(oci session validate --profile "$profile" 2>&1)"; then
-      check ok "the session of profile $profile is valid until ${out##*valid until } (refreshed before each run, for 24 hours after signing in)"
+      check ok "the session of profile $profile is valid until ${out##*valid until }, and each run refreshes it$ends"
     else
       check fail "the session of profile $profile has expired: oci session authenticate --profile-name $profile (an API key doesn't expire: oci setup bootstrap)"
       return 0
     fi
-    login=(--auth security_token)
   fi
-  if out="$(oci iam region-subscription list ${tenancy:+--tenancy-id "$tenancy"} --profile "$profile" ${login[@]+"${login[@]}"} 2>&1)"; then
+  oci_args "$tfvars"
+  if out="$(oci iam region-subscription list ${tenancy:+--tenancy-id "$tenancy"} "${OCI_ARGS[@]}" 2>&1)"; then
     [[ -n "$session" ]] || check ok "profile $profile signs in with its API key"
     home="$(jq -r '.data[]? | select(."is-home-region") | ."region-name"' <<< "$out" 2>/dev/null)"
     if [[ -n "$home" && -n "$region" ]]; then
@@ -2448,7 +2695,72 @@ doctor_oci() {
       else check fail "region is $region, but the tenancy's home region is $home, and Always Free resources only exist there"; fi
     fi
   else
-    check fail "profile $profile can't sign in to OCI: $(grep -m1 -E 'message|Error|error' <<< "$out" | sed 's/^[[:space:]]*//')"
+    out="$(oci_error "$out")"
+    # A new API key works in some places before others for a few minutes.
+    if [[ "$out" == 401* && -z "$session" ]]; then
+      key="$(key_file "$profile")"
+      if age="$(file_age "${key/#\~/$HOME}")" && [[ $age -lt 900 ]]; then
+        hint="Its API key is $(fmt_duration "$age") old, and a new key can take a few minutes to work everywhere: try again shortly"
+      else
+        hint="A new API key can take a few minutes to work everywhere; otherwise check that the fingerprint and key_file of profile $profile match one of your user's API keys"
+      fi
+    fi
+    check fail "profile $profile can't sign in to OCI: ${out%.}${hint:+. $hint}"
+    return 0
+  fi
+  [[ -z "$tenancy" ]] || doctor_oci_limits "$tenancy" "$tfvars" "$region"
+}
+
+# doctor_oci_limits <tenancy> <tfvars> <region>: what the oci stack still has to create, next
+# to what OCI's limits leave the tenancy, which count every project in it: a VCN, and A1
+# cores. The Always Free allowance comes from providers/oci/provider.yaml.
+doctor_oci_limits() {
+  local tenancy="$1" tfvars="$2" region="$3" state existing out avail used ads ad key shape ocpus
+  local have=0 want=0 biggest=0 total=0 room=0 left="" free elsewhere
+  state="$(config_dir oci)/terraform.tfstate"
+  existing=" $(jq -r '[.outputs.hosts.value[]?.name] | join(" ")' "$state" 2>/dev/null || true) "
+  if out="$(oci_limit "$tenancy" vcn vcn-count)"; then
+    read -r avail used <<< "$out"
+    if [[ "$existing" != "  " ]] || jq -e 'any(.resources[]?; .type == "oci_core_vcn")' "$state" >/dev/null 2>&1; then
+      if [[ $avail -gt 0 ]]; then check ok "VCNs: $avail of $((avail + used)) left in $region, besides this stack's"
+      else check ok "VCNs: all $used in $region are in use, this stack's included, so a plan that replaces its network can't be applied in one go"; fi
+    elif [[ $avail -gt 0 ]]; then check ok "VCNs: $avail of $((avail + used)) left in $region, and this stack creates one"
+    else check fail "VCNs: all $used in $region are in use, and this stack creates one, so apply would stop at LimitExceeded (vcn-count). Delete a VCN you don't use first"; fi
+  else
+    check warn "can't read the tenancy's VCN limit: $(oci_error "$out")"
+  fi
+
+  # The A1 limit is per availability domain; the Always Free allowance is for the tenancy.
+  free="$(sed -n 's/^ *max_ocpus: *\([0-9]*\).*/\1/p' "$PROVIDERS_DIR/oci/provider.yaml" | head -1)"
+  while IFS=$'\t' read -r key shape ocpus; do
+    [[ "$(shape_arch "$shape")" == "arm64" ]] || continue
+    ocpus="${ocpus%%.*}"
+    if [[ "$existing" == *" $key "* ]]; then have=$((have + ocpus))
+    else want=$((want + ocpus)); [[ $ocpus -le $biggest ]] || biggest=$ocpus; fi
+  done < <(oci_instances "$tfvars")
+  if ! out="$(oci iam availability-domain list -c "$tenancy" "${OCI_ARGS[@]}" 2>&1)" || ! ads="$(jq -er '.data[].name' <<< "$out" 2>/dev/null)"; then
+    check warn "can't list the tenancy's availability domains: $(oci_error "$out")"
+    return 0
+  fi
+  for ad in $ads; do
+    if ! out="$(oci_limit "$tenancy" compute standard-a1-core-count "$ad")"; then
+      check warn "can't read the tenancy's A1 core limit: $(oci_error "$out")"
+      return 0
+    fi
+    read -r avail used <<< "$out"
+    total=$((total + used))
+    [[ $avail -lt $biggest ]] || room=1
+    left="${left:+$left, }$avail in AD-${ad##*-AD-}"
+  done
+  elsewhere=$((total > have ? total - have : 0))
+  if [[ $want -gt 0 && $room -eq 0 ]]; then
+    check fail "A1: this stack's new hosts need $biggest OCPU(s) in one availability domain, and the tenancy's limit leaves $left, so apply would stop at LimitExceeded (standard-a1-core-count)"
+  elif [[ $((elsewhere + have + want)) -gt $free ]]; then
+    check fail "A1: other instances in the tenancy use $elsewhere OCPU(s), and with this stack's $((have + want)) that is over the Always Free $free. The rest is billed (Pay As You Go) or refused (LimitExceeded)"
+  elif [[ $want -gt 0 ]]; then
+    check ok "A1: $total of the $free free OCPUs in use in the tenancy, and this stack adds $want"
+  else
+    check ok "A1: $total of the $free free OCPUs in use in the tenancy"
   fi
 }
 
@@ -2504,7 +2816,7 @@ deploy_keys() {
 doctor_ssh() {
   local p tfvars mine theirs which
   mine="$(deploy_keys)"
-  which="${FREELUNCH_SSH_KEY:+FREELUNCH_SSH_KEY ($FREELUNCH_SSH_KEY)}"
+  which="${FREELUNCH_SSH_KEY:+FREELUNCH_SSH_KEY=$FREELUNCH_SSH_KEY}"
   for p in $(all_providers); do
     if [[ "$(meta "$p" layer)" != "host" || ! -d "$(stack_dir "$p")" ]] || ! is_configured "$p"; then continue; fi
     tfvars="$(config_dir "$p")/terraform.tfvars"
@@ -2518,8 +2830,44 @@ doctor_ssh() {
     else
       check fail "none of ssh_public_keys in $(rel "$tfvars") is the key deploy uses (${which:-ssh-agent or ~/.ssh}). Add its .pub, or set FREELUNCH_SSH_KEY"
     fi
-    [[ ! -s "$(config_dir "$p")/terraform.tfstate" ]] || check warn "keys only reach a host when it is created; for one that exists, what is in its authorized_keys counts"
+    if jq -e '(.outputs.hosts.value // []) | length > 0' "$(config_dir "$p")/terraform.tfstate" >/dev/null 2>&1; then
+      check warn "keys only reach a host when it is created; for one that exists, what is in its authorized_keys counts"
+    fi
   done
+}
+
+# has_hosts: whether a host stack has a host already
+has_hosts() {
+  local p
+  for p in $(all_providers); do
+    [[ "$(meta "$p" layer)" == "host" ]] || continue
+    jq -e '(.outputs.hosts.value // []) | length > 0' "$(config_dir "$p")/terraform.tfstate" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+# planned_registries <apps file>: registries.json, as deploy_plan writes it, from apps.tfvars
+planned_registries() {
+  tfvars_map "$1" registries username password_env \
+    | jq -Rn '[inputs | split("\t") | {key: .[0], value: {username: .[1], password_env: .[2]}}] | from_entries' > "$TMP/registries.json"
+}
+
+# planned_targets <apps file>: targets.json, as deploy_plan writes it, for OCI hosts that
+# don't exist yet: their architecture comes from the shape in the oci stack's tfvars. Fails
+# when no app is on such a host.
+planned_targets() {
+  local key shape ocpus shapes="{}"
+  is_configured oci || return 1
+  while IFS=$'\t' read -r key shape ocpus; do
+    shapes="$(jq -c --arg h "oci-$key" --arg s "$shape" --arg a "$(shape_arch "$shape")" '. + {($h): {shape: $s, arch: $a}}' <<< "$shapes")"
+  done < <(oci_instances "$(config_dir oci)/terraform.tfvars")
+  tfvars_map "$1" apps host compose | jq -Rn --argjson hosts "$shapes" --arg dir "$(state_root)" '
+    [inputs | split("\t") | select($hosts[.[1]] != null)
+      | {app: .[0], host: .[1], compose: (if .[2] | startswith("/") then .[2] else "\($dir)/\(.[2])" end)}]
+    | group_by(.host)
+    | map({key: .[0].host, value: ($hosts[.[0].host] + {apps: (map({key: .app, value: {compose}}) | from_entries)})})
+    | from_entries' > "$TMP/targets.json"
+  [[ "$(jq length "$TMP/targets.json")" != "0" ]]
 }
 
 doctor_images() {
@@ -2528,9 +2876,16 @@ doctor_images() {
   [[ -f "$apps_file" && -n "$TF" ]] || return 0
   echo "Images ($(rel "$apps_file"))"
   if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  # Before the hosts exist, apps.tfvars can't resolve against the inventory, but the logins
+  # can be checked, and so can the images of an OCI host, whose shape gives its architecture.
   if ! { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1; then
-    check warn "apps.tfvars doesn't resolve against the inventory yet, so the images wait (apply the hosts first; freelunch deploy --dry-run says why)"
-    return 0
+    planned_registries "$apps_file"
+    if ! has_hosts && planned_targets "$apps_file"; then
+      check ok "no host exists yet, so the images are checked for the shapes in $(rel "$(config_dir oci)")/terraform.tfvars: $(jq -r '[to_entries[] | "\(.key) is linux/\(.value.arch)"] | join(", ")' "$TMP/targets.json")"
+    else
+      check warn "apps.tfvars doesn't resolve against the inventory yet, so the images wait (apply the hosts first; freelunch deploy --dry-run says why)"
+      echo '{}' > "$TMP/targets.json"
+    fi
   fi
   for var in $(jq -r '.[].password_env' "$TMP/registries.json"); do
     if [[ -n "${!var:-}" ]]; then check ok "\$$var is set (registries in apps.tfvars)"; else check fail "\$$var is not set (registries in apps.tfvars): export it or put it in $(rel "$(state_root)")/.env"; fi
@@ -2614,6 +2969,7 @@ doctor_config() {
 
 cmd_doctor() {
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  SCRATCH_HYBRID=1
   echo "freelunch doctor${PROJECT:+ ($(rel "$PROJECT"))}"
   echo
   doctor_tools
