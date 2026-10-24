@@ -176,3 +176,211 @@ run "registry_password_must_come_from_an_env_var" {
 
   expect_failures = [var.registries]
 }
+
+# Container platforms --------------------------------------------------------------------
+
+run "apps_on_a_platform_become_services" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = "tests/fixtures/platform/cloudflare.tfstate"
+    apps                 = { api = { host = "northflank-main", compose = "api.yaml", env_file = "../api.env" } }
+  }
+
+  assert {
+    condition = (
+      output.targets["northflank-main"].kind == "platform" &&
+      output.targets["northflank-main"].address == null &&
+      output.targets["northflank-main"].provider == "northflank" &&
+      output.targets["northflank-main"].arch == "amd64" &&
+      output.targets["northflank-main"].tunnel &&
+      output.targets["northflank-main"].urls == tolist(["https://api.example.com"])
+    )
+    error_message = "A platform target has no SSH address, and gets cloudflared when it has a tunnel."
+  }
+
+  assert {
+    condition     = endswith(output.targets["northflank-main"].apps.api.env_file, "/deploy/tests/fixtures/api.env")
+    error_message = "The app's env_file is resolved like on a host."
+  }
+
+  assert {
+    condition = (
+      output.platforms["northflank-main"].provider == "northflank" &&
+      output.platforms["northflank-main"].id == "freelunch" &&
+      output.platforms["northflank-main"].size == "nf-compute-20"
+    )
+    error_message = "The platform plan carries the project and the plan from the inventory."
+  }
+
+  assert {
+    condition = jsonencode(output.platforms["northflank-main"].services.api) == jsonencode({
+      image       = "ghcr.io/me/api:1.4.2"
+      command     = "serve --port 8080 --name \"my api\""
+      entrypoint  = null
+      environment = { LOG_LEVEL = "info", WORKERS = "2" }
+      ports       = [8080, 9090]
+      healthcheck = { cmd = "wget -qO- http://127.0.0.1:8080/health", initial_delay = 90, interval = 15, timeout = 5, retries = 6 }
+    })
+    error_message = "The service takes image, command, environment, ports and healthcheck from the Compose file."
+  }
+}
+
+run "compose_files_in_other_shapes" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = null
+    apps                 = { worker = { host = "northflank-main", compose = "list-env.yaml" } }
+  }
+
+  assert {
+    condition = jsonencode(output.platforms["northflank-main"].services.worker) == jsonencode({
+      image       = "traefik/whoami"
+      command     = null
+      entrypoint  = "/whoami"
+      environment = { MODE = "worker", URL = "https://example.com/?a=b" }
+      ports       = []
+      healthcheck = { cmd = "/bin/sh -c \"curl -f http://localhost/ || exit 1\"", initial_delay = 1, interval = 30, timeout = 30, retries = 3 }
+    })
+    error_message = "A list environment, a string entrypoint and a CMD-SHELL test (as a string) carry over too, with Docker's defaults."
+  }
+
+  assert {
+    condition     = !output.targets["northflank-main"].tunnel
+    error_message = "No tunnel without the cloudflare stack."
+  }
+}
+
+run "platform_apps_run_one_container" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = null
+    apps                 = { api = { host = "northflank-main", compose = "two-services.yaml" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
+run "platform_apps_have_no_volumes_yet" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = null
+    apps                 = { api = { host = "northflank-main", compose = "volumes.yaml" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
+run "platform_apps_need_an_image" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = null
+    apps                 = { api = { host = "northflank-main", compose = "build.yaml" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
+run "platforms_cant_fill_in_compose_variables" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = null
+    apps                 = { api = { host = "northflank-main", compose = "variables.yaml" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
+run "platform_service_names_follow_the_platform" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = null
+    apps                 = { db = { host = "northflank-main", compose = "api.yaml" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
+run "free_platforms_count_cloudflared_too" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = "tests/fixtures/platform/cloudflare.tfstate"
+    apps = {
+      api    = { host = "northflank-main", compose = "api.yaml" }
+      worker = { host = "northflank-main", compose = "list-env.yaml" }
+    }
+  }
+
+  expect_failures = [output.platforms]
+}
+
+run "routes_must_reach_an_app_on_the_platform" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = "tests/fixtures/platform/cloudflare.tfstate"
+    apps                 = { worker = { host = "northflank-main", compose = "list-env.yaml" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
+run "routes_must_reach_a_port_the_app_listens_on" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = "tests/fixtures/platform/cloudflare.tfstate"
+    apps                 = { api = { host = "northflank-main", compose = "../compose.yaml" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
+run "hosts_and_platforms_side_by_side" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = "tests/fixtures/platform/cloudflare.tfstate"
+    apps = {
+      api = { host = "northflank-main", compose = "api.yaml" }
+      web = { host = "oci-main", compose = "../compose.yaml" }
+    }
+  }
+
+  assert {
+    condition = (
+      output.targets["oci-main"].kind == "host" && output.targets["oci-main"].address == "203.0.113.10" &&
+      keys(output.platforms) == ["northflank-main"] && keys(output.platforms["northflank-main"].services) == ["api"]
+    )
+    error_message = "Hosts keep their SSH plan, and only platform targets get services."
+  }
+}

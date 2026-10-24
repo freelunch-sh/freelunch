@@ -17,15 +17,18 @@ variable "name_prefix" {
 variable "routes" {
   description = <<-EOT
     Public hostnames, keyed by full hostname. Each one gets a proxied CNAME to the tunnel
-    of `host`, and the tunnel forwards it to <scheme>://localhost:<port> on that host
-    (cloudflared runs with host networking). Set `access` to put Cloudflare Access in
-    front of the hostname: an email login for people (`emails`, `email_domains`), service
-    tokens for machine clients (`service_tokens`, by name), or both.
+    of `host`, and the tunnel forwards it to <scheme>://<origin>:<port>. origin is
+    localhost on a VM, where cloudflared runs with host networking, or the app's service
+    name on a container platform, where cloudflared is a service of its own. Set `access`
+    to put Cloudflare Access in front of the hostname: an email login for people
+    (`emails`, `email_domains`), service tokens for machine clients (`service_tokens`, by
+    name), or both.
   EOT
   type = map(object({
     host   = string
     port   = number
     scheme = optional(string, "http")
+    origin = optional(string, "localhost")
     access = optional(object({
       emails         = optional(list(string), [])
       email_domains  = optional(list(string), [])
@@ -51,6 +54,11 @@ variable "routes" {
   validation {
     condition     = alltrue([for r in var.routes : contains(["http", "https"], r.scheme)])
     error_message = "scheme must be http or https."
+  }
+
+  validation {
+    condition     = alltrue([for r in var.routes : can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", r.origin))])
+    error_message = "origin is a host name cloudflared can reach: localhost, or a service name such as api."
   }
 
   validation {

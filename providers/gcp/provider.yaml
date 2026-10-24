@@ -11,12 +11,13 @@ free_tier_type: always-free
 free_tier: "1 e2-micro VM (us-west1, us-central1 or us-east1) with 30 GB standard disk, 5 GB Cloud Storage, Cloud Run 2M requests + 180k vCPU-s/month; $300 trial credit for 90 days"
 card_required: "yes"
 url: "https://cloud.google.com/free"
-last_verified: "2026-10-19"
-notes: "Billing account required; anything above the allowance is billed. The e2-micro allowance is hours per billing account, so a second VM is billed. The VM's external IPv4 address is billed (about $3.65/month) and is not part of the free tier. e2-micro has 1 GB RAM, so enable swap."
+last_verified: "2026-10-24"
+notes: "Billing account required; anything above the allowance is billed. The e2-micro allowance is hours per billing account, so a second VM is billed. The VM's external IPv4 address is billed (about $3.65/month) and is not part of the free tier; an external IPv6 address is not billed, but ghcr.io has no IPv6 address yet, so an IPv6-only VM can't pull from it. e2-micro has 1 GB RAM, so enable swap."
 sources:
-  - "docs.cloud.google.com/free/docs/free-cloud-features (last updated 2026-10-13, checked 2026-10-19)"
+  - "docs.cloud.google.com/free/docs/free-cloud-features (last updated 2026-10-20, checked 2026-10-24)"
   - "cloud.google.com/vpc/pricing-announce-external-ips ($0.005/h per in-use IPv4 since 2024-02-01, checked 2026-10-19)"
-  - "cloud.google.com/blog: 200 GB free Standard Tier internet egress per region per month (since 2023-10-01)"
+  - "cloud.google.com/vpc/network-pricing (no charge for external IPv6 addresses on VMs; Standard Tier: first 200 GiB a month free per account across all regions; checked 2026-10-24)"
+  - "DNS lookups for AAAA records: none for ghcr.io and github.com; Docker Hub, Artifact Registry, the Ubuntu mirrors and Cloudflare's tunnel edge have them (2026-10-24)"
   - "inspire/repos/multi-cloud/bodecloud-CloudBooter/cloud/GCP/docs/FREE_TIER_LIMITS.md (2026-07)"
   - "registry.terraform.io (checked 2026-10-19)"
 inspire:

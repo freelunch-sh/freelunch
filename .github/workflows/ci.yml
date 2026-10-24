@@ -27,7 +27,7 @@ jobs:
           - tool: tofu
             suites: >-
               catalog deploy hybrid shared tests providers/aws providers/cloudflare providers/gcp
-              providers/oci/modules/network
+              providers/northflank providers/oci/modules/network
     env:
       FREELUNCH_TF: ${{ matrix.tool }}
       TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.plugin-cache

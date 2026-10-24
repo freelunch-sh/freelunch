@@ -4,6 +4,12 @@ variable "host_providers" {
   default     = []
 }
 
+variable "platform_providers" {
+  description = "Platform-layer providers (container platforms such as Northflank) whose stack state to aggregate. bin/freelunch passes every deployed one."
+  type        = list(string)
+  default     = []
+}
+
 variable "state_dir" {
   description = "A project's .freelunch folder, which holds <provider>/terraform.tfstate. null reads each stack's state from providers/<name>/stack/ in this checkout."
   type        = string

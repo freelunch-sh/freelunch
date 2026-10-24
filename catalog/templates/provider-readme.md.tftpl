@@ -31,6 +31,10 @@ ${p.notes}
 - Free-tier limits in `provider.yaml` under `limits:`, enforced with preconditions (see [OCI](../oci/) for the pattern)
 - `stack/`: the root module with a `hosts` output, so [`hybrid/`](../../hybrid/) picks it up
 %{ endif ~}
+%{ if p.layer == "platform" ~}
+- `stack/`: a root module whose `platforms` output follows the [platform contract](../../docs/architecture.md#platform-contract), so [`hybrid/`](../../hybrid/) picks it up
+- `freelunch deploy`: one service per app through the provider's API, from the app's Compose file (see [Northflank](../northflank/) for the pattern)
+%{ endif ~}
 %{ if p.layer == "service" ~}
 - `modules/<service>`: the managed resources, sized to the free tier by default
 - `stack/`: the root module whose outputs expose connection details (sensitive values marked `sensitive`)

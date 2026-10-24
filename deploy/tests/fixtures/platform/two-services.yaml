@@ -1,0 +1,5 @@
+services:
+  api:
+    image: traefik/whoami
+  worker:
+    image: traefik/whoami

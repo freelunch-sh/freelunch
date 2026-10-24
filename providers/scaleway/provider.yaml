@@ -1,19 +1,21 @@
 # freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
 name: scaleway
 display_name: "Scaleway"
-category: vps
+category: containers
 status: planned
-layer: host
+layer: platform
 terraform_provider: "scaleway/scaleway"
 iac: partner
-free_tier_type: startup-credits
-free_tier: "No always-free compute; Startup Program for EU early-stage companies (up to EUR 36K)"
+free_tier_type: always-free
+free_tier: "Serverless Containers: 400,000 GB-s of memory and 200,000 vCPU-s per account and month, enough for one 128 MB container all month or bigger ones that scale to zero; no free VMs; Startup Program for EU companies (up to EUR 36K)"
 card_required: "yes"
-url: "https://www.scaleway.com/en/pricing/"
-last_verified: "2026-10-18"
-notes: null
+url: "https://www.scaleway.com/en/pricing/serverless/"
+last_verified: "2026-10-24"
+notes: "The smallest container has 128 MB and 70 mVCPU; 256 MB comes with 140 mVCPU and runs about half a month on the allowance. Beyond it, EUR 0.000002 per GB-s and EUR 0.00001 per vCPU-s (Paris). The Terraform provider has scaleway_container_namespace, scaleway_container and scaleway_container_domain for a custom domain. Instances (VMs) have no free tier."
 sources:
+  - "scaleway.com/en/pricing/serverless (free tiers per account and month, prices beyond them; checked 2026-10-24)"
+  - "scaleway.com/en/blog/a-transparent-update-on-scaleway-pricing (Serverless Containers memory at EUR 0.000002/GB-s from 2026-06-01)"
+  - "Pulumi Scaleway container docs (memory and vCPU tiers from 128 MB / 70 mVCPU to 4096 MB / 2240 mVCPU, checked 2026-10-24)"
   - "inspire/listing/cloudcredits.io (2025-10)"
-  - "thundercompute.com/blog/free-cloud-gpu-credits (2026-10-01)"
   - "registry.terraform.io (checked 2026-10-18)"
 inspire: []

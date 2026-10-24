@@ -72,6 +72,26 @@ run "ingress_maps_each_hostname_to_a_local_port" {
   }
 }
 
+# On a container platform, cloudflared is a service of its own, so the route names the
+# app's service instead of localhost.
+run "ingress_can_reach_another_service" {
+  command = plan
+
+  variables {
+    routes = { "api.example.com" = { host = "northflank-main", port = 8080, origin = "api" } }
+  }
+
+  assert {
+    condition     = [for r in cloudflare_zero_trust_tunnel_cloudflared_config.host["northflank-main"].config.ingress : r.service] == ["http://api:8080", "http_status:404"]
+    error_message = "origin should replace localhost in the ingress rule."
+  }
+
+  assert {
+    condition     = output.routes["api.example.com"].service == "http://api:8080"
+    error_message = "The routes output should show the service cloudflared reaches."
+  }
+}
+
 run "dns_records_are_proxied_cnames_to_the_tunnel" {
   command = apply
 
@@ -245,6 +265,16 @@ run "service_token_names_must_be_simple" {
 
   variables {
     routes = { "api.example.com" = { host = "oci-main", port = 8080, access = { service_tokens = ["My Token"] } } }
+  }
+
+  expect_failures = [var.routes]
+}
+
+run "origins_must_be_host_names" {
+  command = plan
+
+  variables {
+    routes = { "api.example.com" = { host = "northflank-main", port = 8080, origin = "http://api" } }
   }
 
   expect_failures = [var.routes]

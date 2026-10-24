@@ -5,7 +5,7 @@
 |---|---|
 | **Status** | 🚧 Planned |
 | **Category** | Containers & PaaS |
-| **Layer** | `service`: standalone managed service (database, PaaS, monitoring, ...) |
+| **Layer** | `platform`: runs your apps' images without a VM; deploy goes through its API |
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | [`render-oss/render`](https://registry.terraform.io/providers/render-oss/render/latest) (partner) |
@@ -23,8 +23,8 @@ Hobby bandwidth was cut from 100 GB to 5 GB/month in Apr 2026.
 
 ## Plan
 
-- `modules/<service>`: the managed resources, sized to the free tier by default
-- `stack/`: the root module whose outputs expose connection details (sensitive values marked `sensitive`)
+- `stack/`: a root module whose `platforms` output follows the [platform contract](../../docs/architecture.md#platform-contract), so [`hybrid/`](../../hybrid/) picks it up
+- `freelunch deploy`: one service per app through the provider's API, from the app's Compose file (see [Northflank](../northflank/) for the pattern)
 
 ## References
 

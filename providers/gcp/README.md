@@ -7,7 +7,7 @@
 | **Layer** | `host`: produces Docker hosts for the hybrid inventory |
 | **Free tier** | ♾️ Always Free |
 | **Terraform provider** | [`hashicorp/google`](https://registry.terraform.io/providers/hashicorp/google/latest) `>= 8.0, < 9.0` |
-| **Last verified** | 2026-10-19 |
+| **Last verified** | 2026-10-24 |
 
 Google's Always Free tier includes one small VM that never expires. It's a 1 GB x86 host:
 enough for a reverse proxy, a monitoring agent, a VPN exit node or a couple of light
@@ -21,7 +21,7 @@ default.
 | Compute | **1 `e2-micro`** (2 shared vCPUs, 1 GB RAM) running all month, per billing account | ✅ (1 instance, `e2-micro` only, no Spot/preemptible) |
 | Regions | `us-west1`, `us-central1`, `us-east1` | ✅ |
 | Disk | **30 GB** of `pd-standard` (the console default, `pd-balanced`, is billed) | ✅ |
-| Egress | 1 GB/month from North America on the free tier; Standard network tier adds 200 GB/month per region | Standard tier by default |
+| Egress | 1 GB/month from North America on the free tier (Premium tier); Standard tier has 200 GiB/month free of its own, per billing account across all regions | Standard tier by default |
 | External IPv4 | **Not free**: $0.005/h, about $3.65/month | ✅ needs `acknowledge_public_ipv4_charge = true` |
 | Cloud Storage, Cloud Run, ... | 5 GB storage, 2M Cloud Run requests, ... | not used yet |
 
@@ -127,9 +127,9 @@ The stack also enables the Compute Engine API. It outputs `hosts` (the
 ## Caveats
 
 - **1 GB of RAM.** Keep the swap file, and expect image pulls and builds to be slow.
-- **Egress.** The free tier itself covers 1 GB/month. Standard tier (the default here) adds
-  200 GB/month per region according to Google's 2023 announcement; check the
-  [network pricing](https://cloud.google.com/vpc/network-pricing) before serving much traffic.
+- **Egress.** The free tier itself covers 1 GB/month. Standard tier (the default here) has
+  200 GiB/month free of its own, per billing account across all regions (checked 2026-10-24
+  on the [network pricing](https://cloud.google.com/vpc/network-pricing) page).
 - **Secrets in user data.** cloud-init content, including app `env` and the Tailscale key,
   is readable from instance metadata. Keep real secrets in a secrets manager.
 
@@ -154,7 +154,10 @@ what's described here, fix `provider.yaml` or the modules and note it.
 
 - [ ] Cloud Storage bucket (5 GB free in US regions), usable as a remote state backend
 - [ ] Budget alert module
-- [ ] IPv6-only option (external IPv6 is not billed)
+- [ ] IPv6-only option: external IPv6 addresses on VMs are not billed (network pricing page,
+      2026-10-24), which would make the host $0. Docker Hub, Artifact Registry, the Ubuntu
+      mirrors and Cloudflare's tunnel edge answer over IPv6; ghcr.io doesn't yet, and an IPv6
+      address is Premium tier, whose free egress is the 1 GB/month
 - [ ] Cloud Run service module (2M requests/month free)
 
 ## References

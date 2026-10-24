@@ -3,6 +3,11 @@ output "hosts" {
   value       = local.hosts
 }
 
+output "platforms" {
+  description = "Every container platform target across providers, in the platform contract shape (docs/architecture.md#platform-contract). They run apps without SSH, so the outputs below leave them out."
+  value       = local.platforms
+}
+
 output "hosts_by_provider" {
   description = "Host names and public IPs grouped by provider."
   value       = { for p, hs in local.hosts_by_provider : p => { for h in hs : h.name => h.public_ip } }

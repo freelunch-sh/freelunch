@@ -49,7 +49,9 @@ freelunch destroy all         # removes the tunnel, DNS record and VM
 
 If `apply oci` stops at "Out of host capacity", run `freelunch apply oci --wait-for-capacity`:
 it tries again, in every availability domain, until OCI has room for the VM. With a plan you
-reviewed (`plan oci --out`), it can wait in the background (`--detach`) and notify you.
+reviewed (`plan oci --out`), it can wait in the background (`--detach`) and notify you. Or
+run the app on Northflank's free plan instead, with no VM:
+[switch to another provider](../../docs/deploy-a-container.md#switch-to-another-provider).
 
 Then open `https://api.example.com`. To ship a new version, change the image tag in
 `compose.yaml` and run `freelunch deploy` again. The VM stays.

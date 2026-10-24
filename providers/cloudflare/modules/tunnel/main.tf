@@ -31,7 +31,7 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "host" {
       [
         for hostname, r in var.routes : {
           hostname = hostname
-          service  = "${r.scheme}://localhost:${r.port}"
+          service  = "${r.scheme}://${r.origin}:${r.port}"
         } if r.host == each.key
       ],
       # cloudflared requires a catch-all rule last.

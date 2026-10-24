@@ -5,7 +5,7 @@
 |---|---|
 | **Status** | 🚧 Planned |
 | **Category** | Containers & PaaS |
-| **Layer** | `service`: standalone managed service (database, PaaS, monitoring, ...) |
+| **Layer** | `platform`: runs your apps' images without a VM; deploy goes through its API |
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | None. Automate through the provider's API or CLI. |
@@ -19,8 +19,8 @@
 
 ## Plan
 
-- `modules/<service>`: the managed resources, sized to the free tier by default
-- `stack/`: the root module whose outputs expose connection details (sensitive values marked `sensitive`)
+- `stack/`: a root module whose `platforms` output follows the [platform contract](../../docs/architecture.md#platform-contract), so [`hybrid/`](../../hybrid/) picks it up
+- `freelunch deploy`: one service per app through the provider's API, from the app's Compose file (see [Northflank](../northflank/) for the pattern)
 
 ## References
 

@@ -3,7 +3,7 @@ name: render
 display_name: "Render"
 category: containers
 status: planned
-layer: service
+layer: platform
 terraform_provider: "render-oss/render"
 iac: partner
 free_tier_type: always-free

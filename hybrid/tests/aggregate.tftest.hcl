@@ -86,3 +86,44 @@ run "project_state_dir_is_read" {
     error_message = "With state_dir set, each provider's state is read from <state_dir>/<provider>/terraform.tfstate."
   }
 }
+
+run "platforms_are_aggregated_apart_from_hosts" {
+  command = plan
+
+  variables {
+    platform_providers = ["northflank"]
+    state_overrides = {
+      oci        = { backend = "local", config = { path = "tests/fixtures/oci.tfstate" } }
+      gcp        = { backend = "local", config = { path = "tests/fixtures/gcp.tfstate" } }
+      aws        = { backend = "local", config = { path = "tests/fixtures/aws.tfstate" } }
+      azure      = { backend = "local", config = { path = "tests/fixtures/azure.tfstate" } }
+      northflank = { backend = "local", config = { path = "tests/fixtures/northflank.tfstate" } }
+    }
+  }
+
+  assert {
+    condition     = length(output.platforms) == 1 && output.platforms[0].provider == "northflank" && output.platforms[0].id == "freelunch" && output.platforms[0].tunnel
+    error_message = "Platform stacks should be aggregated into platforms."
+  }
+
+  assert {
+    condition     = length(output.hosts) == 5 && !strcontains(output.ssh_config, "northflank") && !contains(keys(output.hosts_by_provider), "northflank")
+    error_message = "Platforms run apps without SSH, so they stay out of hosts, hosts_by_provider and ssh_config."
+  }
+}
+
+run "project_state_dir_has_platforms_too" {
+  command = plan
+
+  variables {
+    host_providers     = ["oci"]
+    platform_providers = ["northflank"]
+    state_dir          = "tests/fixtures/project"
+    state_overrides    = {}
+  }
+
+  assert {
+    condition     = [for p in output.platforms : "${p.provider}-${p.name}"] == ["northflank-main"] && length(output.hosts) == 2
+    error_message = "With state_dir set, platform state is read from <state_dir>/<provider>/terraform.tfstate like host state."
+  }
+}

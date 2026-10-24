@@ -3,16 +3,18 @@ name: railway
 display_name: "Railway"
 category: containers
 status: planned
-layer: service
+layer: platform
 terraform_provider: "terraform-community-providers/railway"
 iac: community
 free_tier_type: monthly-credit
-free_tier: "$5 one-time trial credit (30 days), then Free plan: $1/month credit, 1 project, 3 services"
+free_tier: "$5 trial credit for 30 days, then the Free plan: $1 of usage credit a month, up to 1 vCPU and 0.5 GB RAM per service, 0.5 GB volume"
 card_required: "no"
 url: "https://railway.com/pricing"
-last_verified: "2026-10-18"
-notes: null
+last_verified: "2026-10-24"
+notes: "At $10 per GB of RAM and $20 per vCPU a month, $1 covers about 12 days of a 256 MB service's memory before any CPU, so nothing runs all month on it. Volumes of trial accounts are deleted 30 days after the credits expire."
 sources:
+  - "docs.railway.com/reference/pricing/plans ($1 a month on the Free plan, 1 vCPU and 0.5 GB per service; $20 per vCPU and $10 per GB of RAM a month; checked 2026-10-24)"
+  - "docs.railway.com/reference/pricing/free-trial (checked 2026-10-24)"
   - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
   - "registry.terraform.io (checked 2026-10-18)"
 inspire:

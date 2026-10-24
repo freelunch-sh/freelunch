@@ -5,25 +5,31 @@
 |---|---|
 | **Status** | 🚧 Planned |
 | **Category** | Containers & PaaS |
-| **Layer** | `service`: standalone managed service (database, PaaS, monitoring, ...) |
+| **Layer** | `platform`: runs your apps' images without a VM; deploy goes through its API |
 | **Free tier** | 🔁 Recurring monthly credit |
 | **Card required** | no |
 | **Terraform provider** | [`terraform-community-providers/railway`](https://registry.terraform.io/providers/terraform-community-providers/railway/latest) (community) |
-| **Last verified** | 2026-10-18 |
+| **Last verified** | 2026-10-24 |
 
 ## What's free
 
-$5 one-time trial credit (30 days), then Free plan: $1/month credit, 1 project, 3 services
+$5 trial credit for 30 days, then the Free plan: $1 of usage credit a month, up to 1 vCPU and 0.5 GB RAM per service, 0.5 GB volume
 
 > Free tiers change without notice. Check <https://railway.com/pricing> before relying on this.
 
+## Notes
+
+At $10 per GB of RAM and $20 per vCPU a month, $1 covers about 12 days of a 256 MB service's memory before any CPU, so nothing runs all month on it. Volumes of trial accounts are deleted 30 days after the credits expire.
+
 ## Plan
 
-- `modules/<service>`: the managed resources, sized to the free tier by default
-- `stack/`: the root module whose outputs expose connection details (sensitive values marked `sensitive`)
+- `stack/`: a root module whose `platforms` output follows the [platform contract](../../docs/architecture.md#platform-contract), so [`hybrid/`](../../hybrid/) picks it up
+- `freelunch deploy`: one service per app through the provider's API, from the app's Compose file (see [Northflank](../northflank/) for the pattern)
 
 ## References
 
+- docs.railway.com/reference/pricing/plans ($1 a month on the Free plan, 1 vCPU and 0.5 GB per service; $20 per vCPU and $10 per GB of RAM a month; checked 2026-10-24)
+- docs.railway.com/reference/pricing/free-trial (checked 2026-10-24)
 - snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)
 - registry.terraform.io (checked 2026-10-18)
 - Research corpus: `inspire/repos/terraform-providers/terraform-community-providers-terraform-provider-railway`

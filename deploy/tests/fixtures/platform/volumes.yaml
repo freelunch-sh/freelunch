@@ -1,0 +1,4 @@
+services:
+  api:
+    image: traefik/whoami
+    volumes: ["./data:/data"]

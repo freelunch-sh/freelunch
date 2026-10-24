@@ -14,7 +14,7 @@ output "routes" {
   value = {
     for hostname, r in var.routes : hostname => {
       host      = r.host
-      service   = "${r.scheme}://localhost:${r.port}"
+      service   = "${r.scheme}://${r.origin}:${r.port}"
       protected = r.access != null
     }
   }
