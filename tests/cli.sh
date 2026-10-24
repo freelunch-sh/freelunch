@@ -2386,6 +2386,48 @@ test_state_store_same_serial_is_in_step() {
   contains "$(in_dir "$p" "$CLI" status 2>&1)" "oci: status shows the state here"
 }
 
+# The whole way with a store, as in the Northflank live test: an oci host, the app on
+# Northflank behind the tunnel, every stack copied to the store and back through
+# tofu/terraform's state pull, which prints a state on one line. Status, inventory and
+# deploy see the same on this machine as before the copy, and on a clone that starts from
+# the store only.
+test_state_store_journey_with_a_platform() {
+  local p="$WORK/journey" q="$WORK/journey-clone" out d
+  nf_project "$p"
+  (cd "$p" && "$CLI" init oci >/dev/null 2>&1)
+  grep -qx 'name_prefix = "freelunch"' "$p/.freelunch/oci/terraform.tfvars.example"
+  cp "$ROOT/providers/oci/stack/project.tfvars.example" "$p/.freelunch/oci/terraform.tfvars"
+  cp "$ROOT/hybrid/tests/fixtures/oci.tfstate" "$p/.freelunch/oci/terraform.tfstate"
+  state_store "$p"
+  out="$(nf_in "$p" state push 2>&1)"
+  for s in cloudflare northflank oci; do contains "$out" "$s: copied the state to the store"; done
+  out="$(nf_in "$p" state 2>&1)"
+  for s in cloudflare northflank oci; do contains "$out" "$(printf '  %-12s in step' "$s")"; done
+  # Taken from the store, it is still an applied state.
+  grep -q '^  "outputs": {' "$p/.freelunch/northflank/terraform.tfstate"
+  mkdir -p "$q" && cp -R "$p/.freelunch" "$p/compose.yaml" "$p/nf" "$q/"
+  rm "$q/.freelunch"/*/terraform.tfstate* "$q/.freelunch/inventory.json" 2>/dev/null || true
+  rm -rf "$q/.freelunch/hybrid"
+  for d in "$p" "$q"; do
+    out="$(nf_in "$d" status 2>&1)"
+    contains "$out" "$(printf 'Platforms\n  northflank-main project freelunch in europe-west  amd64  nf-compute-20')"
+    contains "$out" "oci-main"
+    lacks "$out" "not applied"
+    out="$(nf_in "$d" inventory 2>&1)"
+    contains "$out" 'platforms ["northflank"]'
+    equals "$(jq -c 'map(.name) | sort' "$d/.freelunch/inventory.json")" '["edge-1","main"]'
+    out="$(GHCR_TOKEN=x nf_in "$d" deploy 2>&1)"
+    contains "$out" 'hybrid: aggregating ["oci"], platforms ["northflank"]'
+    contains "$out" "northflank-main: api is running"
+    contains "$out" "northflank-main: https://api.example.com"
+    equals "$(nf_in "$d" output northflank -json platforms | jq -r '.[0].name')" main
+    out="$(GHCR_TOKEN=x nf_in "$d" doctor 2>&1 || true)"
+    for s in cloudflare northflank oci; do contains "$out" "  ok    $s: in step"; done
+  done
+  # The clone took each stack from the store.
+  for s in cloudflare northflank oci; do exists "$q/.freelunch/$s/terraform.tfstate"; done
+}
+
 # A new key works on some of the store's servers before the others: state runs try again
 # while it is minutes old, and say what a key the store turns down means.
 test_state_store_waits_for_a_new_key() {
