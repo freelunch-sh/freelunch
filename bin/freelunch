@@ -345,7 +345,18 @@ run_stack() { # run_stack <action> <provider> [extra args]
   while IFS= read -r a; do args+=("$a"); done < <(project_args "$p")
   [[ "${FREELUNCH_AUTO_APPROVE:-0}" == "1" && "$action" != "plan" ]] && args+=(-auto-approve)
   [[ "$action" == "plan" ]] || state_dirty "$p"
-  tf_for "$p" "$(stack_dir "$p")" "$action" -input=false ${args[@]+"${args[@]}"} "$@"
+  if [[ "$action" == "plan" || "${FREELUNCH_AUTO_APPROVE:-0}" == "1" || -t 0 ]]; then
+    tf_for "$p" "$(stack_dir "$p")" "$action" -input=false ${args[@]+"${args[@]}"} "$@"
+    return
+  fi
+  # Without a terminal, tofu/terraform's yes/no prompt reads the end of the input and fails.
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if tf_for "$p" "$(stack_dir "$p")" "$action" -input=false ${args[@]+"${args[@]}"} "$@" 2>&1 | keep "$TMP/$p.$action.out"; then return 0; fi
+  grep -qi 'asking for approval' "$TMP/$p.$action.out" || return 1
+  if [[ "$action" == "apply" ]]; then
+    die "apply $p: there is no terminal to answer the prompt at. Save a plan, review it, and apply that: freelunch plan $p --out <file>, then freelunch apply $p --plan <file>"
+  fi
+  die "$action $p: there is no terminal to answer the prompt at. Run it in one, or with FREELUNCH_AUTO_APPROVE=1 to skip the prompt"
 }
 
 # --- state store ----------------------------------------------------------------------
@@ -1109,13 +1120,21 @@ apply_host() {
 # or replaces (and everything that goes with it), and for OCI, a VCN the tenancy has no
 # room for
 plan_warnings() {
-  local json replaced destroyed tfvars tenancy out avail used
+  local json replaced destroyed tfvars tenancy out avail used id
   json="$TMP/$1.plan.json"
   tf_for "$1" "$(stack_dir "$1")" show -json "$2" > "$json" 2>/dev/null || return 0
   replaced="$(jq -r '[.resource_changes[]? | select(.change.actions | index("delete") and index("create")) | .address] | join(", ")' "$json")"
   destroyed="$(jq -r '[.resource_changes[]? | select(.change.actions == ["delete"]) | .address] | join(", ")' "$json")"
   [[ -z "$replaced" ]] || log "$1: this plan replaces $replaced. Each one is destroyed and created again, along with what is in it (a VCN takes its hosts with it)"
   [[ -z "$destroyed" ]] || log "$1: this plan destroys $destroyed"
+  if [[ "$1" == "northflank" && -n "${NORTHFLANK_API_TOKEN:-}" ]]; then
+    id="$(tfvar "$(config_dir northflank)/terraform.tfvars" name_prefix)"; id="${id:-freelunch}"
+    if [[ "$(nf GET "/projects/$id")" == 404 ]]; then
+      out="$(nf_no_room "$id")"
+      [[ -z "$out" ]] || log "northflank: applying this plan would fail, because Northflank won't make the project $id: $(nf_full_hint "$out")"
+    fi
+    return 0
+  fi
   [[ "$1" == "oci" ]] && command -v oci >/dev/null || return 0
   jq -e 'any(.resource_changes[]?; (.address | test("(^|\\.)oci_core_vcn\\.")) and (.change.actions | index("create")))' "$json" >/dev/null || return 0
   tfvars="$(config_dir oci)/terraform.tfvars"
@@ -2405,11 +2424,17 @@ NF_TUNNEL_PLAN="nf-compute-10"
 
 # nf <method> <path> [JSON file]: call the Northflank API with NORTHFLANK_API_TOKEN, and
 # print the HTTP status (000 when it can't be reached). The answer is in $TMP/nf.json. A
-# body travels in a file, so the secrets in it never show up in the process list.
+# body travels in a file, so the secrets in it never show up in the process list. Its
+# secrets (a registry password, the environment) go to $TMP/nf.secrets, for nf_error to
+# leave out.
 nf() {
   local code args=()
   [[ -n "${NORTHFLANK_API_TOKEN:-}" ]] || die "northflank: NORTHFLANK_API_TOKEN is not set: export it, or put it in $(rel "$(state_root)")/.env (providers/northflank/README.md#api-token)"
-  [[ $# -lt 3 ]] || args=(--data-binary "@$3")
+  echo '[]' > "$TMP/nf.secrets"
+  if [[ $# -ge 3 ]]; then
+    args=(--data-binary "@$3")
+    jq -c '[.credentials.password?, (.runtimeEnvironment // {} | .[])] | map(strings | select(length >= 4))' "$3" > "$TMP/nf.secrets" 2>/dev/null || echo '[]' > "$TMP/nf.secrets"
+  fi
   code="$(curl -sS --max-time 60 -o "$TMP/nf.json" -w '%{http_code}' -X "$1" -H "Authorization: Bearer $NORTHFLANK_API_TOKEN" \
     -H "Content-Type: application/json" ${args[@]+"${args[@]}"} "$NF_API$2")" || code=000
   echo "$code"
@@ -2417,20 +2442,48 @@ nf() {
 
 nf_ok() { [[ "$1" == 2?? ]]; }
 
-# nf_error: why the last call failed, as Northflank put it
+# nf_error: why the last call failed, as Northflank put it, with the details of a request
+# it turned down (which field, and why). The request's secrets are left out, since a
+# message can quote the value it refused.
 nf_error() {
   local m
-  m="$(jq -r '.error.message // empty' "$TMP/nf.json" 2>/dev/null)" || m=""
+  m="$(jq -r --slurpfile secrets "$TMP/nf.secrets" '
+    def text: if type == "string" then . elif type == "object" then (.message // tojson) else tojson end;
+    .error as $e | [($e.message // empty), ($e.details // empty
+      | if type == "array" then .[] | text
+        elif type == "object" then to_entries[] | "\(.key): \(.value | if type == "array" then map(text) | join(", ") else text end)"
+        else text end)]
+    | join("; ") | reduce $secrets[0][] as $s (.; split($s) | join("<redacted>"))' "$TMP/nf.json" 2>/dev/null)" || m=""
   echo "${m:-no answer it could read}"
 }
 
 # nf_mine <description>: whether freelunch made the project or service
 nf_mine() { [[ "$1" == "$NF_MARK"* ]]; }
 
+# nf_no_room <project>: when the team's free projects are used up, so Northflank won't make
+# this one, the projects it has; nothing when there is room or the team pays
+# (acknowledge_billable_resources). The limit is max_projects in provider.yaml.
+nf_no_room() {
+  local max code
+  max="$(meta northflank "  max_projects")"
+  [[ -n "$max" ]] || return 0
+  ! grep -qsE '^[[:space:]]*acknowledge_billable_resources[[:space:]]*=[[:space:]]*true' "$(config_dir northflank)/terraform.tfvars" || return 0
+  code="$(nf GET "/projects?per_page=100")"
+  nf_ok "$code" || return 0
+  jq -r --arg id "$1" --argjson max "$max" '[.data.projects[]?.id] | if index($id) == null and length >= $max then join(", ") else empty end' "$TMP/nf.json" 2>/dev/null || true
+}
+
+# nf_full_hint <projects>: what to do about a team with no room for another project
+nf_full_hint() {
+  local max
+  max="$(meta northflank "  max_projects")"
+  echo "the free Sandbox has room for $max project$( [[ "$max" == 1 ]] || echo s), and the team has $1. Delete one at app.northflank.com, or, if freelunch made it, set name_prefix to its name in $(rel "$(config_dir northflank)")/terraform.tfvars"
+}
+
 # northflank_up <project> <region>: make the project, or bring it up to date. One that
 # freelunch didn't make is left alone.
 northflank_up() {
-  local id="$1" region="$2" code status i
+  local id="$1" region="$2" code status i full error
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   code="$(nf GET "/projects/$id")"
   if nf_ok "$code"; then
@@ -2441,9 +2494,17 @@ northflank_up() {
       || die "northflank: the project $id is in $status, and Northflank can't move it to $region. Set region = \"$status\", or destroy it first (freelunch destroy northflank)"
   elif [[ "$code" != 404 ]]; then
     die "northflank: can't look up the project $id ($code): $(nf_error)"
+  else
+    full="$(nf_no_room "$id")"
+    [[ -z "$full" ]] || die "northflank: Northflank won't make the project $id: $(nf_full_hint "$full")"
   fi
   jq -n --arg n "$id" --arg r "$region" --arg d "$NF_MARK" '{name: $n, region: $r, description: $d}' > "$TMP/project.json"
   code="$(nf PUT /projects "$TMP/project.json")"
+  if [[ "$code" == 409 ]]; then
+    error="$(nf_error)"
+    full="$(nf_no_room "$id")"
+    die "northflank: can't make the project $id in $region (409): $error${full:+. $(nf_full_hint "$full")}"
+  fi
   nf_ok "$code" || die "northflank: can't make the project $id in $region ($code): $(nf_error)"
   [[ "$(jq -r '.data.id' "$TMP/nf.json")" == "$id" ]] || die "northflank: Northflank gave the project the ID $(jq -r '.data.id' "$TMP/nf.json"), not $id"
   # A new project takes a moment before services can go in.
@@ -2500,13 +2561,23 @@ northflank_forget_registries() {
   done
 }
 
+# nf_registry_name <project> <server>: the name of the login deploy saves for the project.
+# Northflank takes 3 to 39 letters and digits with single spaces or hyphens between them,
+# so ghcr.io becomes ghcr-io and a long name is cut short.
+nf_registry_name() {
+  local name
+  name="freelunch $1 $(printf '%s' "$2" | tr -c 'a-zA-Z0-9' '-' | tr -s '-' | sed 's/^-//; s/-$//')"
+  name="${name:0:39}"
+  printf '%s\n' "$name" | sed 's/[- ]*$//'
+}
+
 # northflank_registry <project> <server>: the ID of the login Northflank pulls the
 # project's images from that registry with, saved or updated from apps.tfvars. It stays
 # at Northflank, which pulls again whenever it starts a container, so give it a read-only
 # token.
 northflank_registry() {
   local project="$1" server="$2" name user var provider id code
-  name="freelunch $project $server"
+  name="$(nf_registry_name "$project" "$server")"
   user="$(jq -r --arg s "$server" '.[$s].username' "$TMP/registries.json")"
   var="$(jq -r --arg s "$server" '.[$s].password_env' "$TMP/registries.json")"
   case "$server" in
@@ -3206,7 +3277,7 @@ doctor_oci_limits() {
 }
 
 doctor_northflank() {
-  local tfvars id region code regions
+  local tfvars id region code regions full
   tfvars="$(config_dir northflank)/terraform.tfvars"
   id="$(tfvar "$tfvars" name_prefix)"; id="${id:-freelunch}"
   region="$(tfvar "$tfvars" region)"; region="${region:-europe-west}"
@@ -3225,7 +3296,9 @@ doctor_northflank() {
     401|403) check fail "Northflank doesn't take NORTHFLANK_API_TOKEN ($code): $(nf_error)" ;;
     404)
       check ok "NORTHFLANK_API_TOKEN signs in"
-      if is_deployed northflank; then check fail "the project $id is gone from Northflank: freelunch apply northflank makes it again"
+      full="$(nf_no_room "$id")"
+      if [[ -n "$full" ]]; then check fail "there is no project $id, and Northflank won't make it: $(nf_full_hint "$full")"
+      elif is_deployed northflank; then check fail "the project $id is gone from Northflank: freelunch apply northflank makes it again"
       else check ok "there is no project $id yet; freelunch apply northflank makes it"; fi ;;
     2??)
       check ok "NORTHFLANK_API_TOKEN signs in"

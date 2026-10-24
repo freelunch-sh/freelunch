@@ -311,9 +311,11 @@ mkdir -p "$WORK/doh-bin"
 #   manifest's digest is a checksum of its repository's name.
 # - The Northflank API, which keeps its projects, services and registry logins as JSON files
 #   in $FAKE_NF, and takes the token FAKE_NF_TOKEN (default nf-token). Projects in
-#   FAKE_NF_FOREIGN exist and weren't made by freelunch. A service's deployment fails when
-#   it is in FAKE_NF_FAILED and never ends in FAKE_NF_PENDING, and its container is stopped
-#   in FAKE_NF_STOPPED.
+#   FAKE_NF_FOREIGN exist and weren't made by freelunch, and FAKE_NF_REFUSE turns down a new
+#   project with a 409. A service's deployment fails when it is in FAKE_NF_FAILED and never
+#   ends in FAKE_NF_PENDING, and its container is stopped in FAKE_NF_STOPPED. A registry
+#   login is refused when its name breaks Northflank's rule, and with FAKE_NF_ECHO_PASSWORD
+#   by a message that quotes the password.
 cat > "$WORK/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 method=GET data="" headers="" out="" write="" auth="" basic="" url="" query=()
@@ -439,7 +441,11 @@ case "$url" in
         elif [[ -f "$nf/projects/$project.json" ]]; then
           respond 200 "$(jq -c '{data: (. + {id: .name, lifecycleStatus: "created", deployment: {region: .region}})}' "$nf/projects/$project.json")"
         else nf_missing Project; fi ;;
+      "GET /projects?"*)
+        respond 200 "$( { for f in "$nf/projects"/*.json; do [[ -f "$f" ]] && jq -c '{id: .name, name: .name, description}' "$f"; done
+          for f in ${FAKE_NF_FOREIGN:-}; do jq -nc --arg p "$f" '{id: $p, name: $p, description: "My own project"}'; done; } | jq -sc '{data: {projects: .}}')" ;;
       "PUT /projects")
+        if [[ -n "${FAKE_NF_REFUSE:-}" ]]; then respond 409 '{"error":{"status":409,"message":"Project limit reached"}}'; exit 0; fi
         project="$(jq -r .name <<< "$data")"
         printf '%s\n' "$data" > "$nf/projects/$project.json"
         respond 200 "$(jq -c '{data: (. + {id: .name})}' <<< "$data")" ;;
@@ -453,7 +459,15 @@ case "$url" in
           jq -c --arg id "$(basename "$f" .json)" '{id: $id, name: .name, provider: .provider}' "$f"
         done | jq -sc '{data: {credentials: .}}')" ;;
       "POST /integrations/registries")
-        id="$(jq -r .name <<< "$data" | tr ' .' '--')"
+        # Northflank's rule for the name. Its details here are a guess at their shape.
+        name="$(jq -r .name <<< "$data")"
+        if [[ ! "$name" =~ ^[a-zA-Z]([-[:space:]]?[a-zA-Z0-9]+([-[:space:]][a-zA-Z0-9]+)*)?$ || ${#name} -lt 3 || ${#name} -gt 39 ]]; then
+          respond 400 "$(jq -nc --arg n "$name" '{error: {status: 400, message: "Validation error", details: {name: ["\"name\" with value \"\($n)\" fails to match the required pattern"]}}}')"; exit 0
+        fi
+        if [[ -n "${FAKE_NF_ECHO_PASSWORD:-}" ]]; then
+          respond 400 "$(jq -nc --arg p "$(jq -r .credentials.password <<< "$data")" '{error: {status: 400, message: "Validation error", details: [{message: ("\"password\" with value \"" + $p + "\" is invalid")}]}}')"; exit 0
+        fi
+        id="$(tr ' .' '--' <<< "$name")"
         printf '%s\n' "$data" > "$nf/registries/$id.json"
         respond 200 "$(jq -nc --arg id "$id" '{data: {id: $id}}')" ;;
       "PATCH /integrations/registries/"*)
@@ -1934,7 +1948,7 @@ test_deploy_puts_each_app_on_northflank() {
   [[ "$digest" == sha256:* ]] || { echo "no digest in: $out"; return 1; }
   # The registry login, for the project only, with the token from the environment.
   equals "$(jq -c . "$p/nf/registries/freelunch-freelunch-ghcr-io.json")" \
-    '{"name":"freelunch freelunch ghcr.io","provider":"github","credentials":{"username":"me","password":"ghp_test-token","scope":{"pull":true,"push":false}},"restrictions":{"restricted":true,"projects":["freelunch"]}}'
+    '{"name":"freelunch freelunch ghcr-io","provider":"github","credentials":{"username":"me","password":"ghp_test-token","scope":{"pull":true,"push":false}},"restrictions":{"restricted":true,"projects":["freelunch"]}}'
   # The app: pinned to the digest its tag points to, a private port for cloudflared, the
   # env file and the Compose environment, and the healthcheck as a readiness check.
   body="$(sent "$p" api)"
@@ -1978,6 +1992,11 @@ test_deploy_to_northflank_fails_loudly() {
   contains "$out" "northflank: cloudflared is still in_progress after 0s"
   if out="$(GHCR_TOKEN=x FAKE_NF_STOPPED=api FREELUNCH_DEPLOY_TIMEOUT=0 nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
   contains "$out" "northflank: api is still out, but no container runs (task_failed)"
+  # A login Northflank turns down says which field and why, without the password.
+  rm -f "$p/nf/registries/"*.json
+  if out="$(GHCR_TOKEN=ghp_secret-token FAKE_NF_ECHO_PASSWORD=1 nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "northflank: can't save the login to ghcr.io (400): Validation error; \"password\" with value \"<redacted>\" is invalid"
+  lacks "$out" "ghp_secret-token"
   # Without the project, or with a token Northflank refuses.
   rm "$p/nf/projects/freelunch.json"
   if out="$(GHCR_TOKEN=x nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
@@ -1999,6 +2018,36 @@ test_northflank_dry_run_leaves_out_secrets() {
   lacks "$out" "mock-tunnel-token"
   lacks "$out" "ghp_test-token"
   fails grep -q '^nf ' "$p/fake.log"
+}
+
+# A Sandbox team has room for one project. doctor and plan say when another one has it, apply
+# stops before asking Northflank, and without a terminal apply says to use a saved plan.
+test_northflank_says_when_the_free_project_is_taken() {
+  local p="$WORK/nf-full" out
+  mkdir -p "$p/nf" && (cd "$p" && "$CLI" init --name shop northflank) >/dev/null 2>&1
+  cp "$p/.freelunch/northflank/terraform.tfvars.example" "$p/.freelunch/northflank/terraform.tfvars"
+  local hint="the free Sandbox has room for 1 project, and the team has blog. Delete one at app.northflank.com, or, if freelunch made it, set name_prefix to its name in .freelunch/northflank/terraform.tfvars"
+  out="$(FAKE_NF_FOREIGN=blog nf_in "$p" doctor 2>&1 || true)"
+  contains "$out" "  fail  there is no project shop, and Northflank won't make it: $hint"
+  out="$(FAKE_NF_FOREIGN=blog nf_in "$p" plan northflank --out shop.tfplan 2>&1)"
+  contains "$out" "northflank: applying this plan would fail, because Northflank won't make the project shop: $hint"
+  if out="$(nf_in "$p" apply northflank < /dev/null 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "apply northflank: there is no terminal to answer the prompt at. Save a plan, review it, and apply that: freelunch plan northflank --out <file>, then freelunch apply northflank --plan <file>"
+  if out="$(FAKE_NF_FOREIGN=blog nf_in "$p" apply northflank --plan shop.tfplan 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "northflank: Northflank won't make the project shop: $hint"
+  fails grep -q 'nf PUT' "$p/fake.log"
+  # Northflank's own 409 comes through.
+  if out="$(FREELUNCH_AUTO_APPROVE=1 FAKE_NF_REFUSE=1 nf_in "$p" apply northflank 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "northflank: can't make the project shop in europe-west (409): Project limit reached"
+  # A paying team has room, and with no other project there is room too. (The stack is
+  # applied by now, so the project is missing rather than not made yet.)
+  echo 'acknowledge_billable_resources = true' >> "$p/.freelunch/northflank/terraform.tfvars"
+  out="$(FAKE_NF_FOREIGN=blog nf_in "$p" doctor 2>&1 || true)"
+  contains "$out" "  fail  the project shop is gone from Northflank: freelunch apply northflank makes it again"
+  lacks "$out" "won't make it"
+  sed -i.bak '/acknowledge_billable_resources/d' "$p/.freelunch/northflank/terraform.tfvars"
+  out="$(nf_in "$p" doctor 2>&1 || true)"
+  lacks "$out" "won't make it"
 }
 
 test_status_and_doctor_ask_northflank() {
