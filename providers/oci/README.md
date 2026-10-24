@@ -23,7 +23,7 @@ Docker hosts that stay inside the Always Free limits by default.
 | Region | Home region only | ✅ |
 | Shapes | Only the two shapes above | ✅ |
 | Networking | 2 VCNs, 1 flexible LB (10 Mbps), 1 NLB, 10 TB egress/month | not yet: one VCN per stack |
-| Object storage | 20 GB | not used yet |
+| Object storage | 20 GB, 50,000 requests/month | ✅ (the project's state store: `freelunch state init oci`) |
 | Databases | 2 Autonomous DBs, 1 MySQL HeatWave | not used yet |
 
 > **June 2026 change.** On 2026-06-15 Oracle quietly halved the A1 allowance from
@@ -150,7 +150,10 @@ not moved.
 
 A retry applies its plan without asking, so it is careful about what it applies:
 
-- Only "out of capacity" and `TooManyRequests` are retried. Any other error stops it.
+- Only "out of capacity", `TooManyRequests` and errors that leave nothing half done are
+  retried: a 401 for clock skew (a request signed before the machine slept and sent after
+  it woke), and a network failure while planning, or on a read while applying. Any other
+  error stops it, a failed write among them, since what it was writing may exist.
 - A plan that would destroy or replace anything stops it too. That can happen when the
   tfvars change while it waits.
 - Ctrl-C stops it. When you press it during an attempt, tofu/terraform still stop
@@ -177,6 +180,11 @@ actions. Anything else stops the wait, which then needs a new review. The plan f
 the stack's variables and state, secrets included. `.freelunch/` ignores `*.tfplan`, and
 the CLI warns about a plan file git would pick up.
 
+An attempt that made part of the plan (the network, say, before the host ran out of
+capacity) changed the state, so tofu/terraform can't apply the plan as it is any more: it is
+stale. A wait you start again with the same plan goes on anyway. It plans again, and applies
+only what the reviewed plan does, without a new review.
+
 `--detach` runs the wait in the background and returns at once:
 
 ```bash
@@ -190,6 +198,22 @@ machine that sleeps pauses the wait, and with a session token, one that sleeps f
 an hour ends it, since the token can't be refreshed while it sleeps. On a Mac, `--detach`
 runs `caffeinate -i -w <pid>`, which keeps the Mac awake until the wait ends (closing the
 lid still puts it to sleep). Elsewhere, keep the machine awake yourself.
+
+#### A machine that stays on
+
+A wait needs a machine that stays on for as long as it takes, which can be days. A laptop
+with its lid closed makes no attempts, and wakes now and then for a minute; the wait says
+so when it notices the machine slept. Hand the wait to GitHub Actions instead, with the same
+reviewed plan:
+
+```bash
+freelunch ci wait oci --plan .freelunch/oci/reviewed.tfplan
+```
+
+That takes the project's state in a store both reach (`freelunch state init oci` puts it in
+your tenancy's Object Storage) and the workflows from `freelunch ci init`. Each scheduled
+run makes one attempt, in the next availability domain, until the host exists. A machine of
+your own that stays on works as well. [Run freelunch from CI](../../docs/ci.md) has both.
 
 When a wait in the background ends, or a wait that had to retry, freelunch sends a desktop
 notification (macOS, or Linux with `notify-send`). Set `FREELUNCH_NOTIFY` in `.freelunch/.env`
@@ -279,7 +303,7 @@ bin/freelunch test     # or: cd providers/oci/modules/compute && terraform test
 
 - [ ] Block volume module (attach + mount the rest of the 200 GB)
 - [ ] Reserved public IP option
-- [ ] Object storage bucket (S3-compatible, usable as a remote state backend)
+- [x] Object Storage bucket for the project's state (`freelunch state init oci`, through the S3-compatible API)
 - [ ] Budget alert module ($1 threshold)
 - [ ] Always Free Autonomous DB / MySQL HeatWave modules
 - [ ] k3s cluster layout (see `inspire/repos/oci-kubernetes`)
