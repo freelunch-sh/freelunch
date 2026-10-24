@@ -2571,12 +2571,13 @@ nf_registry_name() {
   printf '%s\n' "$name" | sed 's/[- ]*$//'
 }
 
-# northflank_registry <project> <server>: the ID of the login Northflank pulls the
+# northflank_registry <project> <project uid> <server>: the ID of the login Northflank pulls the
 # project's images from that registry with, saved or updated from apps.tfvars. It stays
 # at Northflank, which pulls again whenever it starts a container, so give it a read-only
 # token.
 northflank_registry() {
-  local project="$1" server="$2" name user var provider id code
+  local project="$1" uid="$2" server="$3" name user var provider id code
+  [[ -n "$uid" ]] || die "northflank: Northflank didn't say the uid of the project $project, which the login to $server is restricted to"
   name="$(nf_registry_name "$project" "$server")"
   user="$(jq -r --arg s "$server" '.[$s].username' "$TMP/registries.json")"
   var="$(jq -r --arg s "$server" '.[$s].password_env' "$TMP/registries.json")"
@@ -2589,8 +2590,8 @@ northflank_registry() {
   code="$(nf GET /integrations/registries)"
   nf_ok "$code" || die "northflank: can't list the registry logins ($code): $(nf_error)"
   id="$(jq -r --arg n "$name" 'first(.data.credentials[]? | select(.name == $n) | .id) // empty' "$TMP/nf.json")"
-  printf '%s\n%s\n' "$user" "${!var}" | jq -Rs --arg project "$project" 'split("\n") as $l
-    | {credentials: {username: $l[0], password: $l[1], scope: {pull: true, push: false}}, restrictions: {restricted: true, projects: [$project]}}' > "$TMP/registry.json"
+  printf '%s\n%s\n' "$user" "${!var}" | jq -Rs --arg uid "$uid" 'split("\n") as $l
+    | {credentials: {username: $l[0], password: $l[1], scope: {pull: true, push: false}}, restrictions: {restricted: true, projects: [$uid]}}' > "$TMP/registry.json"
   if [[ -n "$id" ]]; then
     code="$(nf PATCH "/integrations/registries/$id" "$TMP/registry.json")"
   else
@@ -2687,7 +2688,7 @@ northflank_wait() {
 # target's project, and cloudflared when it has a tunnel, then wait until they all run
 northflank_deploy() {
   local host="$1" dry_run="$2" project plan name compose env_file image server cred var digest path code url
-  local services=() creds="" others
+  local services=() creds="" others uid=""
   project="$(jq -r --arg h "$host" '.[$h].id' "$TMP/platforms.json")"
   plan="$(jq -r --arg h "$host" '.[$h].size' "$TMP/platforms.json")"
   if [[ "$dry_run" == 1 ]]; then
@@ -2700,6 +2701,8 @@ northflank_deploy() {
       401|403)  die "northflank: Northflank doesn't take NORTHFLANK_API_TOKEN ($code): $(nf_error)" ;;
     esac
     nf_ok "$code" || die "northflank: can't look up the project $project ($code): $(nf_error)"
+    # A registry login is restricted to projects by uid, the ObjectId that never changes.
+    uid="$(jq -r '.data.uid // empty' "$TMP/nf.json")"
   fi
 
   while IFS=$'\t' read -r name compose env_file; do
@@ -2716,7 +2719,7 @@ northflank_deploy() {
         # One login per registry, saved once per deploy.
         cred="$(awk -v s="$server" '$1 == s { print $2 }' <<< "$creds")"
         if [[ -z "$cred" ]]; then
-          cred="$(northflank_registry "$project" "$server")"
+          cred="$(northflank_registry "$project" "$uid" "$server")"
           creds="$creds$server $cred"$'\n'
         fi
       fi
