@@ -72,7 +72,8 @@ freelunch init --name myapp   # same as: freelunch init --name myapp oci cloudfl
 
 Everything the stacks create is named after the project: the VM `myapp-main`, its network,
 the tunnel `myapp-oci-main`, service tokens and the Tailscale host. Without `--name`, init
-takes the folder's name. It ends up as `name_prefix` in each stack's tfvars, so two projects
+takes the folder's name, and a stack added later (`freelunch init northflank`) takes the name
+the project's other stacks have. It ends up as `name_prefix` in each stack's tfvars, so two projects
 on the same accounts don't clash.
 
 ```

@@ -56,7 +56,10 @@ git add .freelunch/state.s3.tfbackend && git commit -m "Keep the freelunch state
 be brought back. It reaches the bucket through Object Storage's S3-compatible API, which
 takes a Customer Secret Key: it makes one for your user (a user can have two) and puts it
 in `.freelunch/.env` as `FREELUNCH_STATE_AWS_ACCESS_KEY_ID` and
-`FREELUNCH_STATE_AWS_SECRET_ACCESS_KEY`. A new key can take a few minutes to work.
+`FREELUNCH_STATE_AWS_SECRET_ACCESS_KEY`, with `FREELUNCH_STATE_KEY_MADE`, when it made it.
+A new key takes a few minutes to work on all of Object Storage's servers, and until then some
+requests get a 403 `SignatureDoesNotMatch` and others don't. For 10 minutes after the key was
+made, state runs try again every 15 seconds while that happens, and say "key not active yet".
 
 The settings go in `.freelunch/state.s3.tfbackend`, which you commit: the bucket, the
 endpoint, and `{stack}`, which freelunch fills in with the stack's name, so each stack's
@@ -88,8 +91,10 @@ The store's credentials reach those runs only: `FREELUNCH_STATE_AWS_ACCESS_KEY_I
 `AWS_ACCESS_KEY_ID` there and nowhere else, so it never gets mixed up with the aws stack's.
 
 A copy only ever replaces an older one of the same stack: tofu/terraform refuse to push one
-with a lower serial or another lineage. When two machines (or yours and CI) changed the same
-stack since they last copied it, the next command stops instead of choosing:
+with a lower serial or another lineage. Two copies with the same lineage and serial are in
+step, whichever tofu/terraform version wrote them. When two machines (or yours and CI)
+changed the same stack since they last copied it, the next command that works on that stack
+stops instead of choosing:
 
 ```
 freelunch: state: oci changed both here (serial 14) and in the store (serial 15) since
@@ -97,8 +102,10 @@ freelunch last copied it, ...
 ```
 
 Look at both, then keep one: `freelunch state push oci --force` keeps this machine's,
-`freelunch state pull oci --force` takes the store's. `freelunch state` shows where each
-stack stands, and `freelunch doctor` checks the store too.
+`freelunch state pull oci --force` takes the store's. A command that works on other stacks
+only (`freelunch deploy northflank` when oci is the one at odds) says so and goes on with the
+copy here. `freelunch state` shows where each stack stands, and `freelunch doctor` checks the
+store too.
 
 ## 2. The workflows
 
@@ -267,7 +274,8 @@ AWS, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; for Azure, a service princ
 | `the store's copy isn't encrypted yet` | The passphrase came after the first copy. `freelunch state push oci --force` replaces it with an encrypted one |
 | `doesn't open with FREELUNCH_STATE_PASSPHRASE` | Another passphrase encrypted it: the bundle or `.env` on one machine is out of date |
 | `oci changed both here ... and in the store` | Two machines changed the stack at once. Compare both, then `state push --force` or `state pull --force` |
-| `can't read oci from the store`, right after `state init oci` | A new Customer Secret Key can take a few minutes to work: try `freelunch state push` again shortly |
+| `key not active yet` | The Customer Secret Key `state init oci` made is minutes old and doesn't work on all of the store's servers yet. freelunch tries again for 10 minutes after it was made; after that, run the command again shortly |
+| `the store turned down the key` | A key older than that is wrong or was deleted: compare `FREELUNCH_STATE_AWS_ACCESS_KEY_ID` in `.freelunch/.env` with Profile > Customer secret keys in the OCI console |
 | `CI waits for capacity for this stack` | `freelunch ci wait` handed it to CI. Wait for it, or `freelunch ci wait oci --cancel` |
 | `has changed since the plan was approved` | The tfvars in the bundle aren't the ones the plan was made with. Plan again, then `freelunch ci wait` with the new plan |
 | `its host key isn't pinned` (in CI) | Pin it here (`freelunch trust <host>`), then `freelunch ci secrets` |
