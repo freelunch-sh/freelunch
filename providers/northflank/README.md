@@ -91,7 +91,7 @@ the app's Compose file:
 | `command`, `entrypoint` | custom command and entrypoint |
 | `environment`, plus the `env_file` from `apps.tfvars` | the runtime environment, encrypted at Northflank |
 | `ports`, `expose` | private ports, the container side (`127.0.0.1:8080:8080` is 8080) |
-| `healthcheck` | a readiness check; deploy waits until it passes |
+| `healthcheck` | a readiness check (`start_period`, `interval`, `timeout` and `retries`, kept within what Northflank takes, and one success to pass); deploy waits until it passes |
 | `volumes`, `build` without `image`, `${VARIABLES}` in the image | stop the deploy with a message |
 
 Everything else in the Compose file (restart policies, networks, security options) has no
@@ -103,7 +103,9 @@ read-only one (`read:packages` on GHCR).
 
 cloudflared runs as a second service on nf-compute-10 (0.1 vCPU, 256 MB), pinned by digest
 like on a VM. Its readiness check is the tunnel's own `/ready`, so the deploy finishes once
-the tunnel is connected. Every service runs on one instance, and deploy waits up to
+the tunnel is connected. Before it sends anything, deploy (and `--dry-run`) checks each
+service against the fields Northflank requires and their ranges, so a body it would turn
+down doesn't leave half a deploy behind. Every service runs on one instance, and deploy waits up to
 `FREELUNCH_DEPLOY_TIMEOUT` seconds (180) for each.
 
 `freelunch status` asks Northflank which services run, `freelunch doctor` checks the token,
