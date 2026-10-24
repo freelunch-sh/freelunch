@@ -80,7 +80,8 @@ Whichever provider you pick, the name ends up as a zone on Cloudflare's free pla
      bob.ns.cloudflare.com
    ```
 
-   It takes a `CLOUDFLARE_API_TOKEN` that may create zones
+   It takes a `CLOUDFLARE_API_TOKEN` that may create zones and see its account, or
+   `CLOUDFLARE_ACCOUNT_ID` next to it
    ([which one](../providers/cloudflare/README.md#api-token)); *Add a domain* in the
    dashboard does the same.
 2. Enter the two nameservers at the provider. DigitalPlat asks for them when you register;

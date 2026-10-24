@@ -297,10 +297,11 @@ mkdir -p "$WORK/doh-bin"
 #   does), names in FAKE_BROKEN fail to resolve, names in FAKE_DELEGATED have Cloudflare's
 #   nameservers, and the rest don't exist. FAKE_OFFLINE fails every lookup.
 # - RDAP: IANA's list has .app and .dev, whose server knows the names in FAKE_REGISTERED.
-# - The Cloudflare API: the accounts in FAKE_ACCOUNTS ("id:name ...", default acc1:Me), the
-#   zones in FAKE_ZONES ("name:status ..."), new zones refused with FAKE_ZONE_REFUSED, a token
-#   that is invalid with FAKE_TOKEN_INVALID, and no access to the parts named in FAKE_DENY
-#   (dns, tunnel, access, service_tokens).
+# - The Cloudflare API: the accounts in FAKE_ACCOUNTS ("id:name ...", default acc1:Me, empty
+#   for a token that can't list its account), the zones in FAKE_ZONES ("name:status ...", all
+#   in acc1), new zones refused with FAKE_ZONE_REFUSED, a token that is invalid with
+#   FAKE_TOKEN_INVALID, and no access to the parts named in FAKE_DENY (dns, tunnel, access,
+#   service_tokens).
 # - A container registry at any other host, for deploy's image check. A manifest without a
 #   token gets a 401 with a Bearer challenge; the token endpoint hands out tokens, for
 #   repositories in FAKE_PRIVATE only with the password FAKE_PASSWORD (default
@@ -342,7 +343,7 @@ listed() { [[ " $2 " == *" $1 "* ]]; } # listed <word> <list>
 digest_of() { printf 'sha256:%064x' "$(printf '%s' "$1" | cksum | cut -d' ' -f1)"; }
 nf_missing() { respond 404 "{\"error\":{\"status\":404,\"message\":\"$1 not found\"}}"; }
 nf_deployment() { if listed "$1" "${FAKE_NF_FAILED:-}"; then echo FAILED; elif listed "$1" "${FAKE_NF_PENDING:-}"; then echo IN_PROGRESS; else echo COMPLETED; fi; }
-zone() { jq -nc --arg n "$1" --arg s "$2" '{id: ("zone-" + $n), name: $n, status: $s, account: {id: "acc1"}, name_servers: ["bob.ns.cloudflare.com", "ada.ns.cloudflare.com"]}'; }
+zone() { jq -nc --arg n "$1" --arg s "$2" '{id: ("zone-" + $n), name: $n, status: $s, account: {id: "acc1", name: "Me"}, name_servers: ["bob.ns.cloudflare.com", "ada.ns.cloudflare.com"]}'; }
 allowed() { [[ " ${FAKE_DENY:-} " != *" $1 "* ]] && echo '{"success":true,"result":[]}' || echo '{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}'; }
 case "$url" in
   https://cloudflare-dns.com/*)
@@ -370,7 +371,7 @@ case "$url" in
         if [[ -n "${FAKE_TOKEN_INVALID:-}" ]]; then echo '{"success":false,"errors":[{"code":1000,"message":"Invalid API Token"}]}'
         else echo '{"success":true,"result":{"id":"tok1","status":"active"}}'; fi ;;
       "GET /accounts?"*)
-        jq -nc '{success: true, result: [$ARGS.positional[] | split(":") | {id: .[0], name: .[1]}]}' --args ${FAKE_ACCOUNTS:-acc1:Me} ;;
+        jq -nc '{success: true, result: [$ARGS.positional[] | split(":") | {id: .[0], name: .[1]}]}' --args ${FAKE_ACCOUNTS-acc1:Me} ;;
       "POST /zones")
         name="$(jq -r .name <<< "$data")"
         if [[ -n "$(zone_status "$name")" ]]; then
@@ -385,6 +386,8 @@ case "$url" in
         status="$(zone_status "$name")"
         if [[ -n "$status" ]]; then jq -nc --argjson z "$(zone "$name" "$status")" '{success: true, result: [$z]}'
         else echo '{"success":true,"result":[]}'; fi ;;
+      "GET /zones?"*)
+        for z in ${FAKE_ZONES:-}; do zone "${z%%:*}" "${z#*:}"; done | jq -sc '{success: true, result: .}' ;;
       "GET /zones/"*/dns_records*) allowed dns ;;
       "GET /accounts/"*/cfd_tunnel/*)
         jq -nc --arg s "${FAKE_TUNNEL_STATUS:-healthy}" '{success: true, result: {status: $s, connections: (if $s == "healthy" then [1, 2, 3, 4] else [] end)}}' ;;
@@ -547,11 +550,13 @@ doctor_project() {
 }
 
 # doctor_in <dir> [args]: run doctor there with the fakes, its own home folder, no ssh-agent,
-# and only the credentials the test gives: TEST_CF_TOKEN, TEST_SSH_KEY and GHCR_TOKEN
+# and only the credentials the test gives: TEST_CF_TOKEN, TEST_CF_ACCOUNT, TEST_SSH_KEY and
+# GHCR_TOKEN
 doctor_in() {
   local dir="$1"; shift
   (cd "$dir" && HOME="$dir/home" SSH_AUTH_SOCK="" PATH="${TEST_PATH:-$WORK/doctor-bin:$WORK/bin:$PATH}" FAKE_LOG="$dir/fake.log" \
-    CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN:-}" FREELUNCH_SSH_KEY="${TEST_SSH_KEY:-}" GHCR_TOKEN="${GHCR_TOKEN:-}" "$CLI" doctor "$@")
+    CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN:-}" CLOUDFLARE_ACCOUNT_ID="${TEST_CF_ACCOUNT:-}" FREELUNCH_SSH_KEY="${TEST_SSH_KEY:-}" \
+    GHCR_TOKEN="${GHCR_TOKEN:-}" "$CLI" doctor "$@")
 }
 
 # status_in <dir>: run status with the fake ssh, docker and internet, and the Cloudflare
@@ -1640,6 +1645,12 @@ test_doctor_reports_every_problem() {
   contains "$out" "incorrect. A new API key can take a few minutes to work everywhere; otherwise check that the fingerprint and key_file of profile DEFAULT match one of your user's API keys"
   out="$(TEST_CF_TOKEN=cf-token doctor_in "$p" 2>&1 || true)"
   contains "$out" "  fail  the token can't see the zone example.com: add it to Cloudflare (freelunch domain add example.com)"
+  contains "$out" "  ok    domain add puts the zone in the token's account, acc1 (Me)"
+  # domain add would stop for want of the account.
+  out="$(TEST_CF_TOKEN=cf-token FAKE_ACCOUNTS="" doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  warn  domain add can't tell which account to put example.com in: give the token Account > Account Settings > Read, or set CLOUDFLARE_ACCOUNT_ID in .freelunch/.env"
+  out="$(TEST_CF_TOKEN=cf-token TEST_CF_ACCOUNT=acc2 FAKE_ACCOUNTS="" doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  ok    domain add puts the zone in CLOUDFLARE_ACCOUNT_ID (acc2)"
   out="$(doctor_in "$p" 2>&1 || true)"
   contains "$out" "  fail  CLOUDFLARE_API_TOKEN is not set"
   # A stack with only its example.
@@ -1793,6 +1804,17 @@ test_domain_add_puts_a_name_on_cloudflare() {
   fails grep -q '^api GET /accounts' "$d/fake.log"
   if out="$(TEST_CF_TOKEN=cf-token FAKE_ACCOUNTS="acc1:Me acc2:Work" domain_in "$d" add example.org 2>&1)"; then echo "add should have failed"; return 1; fi
   contains "$out" "set CLOUDFLARE_ACCOUNT_ID to one of: acc1 (Me), acc2 (Work)"
+  # A token without Account > Account Settings > Read lists no account. The account of a zone
+  # it can read stands in; without one, it says what to give it.
+  rm "$d/fake.log"
+  out="$(TEST_CF_TOKEN=cf-token FAKE_ACCOUNTS="" FAKE_ZONES="other.dpdns.org:active" domain_in "$d" add example.org 2>&1)"
+  grep -qx 'api GET /zones?per_page=50 token=cf-token' "$d/fake.log"
+  grep -qF '"account":{"id":"acc1"}' "$d/fake.log"
+  contains "$out" "example.org is on Cloudflare now"
+  if out="$(TEST_CF_TOKEN=cf-token FAKE_ACCOUNTS="" domain_in "$d" add example.org 2>&1)"; then echo "add should have failed"; return 1; fi
+  contains "$out" "the token can't see its Cloudflare account. Give it Account > Account Settings > Read, or set CLOUDFLARE_ACCOUNT_ID in .freelunch/.env"
+  if out="$(TEST_CF_TOKEN=bad FAKE_ACCOUNTS="" FAKE_TOKEN_INVALID=1 domain_in "$d" add example.org 2>&1)"; then echo "add should have failed"; return 1; fi
+  contains "$out" "Cloudflare doesn't take CLOUDFLARE_API_TOKEN: Invalid API Token (1000)"
   if out="$(TEST_CF_TOKEN=cf-token FAKE_ZONE_REFUSED=1 domain_in "$d" add sub.example.org 2>&1)"; then echo "add should have failed"; return 1; fi
   contains "$out" "Cloudflare refused sub.example.org: Please ensure you are providing the root domain (1116)"
   contains "$out" "whose zone resources are all zones of the account"
