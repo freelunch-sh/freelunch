@@ -313,9 +313,10 @@ mkdir -p "$WORK/doh-bin"
 #   in $FAKE_NF, and takes the token FAKE_NF_TOKEN (default nf-token). Projects in
 #   FAKE_NF_FOREIGN exist and weren't made by freelunch, and FAKE_NF_REFUSE turns down a new
 #   project with a 409. A service's deployment fails when it is in FAKE_NF_FAILED and never
-#   ends in FAKE_NF_PENDING, and its container is stopped in FAKE_NF_STOPPED. A registry
-#   login is refused when its name breaks Northflank's rule, and with FAKE_NF_ECHO_PASSWORD
-#   by a message that quotes the password.
+#   ends in FAKE_NF_PENDING, and its container is stopped in FAKE_NF_STOPPED. A project has
+#   a uid, a 24-digit hex ObjectId. A registry login is refused when its name breaks
+#   Northflank's rule or it is restricted to anything but uids, and with
+#   FAKE_NF_ECHO_PASSWORD by a message that quotes the password.
 cat > "$WORK/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 method=GET data="" headers="" out="" write="" auth="" basic="" url="" query=()
@@ -343,6 +344,10 @@ respond() { # respond <status> <body>
 zone_status() { local z; for z in ${FAKE_ZONES:-}; do [[ "${z%%:*}" != "$1" ]] || { echo "${z#*:}"; return; }; done; }
 listed() { [[ " $2 " == *" $1 "* ]]; } # listed <word> <list>
 digest_of() { printf 'sha256:%064x' "$(printf '%s' "$1" | cksum | cut -d' ' -f1)"; }
+nf_uid() { printf '%024x' "$(printf '%s' "$1" | cksum | cut -d' ' -f1)"; } # a project's ObjectId
+nf_bad_projects() { # nf_bad_projects <body>: the first entry of restrictions.projects that isn't an ObjectId
+  jq -r '[.restrictions.projects[]? | select(test("^[0-9a-f]{24}$") | not)][0] // empty' <<< "$1"
+}
 nf_missing() { respond 404 "{\"error\":{\"status\":404,\"message\":\"$1 not found\"}}"; }
 nf_deployment() { if listed "$1" "${FAKE_NF_FAILED:-}"; then echo FAILED; elif listed "$1" "${FAKE_NF_PENDING:-}"; then echo IN_PROGRESS; else echo COMPLETED; fi; }
 zone() { jq -nc --arg n "$1" --arg s "$2" '{id: ("zone-" + $n), name: $n, status: $s, account: {id: "acc1", name: "Me"}, name_servers: ["bob.ns.cloudflare.com", "ada.ns.cloudflare.com"]}'; }
@@ -439,7 +444,7 @@ case "$url" in
         if listed "$project" "${FAKE_NF_FOREIGN:-}"; then
           respond 200 "$(jq -nc --arg p "$project" '{data: {id: $p, name: $p, description: "My own project", lifecycleStatus: "created", deployment: {region: "europe-west"}}}')"
         elif [[ -f "$nf/projects/$project.json" ]]; then
-          respond 200 "$(jq -c '{data: (. + {id: .name, lifecycleStatus: "created", deployment: {region: .region}})}' "$nf/projects/$project.json")"
+          respond 200 "$(jq -c --arg uid "$(nf_uid "$project")" '{data: (. + {id: .name, uid: $uid, lifecycleStatus: "created", deployment: {region: .region}})}' "$nf/projects/$project.json")"
         else nf_missing Project; fi ;;
       "GET /projects?"*)
         respond 200 "$( { for f in "$nf/projects"/*.json; do [[ -f "$f" ]] && jq -c '{id: .name, name: .name, description}' "$f"; done
@@ -464,6 +469,10 @@ case "$url" in
         if [[ ! "$name" =~ ^[a-zA-Z]([-[:space:]]?[a-zA-Z0-9]+([-[:space:]][a-zA-Z0-9]+)*)?$ || ${#name} -lt 3 || ${#name} -gt 39 ]]; then
           respond 400 "$(jq -nc --arg n "$name" '{error: {status: 400, message: "Validation error", details: {name: ["\"name\" with value \"\($n)\" fails to match the required pattern"]}}}')"; exit 0
         fi
+        bad="$(nf_bad_projects "$data")"
+        if [[ -n "$bad" ]]; then
+          respond 400 "$(jq -nc --arg b "$bad" '{error: {status: 400, message: "Request failed payload validation - see details.", details: {"restrictions.projects.0": ("\"restrictions.projects[0]\" must be a valid ObjectId. Received \"" + $b + "\"")}}}')"; exit 0
+        fi
         if [[ -n "${FAKE_NF_ECHO_PASSWORD:-}" ]]; then
           respond 400 "$(jq -nc --arg p "$(jq -r .credentials.password <<< "$data")" '{error: {status: 400, message: "Validation error", details: [{message: ("\"password\" with value \"" + $p + "\" is invalid")}]}}')"; exit 0
         fi
@@ -473,6 +482,8 @@ case "$url" in
       "PATCH /integrations/registries/"*)
         id="${path##*/}"
         [[ -f "$nf/registries/$id.json" ]] || { nf_missing Credentials; exit 0; }
+        bad="$(nf_bad_projects "$data")"
+        if [[ -n "$bad" ]]; then respond 400 "$(jq -nc --arg b "$bad" '{error: {status: 400, message: "Request failed payload validation - see details.", details: {"restrictions.projects.0": ("must be a valid ObjectId. Received \"" + $b + "\"")}}}')"; exit 0; fi
         jq -c --argjson d "$data" '. * $d' "$nf/registries/$id.json" > "$nf/registries/$id.new" && mv "$nf/registries/$id.new" "$nf/registries/$id.json"
         respond 200 "$(jq -nc --arg id "$id" '{data: {id: $id}}')" ;;
       "DELETE /integrations/registries/"*)
@@ -1947,8 +1958,9 @@ test_deploy_puts_each_app_on_northflank() {
   digest="$(sed -n 's/^.*api: ghcr.io\/me\/api:1.0.0 = //p' <<< "$out")"
   [[ "$digest" == sha256:* ]] || { echo "no digest in: $out"; return 1; }
   # The registry login, for the project only, with the token from the environment.
+  # Restricted to the project by its uid (the fake's for freelunch), not its name.
   equals "$(jq -c . "$p/nf/registries/freelunch-freelunch-ghcr-io.json")" \
-    '{"name":"freelunch freelunch ghcr-io","provider":"github","credentials":{"username":"me","password":"ghp_test-token","scope":{"pull":true,"push":false}},"restrictions":{"restricted":true,"projects":["freelunch"]}}'
+    '{"name":"freelunch freelunch ghcr-io","provider":"github","credentials":{"username":"me","password":"ghp_test-token","scope":{"pull":true,"push":false}},"restrictions":{"restricted":true,"projects":["000000000000000026b55bea"]}}'
   # The app: pinned to the digest its tag points to, a private port for cloudflared, the
   # env file and the Compose environment, and the healthcheck as a readiness check.
   body="$(sent "$p" api)"
