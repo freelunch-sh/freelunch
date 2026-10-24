@@ -16,7 +16,8 @@ or as a Docker image.
   in `~/.oci/config`. With the OCI CLI, `oci setup bootstrap --profile-name freelunch`
   signs you in through the browser and creates one. A
   [session token](../providers/oci/README.md#prerequisites) from `oci session authenticate`
-  works too, for 24 hours at a time. Free resources exist only in your home region.
+  works too, until the session ends: hours after you sign in, as many as the tenancy allows
+  (8 is common). Free resources exist only in your home region.
 - A **domain on Cloudflare** (free plan) and an **API token** with the
   [permissions listed here](../providers/cloudflare/README.md#api-token). The domain can be
   a free name: see [Free domains](free-domains.md). `freelunch domain add` puts it on
@@ -111,15 +112,17 @@ scanner on the internet. Close it if you can:
 - **Your own IP**, if it doesn't change: `ssh_source_cidrs = ["203.0.113.7/32"]`.
 
 ```bash
-freelunch doctor                      # tools, the OCI sign-in and home region, your SSH key
+freelunch doctor                      # tools, the OCI sign-in, home region and limits, your SSH key
 freelunch plan oci --show-user-data   # optional: the plan, plus the VM's cloud-init
 freelunch apply oci
 ```
 
 `freelunch doctor` checks what the next steps will need, and says what to fix: a session
-that has expired, a `region` that isn't your home region, an SSH key that isn't in
-`ssh_public_keys`. Run it again before `deploy`: by then it also checks your images and
-registry logins, and the Cloudflare token, its permissions and the zone.
+that has expired (and when yours ends), a `region` that isn't your home region, a tenancy
+with no VCN or A1 cores left for this stack (OCI's limits count your other projects too), an
+SSH key that isn't in `ssh_public_keys`, an image without an `arm64` build or a registry
+token that isn't set. Run it again before `deploy`: by then it also checks the Cloudflare
+token, its permissions and the zone. It changes nothing, here or at the providers.
 
 The plan shows the VM's user data only as `metadata = (sensitive value)`. With
 `--show-user-data` it also prints the cloud-init the VM boots with, decoded, with the
@@ -137,8 +140,10 @@ freelunch apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity --
 freelunch status
 ```
 
-With a session token it refreshes the session before each attempt, but a session lasts 24
-hours at most, so for a longer wait use an API key. See
+`plan --out` says when the plan replaces or destroys something, which is easy to miss in a
+long plan. With a session token the wait refreshes the session before each attempt, but the
+session still ends (the wait says when), so for a longer wait use an API key. On a Mac,
+`--detach` keeps the Mac awake until the wait ends. See
 [Waiting for capacity](../providers/oci/README.md#waiting-for-capacity).
 
 When it finishes, `apply` prints the VM's address and the steps left before your app runs
@@ -381,8 +386,9 @@ as `myapp-oci-main`. The machine you deploy from has to be on the same tailnet.
 | Symptom | Look at |
 |---|---|
 | `500-InternalError, Out of host capacity` | OCI has no free Arm capacity right now. `freelunch apply oci --wait-for-capacity` keeps trying |
-| `session expired. Sign in again: ...` | Run the command it prints, then the one that stopped. A session lasts 24 hours at most; an API key doesn't expire (`oci setup bootstrap`) |
-| `401-NotAuthenticated` from OCI | With an API key, check `user`, `fingerprint` and `key_file` in the profile in `~/.oci/config`, and that `oci_config_profile` names it |
+| `session expired. Sign in again: ...` | Run the command it prints, then the one that stopped. A session ends hours after you sign in (`freelunch doctor` says when); an API key doesn't expire (`oci setup bootstrap`) |
+| `401-NotAuthenticated` from OCI | A new API key can take a few minutes to work everywhere, and until then a plan stops halfway: wait and run it again. Otherwise check `user`, `fingerprint` and `key_file` in the profile in `~/.oci/config`, and that `oci_config_profile` names it. `freelunch doctor` shows OCI's answer |
+| `400-LimitExceeded ... vcn-count` | The tenancy's other VCNs count too (two are free). OCI goes on counting a deleted one for a few minutes, so after a destroy or a replacement, wait before you plan again. `freelunch doctor` shows how many are left |
 | `deploy` waits for SSH and gives up | The VM's public IP in `freelunch inventory`, `ssh_source_cidrs`, and your key (`FREELUNCH_SSH_KEY`) |
 | `Permission denied (publickey)` | The key in `ssh_public_keys` must match the one `deploy` uses |
 | `REMOTE HOST IDENTIFICATION HAS CHANGED` | If you recreated the VM with the same IP, remove its line from `.freelunch/known_hosts` (`ssh-keygen -R <ip> -f .freelunch/known_hosts`) and pin the new keys with `freelunch trust <host>`. If you didn't, stop: something else answers at that address |
