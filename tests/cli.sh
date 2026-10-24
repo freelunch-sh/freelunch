@@ -72,6 +72,15 @@ cat > "$WORK/bin/fake-tf" <<'EOF'
 #!/usr/bin/env bash
 echo "TF_DATA_DIR=${TF_DATA_DIR:-} $*" >> "$FAKE_LOG"
 dir="${1#-chdir=}"
+# With FAKE_KEY_REFUSED=<n>, the store turns down a new key for the first n state runs.
+if [[ -f "$dir/backend.tfbackend" && -n "${FAKE_KEY_REFUSED:-}" ]]; then
+  n=$(( $(cat "$FAKE_LOG.refused" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$FAKE_LOG.refused"
+  if [[ $n -le $FAKE_KEY_REFUSED ]]; then
+    echo "Error: Failed to get existing workspaces: Unable to list objects in S3 bucket \"x-freelunch-state\": operation error S3: ListObjectsV2, https response error StatusCode: 403, RequestID: fra-1, api error SignatureDoesNotMatch: The secret key required to complete authentication could not be found." >&2
+    exit 1
+  fi
+fi
 if [[ "$1" == "version" || -f "$dir/backend.tfbackend" ]]; then exec "$REAL_TF" "$@"; fi
 creates='{"resource_changes":[{"address":"oci_core_instance.this","change":{"actions":["create"]}}]}'
 oci_error() {
@@ -825,6 +834,10 @@ test_init_names_the_project() {
   fails in_dir "$p/other" "$CLI" init --name a-name-longer-than-21-characters
   fails in_dir "$p/other" "$CLI" init --name
   absent "$p/other/.freelunch"
+  # A stack added later gets the name the project has.
+  (cd "$p/other" && "$CLI" init --name=moneyspider oci >/dev/null 2>&1 && "$CLI" init cloudflare >/dev/null 2>&1)
+  grep -qx 'name_prefix = "moneyspider"' "$p/other/.freelunch/cloudflare/terraform.tfvars.example"
+  rm -rf "$p/other/.freelunch"
   equals "$(project_name_of "1-x")" "freelunch"
   equals "$(project_name_of "A very long project folder name")" "a-very-long-project-f"
 }
@@ -2346,6 +2359,52 @@ test_state_store_keeps_a_copy_of_each_stack() {
   sed -i.bak '/FREELUNCH_STATE_PASSPHRASE/d' "$q/.freelunch/.env"
   if out="$(in_dir "$q" "$CLI" status 2>&1)"; then echo "status should have failed"; return 1; fi
   contains "$out" "FREELUNCH_STATE_PASSPHRASE is not set"
+}
+
+# The same lineage and serial is the same state, whichever tofu/terraform wrote it, even
+# when the pull after a push didn't get through. A conflict in a stack only stops a command
+# that works on it.
+test_state_store_same_serial_is_in_step() {
+  local p="$WORK/store-serial" q="$WORK/store-serial-clone" out
+  new_project "$p"
+  state_store "$p"
+  in_dir "$p" "$CLI" state push >/dev/null 2>&1
+  # As if the store had rewritten the copy, and the pull after the push had failed.
+  jq '.terraform_version = "0.0.1"' "$p/.freelunch/oci/terraform.tfstate" > "$p/x" && mv "$p/x" "$p/.freelunch/oci/terraform.tfstate"
+  out="$(in_dir "$p" "$CLI" state 2>&1)"
+  contains "$out" "  oci          in step (serial"
+  in_dir "$p" "$CLI" output oci >/dev/null 2>&1
+  # Another clone changed oci too: output cloudflare goes on, output oci stops.
+  mkdir -p "$q" && cp -R "$p/.freelunch" "$p/compose.yaml" "$q/"
+  with_ip "$p/.freelunch/oci/terraform.tfstate" 203.0.113.50
+  with_ip "$q/.freelunch/oci/terraform.tfstate" 203.0.113.60
+  in_dir "$q" "$CLI" state push oci >/dev/null 2>&1
+  out="$(in_dir "$p" "$CLI" output cloudflare 2>&1)"
+  contains "$out" "oci: output goes on with the state here, as it doesn't work on oci"
+  if out="$(in_dir "$p" "$CLI" output oci 2>&1)"; then echo "output oci should have failed"; return 1; fi
+  contains "$out" "state: oci changed both here"
+  contains "$(in_dir "$p" "$CLI" status 2>&1)" "oci: status shows the state here"
+}
+
+# A new key works on some of the store's servers before the others: state runs try again
+# while it is minutes old, and say what a key the store turns down means.
+test_state_store_waits_for_a_new_key() {
+  local p="$WORK/store-key" out
+  capacity_project "$p"
+  state_store "$p"
+  echo "FREELUNCH_STATE_KEY_MADE=$(( $(date +%s) - 60 ))" >> "$p/.freelunch/.env"
+  out="$(FAKE_KEY_REFUSED=3 freelunch_in "$p" state push oci 2>&1)"
+  contains "$out" "oci: key not active yet: the store turned down the key freelunch state init made 1 min ago"
+  contains "$out" "oci: copied the state to the store"
+  equals "$(grep -c '^sleep 15$' "$p/fake.log")" 3
+  contains "$(freelunch_in "$p" state 2>&1)" "  oci          in step (serial"
+  # An old key gets one more try, then the error says what it means.
+  sed -i.bak '/FREELUNCH_STATE_KEY_MADE/d' "$p/.freelunch/.env"
+  rm -f "$p/fake.log.refused"
+  if out="$(FAKE_KEY_REFUSED=5 freelunch_in "$p" state status oci 2>&1)"; then echo "state should have failed"; return 1; fi
+  contains "$out" "the store turned down the key in FREELUNCH_STATE_AWS_ACCESS_KEY_ID and FREELUNCH_STATE_AWS_SECRET_ACCESS_KEY (SignatureDoesNotMatch). If you made it in the last few minutes, it isn't active yet"
+  lacks "$out" "ListObjectsV2"
+  grep -q '^sleep 5$' "$p/fake.log"
 }
 
 # A wait copies the state to the store after each attempt that changed it, so a run that
