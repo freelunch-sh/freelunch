@@ -39,9 +39,10 @@ Usage: freelunch <command> [args] [-- extra tofu/terraform args]
 Project:
   init [--name <name>] [--image-workflow] [stack...]
                           Create .freelunch/ in the current directory (default stacks: oci
-                          cloudflare). Resources are named after the project: --name, or the
-                          folder's name. --image-workflow adds a GitHub Actions workflow that
-                          builds the image for the hosts and pushes it to ghcr.io
+                          cloudflare). Resources are named after the project: --name, the
+                          name its other stacks have, or the folder's name. --image-workflow
+                          adds a GitHub Actions workflow that builds the image for the hosts
+                          and pushes it to ghcr.io
   deploy [target...]      Check that each image has a build for its host, copy Compose apps and
                           their env to the hosts over SSH, start them and wait until they are
                           healthy. On a container platform (northflank) each app becomes a
@@ -374,8 +375,13 @@ run_stack() { # run_stack <action> <provider> [extra args]
 # Those runs, and only those, get each FREELUNCH_STATE_<NAME> variable as <NAME>: the
 # store's credentials, e.g. FREELUNCH_STATE_AWS_ACCESS_KEY_ID. FREELUNCH_STATE_PASSPHRASE
 # encrypts the copy (OpenTofu's state encryption); none keeps it as it is. The files here
-# stay plain, as they always were.
+# stay plain, as they always were. FREELUNCH_STATE_KEY_MADE, when the store's key was made,
+# stays here too.
 STATE_ENV=()
+# Whether a state run tries again while the store turns down a new key (doctor doesn't)
+STATE_RETRY=1
+# How long a new key gets to work on all of the store's servers, in seconds
+KEY_SPREAD=600
 
 # state_config: the project's state.<backend>.tfbackend, or nothing
 state_config() {
@@ -427,7 +433,7 @@ state_setup() {
   command -v jq >/dev/null || die "jq is required for the state store"
   STATE_ENV=()
   for v in $(compgen -v FREELUNCH_STATE_); do
-    [[ "$v" == "FREELUNCH_STATE_PASSPHRASE" ]] || STATE_ENV+=("${v#FREELUNCH_STATE_}=${!v}")
+    [[ "$v" == "FREELUNCH_STATE_PASSPHRASE" || "$v" == "FREELUNCH_STATE_KEY_MADE" ]] || STATE_ENV+=("${v#FREELUNCH_STATE_}=${!v}")
   done
   case "${FREELUNCH_STATE_PASSPHRASE:-}" in
     "")
@@ -453,26 +459,73 @@ state_tf() {
   )
 }
 
+# key_refused <output>: whether an S3-compatible store turned down the key. A new one is for
+# a few minutes: an OCI Customer Secret Key works on some of Object Storage's servers before
+# the others, so the same request fails one time and works the next.
+key_refused() { grep -qE 'SignatureDoesNotMatch|InvalidAccessKeyId' <<< "$1"; }
+
+# key_age: how many seconds ago freelunch state init made the store's key, or nothing
+key_age() {
+  [[ "${FREELUNCH_STATE_KEY_MADE:-}" =~ ^[0-9]+$ ]] || return 0
+  echo $(( $(date +%s) - FREELUNCH_STATE_KEY_MADE ))
+}
+
+# state_try <stack> <file> <args...>: state_tf with its output in the file and its errors in
+# <file>.err. While the store turns down a key made less than KEY_SPREAD seconds ago, it
+# tries again every 15 seconds; any other key gets one more try.
+state_try() {
+  local s="$1" file="$2" tries=0 age; shift 2
+  while true; do
+    if state_tf "$s" "$@" > "$file" 2> "$file.err"; then return 0; fi
+    [[ $STATE_RETRY -eq 1 ]] || return 1
+    key_refused "$(cat "$file.err")" || return 1
+    tries=$((tries + 1))
+    age="$(key_age)"
+    if [[ -n "$age" && $age -lt $KEY_SPREAD ]]; then
+      if [[ $tries -eq 1 ]]; then
+        log "$s: key not active yet: the store turned down the key freelunch state init made $((age / 60)) min ago. A new key takes a few minutes to work on all of the store's servers, so this tries again every 15s for up to $(( (KEY_SPREAD - age + 59) / 60 )) min"
+      fi
+      sleep 15
+    elif [[ $tries -eq 1 ]]; then
+      sleep 5
+    else
+      return 1
+    fi
+  done
+}
+
 # state_init <stack>: the stack's state module in TMP, set up for the store. Fails with what
 # tofu/terraform said.
 state_init() {
-  local s="$1" cfg dir out
+  local s="$1" cfg dir
   dir="$TMP/state/$s"
   [[ ! -f "$dir/ready" ]] || return 0
   cfg="$(state_config)"
   mkdir -p "$dir"
   printf 'terraform {\n  backend "%s" {}\n}\n' "$(state_backend "$cfg")" > "$dir/main.tf"
   sed "s/{stack}/$s/g" "$cfg" > "$dir/backend.tfbackend"
-  if ! out="$(state_tf "$s" init -input=false -no-color -reconfigure -backend-config="$dir/backend.tfbackend" 2>&1)"; then
-    state_error "$out"
+  if ! state_try "$s" "$dir/init.out" init -input=false -no-color -reconfigure -backend-config="$dir/backend.tfbackend"; then
+    state_error "$(cat "$dir/init.out" "$dir/init.out.err")"
     return 1
   fi
   touch "$dir/ready"
 }
 
 # state_error <output>: the error of a state run, from its first Error line, and what it means
-# when it is about the passphrase
+# when it is about the passphrase. A key the store turns down gets what that means instead,
+# as the S3 error doesn't say.
 state_error() {
+  local code age
+  if key_refused "$1"; then
+    code="$(grep -oE 'SignatureDoesNotMatch|InvalidAccessKeyId' <<< "$1" | head -1)"
+    age="$(key_age)"
+    if [[ -n "$age" && $age -lt $((KEY_SPREAD + 300)) ]]; then
+      log "key not active yet: the store turned down the key ($code), which freelunch state init made $((age / 60)) min ago. A new key takes a few minutes to work on all of the store's servers; try again in a minute or two"
+    else
+      log "the store turned down the key in FREELUNCH_STATE_AWS_ACCESS_KEY_ID and FREELUNCH_STATE_AWS_SECRET_ACCESS_KEY ($code). If you made it in the last few minutes, it isn't active yet: try again shortly. Otherwise $(rel "$PROJECT")/.env has a wrong or deleted key; for OCI, compare it with Profile > Customer secret keys in the console"
+    fi
+    return 0
+  fi
   strip_colors <<< "$1" | awk '/Error/ { on = 1 } on' >&2
   if grep -q 'unencrypted payload' <<< "$1"; then
     log "the store's copy isn't encrypted yet: freelunch state push <stack> --force encrypts it"
@@ -484,7 +537,8 @@ state_error() {
 # state_id <state file>: its lineage and serial, or nothing when there is no state in it
 state_id() { jq -r 'select(.lineage != null) | "\(.lineage) \(.serial)"' "$1" 2>/dev/null || true; }
 
-same_state() { [[ "$(jq -cS . "$1" 2>/dev/null)" == "$(jq -cS . "$2" 2>/dev/null)" ]]; }
+# same_state <file> <file>: whether two states hold the same, whichever tofu/terraform wrote them
+same_state() { [[ "$(jq -cS 'del(.terraform_version)' "$1" 2>/dev/null)" == "$(jq -cS 'del(.terraform_version)' "$2" 2>/dev/null)" ]]; }
 
 # take_state <stack> <state file>: make that the stack's state here, in step with the store.
 # <state file>.synced remembers the lineage and serial of the last copy both had.
@@ -500,7 +554,7 @@ take_state() {
 # when the store has none
 state_pull_copy() {
   state_init "$1" || die "state: can't read $1 from the store ($(rel "$(state_config)")); see above"
-  if ! state_tf "$1" state pull > "$2" 2> "$2.err"; then
+  if ! state_try "$1" "$2" state pull; then
     state_error "$(cat "$2.err")"
     die "state: can't read $1 from the store ($(rel "$(state_config)")); see above"
   fi
@@ -535,7 +589,9 @@ sync_pull() {
     die "state: the store's copy of $s is another state (lineage ${there% *}; here it is ${here% *}). Check {stack} in $(rel "$(state_config)"), or take the store's with freelunch state pull $s --force"
   fi
   if [[ "$here" == "$there" ]]; then
-    same_state "$file" "$remote" || diverged "$s" "$here" "$there"
+    # Same lineage and serial is the same state, unless both moved on from the last copy to
+    # the same serial: then they have to hold the same.
+    if [[ -n "$last" && "$last" != "$here" ]] && ! same_state "$file" "$remote"; then diverged "$s" "$here" "$there"; fi
     [[ "$last" == "$here" ]] || echo "$here" > "$file.synced"
   elif [[ ${there#* } -gt ${here#* } ]]; then
     [[ -z "$last" || "$last" == "$here" ]] || diverged "$s" "$here" "$there"
@@ -558,14 +614,15 @@ sync_push() {
   [[ -n "$here" ]] || return 0
   [[ "$force" == "force" || "$(cat "$file.synced" 2>/dev/null || true)" != "$here" ]] || return 0
   state_init "$s" || { log "$s: couldn't reach the state store; the state stays in $(rel "$file") until the next freelunch command copies it"; return 1; }
-  if out="$(state_tf "$s" state push -lock-timeout=120s ${force:+-force} "$file" 2>&1)"; then
-    # OpenTofu raises the serial of what it pushes, so the copy here becomes the store's.
+  out="$TMP/state/$s.push"
+  if state_try "$s" "$out" state push -lock-timeout=120s ${force:+-force} "$file"; then
+    # Some backends raise the serial of what they push, so the copy here becomes the store's.
     pushed="$TMP/state/$s.pushed"
-    if state_tf "$s" state pull > "$pushed" 2>/dev/null && [[ -n "$(state_id "$pushed")" ]]; then take_state "$s" "$pushed"; else echo "$here" > "$file.synced"; fi
+    if state_try "$s" "$pushed" state pull && [[ -n "$(state_id "$pushed")" ]]; then take_state "$s" "$pushed"; else echo "$here" > "$file.synced"; fi
     log "$s: copied the state to the store (serial $(state_id "$file" | cut -d' ' -f2))"
     return 0
   fi
-  out="$(strip_colors <<< "$out")"
+  out="$(cat "$out" "$out.err" | strip_colors)"
   case "$out" in
     *"newer state"*|*"same serial"*|*"unrelated state"*)
       log "$s: the store has a newer state than this one, from another machine or CI, so this one stays in $(rel "$file") and isn't copied. freelunch state shows both; freelunch state push $s --force keeps this one"
@@ -597,13 +654,27 @@ sync_now() {
   [[ $rc -ne 2 ]] || die "$1: stopped waiting: the store has a newer state of $1 than this wait, so another machine or CI is at it too"
 }
 
-# sync_start: before a command that reads or changes state, each stack's state here as new as
-# the store's
+# sync_start <command> [args...]: before a command that reads or changes state, each stack's
+# state here as new as the store's. A conflict stops the command when it works on that
+# stack: one it names (oci, or a host of it such as oci-main), or any when it names none.
+# Otherwise, and for status, it only says so, and the command goes on with the copy here.
 sync_start() {
-  local s
+  local cmd="$1" s a named=" "; shift
   [[ -n "$(state_config)" ]] || return 0
   state_setup
-  for s in $(project_stacks); do sync_pull "$s"; done
+  for a in "$@"; do
+    for s in $(project_stacks); do
+      [[ "$a" != "$s" && "$a" != "$s-"* ]] || named="$named$s "
+    done
+  done
+  for s in $(project_stacks); do
+    if [[ "$cmd" != "status" && ( "$named" == " " || "$named" == *" $s "* ) ]]; then
+      sync_pull "$s"
+    elif (sync_pull "$s"); then :
+    elif [[ "$cmd" == "status" ]]; then log "$s: status shows the state here"
+    else log "$s: $cmd goes on with the state here, as it doesn't work on $s"
+    fi
+  done
 }
 
 # --- OCI sign-in ----------------------------------------------------------------------
@@ -1758,6 +1829,17 @@ EOF
   log "the image workflow builds for $platforms. A package of a private repository is private: give deploy a read:packages token under registries in apps.tfvars"
 }
 
+# project_prefix <.freelunch folder>: the name an earlier init gave the project's stacks, or
+# nothing
+project_prefix() {
+  local f n
+  for f in "$1"/*/terraform.tfvars "$1"/*/terraform.tfvars.example; do
+    [[ -f "$f" ]] || continue
+    n="$(tfvar "$f" name_prefix)"
+    if [[ -n "$n" ]]; then echo "$n"; return 0; fi
+  done
+}
+
 # project_name <folder name>: a name every provider takes for its resources, e.g.
 # "Shop API" is shop-api. OCI's network module is the strictest: 2 to 21 characters.
 project_name() {
@@ -1808,7 +1890,7 @@ route_example() {
 }
 
 cmd_init() {
-  local base cfg s src name="" workflow=0 missing stacks=()
+  local base cfg s src name="" prefix workflow=0 missing stacks=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name)   [[ $# -gt 1 ]] || die "init: --name takes a name"; name="$2"; shift ;;
@@ -1833,7 +1915,11 @@ cmd_init() {
   [[ -z "$PROJECT" || "$PROJECT" == "$cfg" ]] || die "already inside a freelunch project: $PROJECT"
 
   [[ ${#stacks[@]} -gt 0 ]] || stacks=("${INIT_STACKS[@]}")
-  [[ -n "$name" ]] || name="$(project_name "$(basename "$base")")"
+  # Stacks added later get the name the project has already.
+  prefix="$(project_prefix "$cfg")"
+  if [[ -z "$name" ]]; then name="${prefix:-$(project_name "$(basename "$base")")}"
+  elif [[ -n "$prefix" && "$name" != "$prefix" ]]; then log "the project's other stacks are named $prefix; --name $name names only the new ones"
+  fi
   for s in "${stacks[@]}"; do
     [[ -f "$(stack_dir "$s")/terraform.tfvars.example" ]] || die "no stack named '$s' (stacks: $(ready_stacks))"
   done
@@ -3495,6 +3581,8 @@ doctor_state() {
   echo "State store ($(rel "$cfg"))"
   if ! out="$( (state_setup) 2>&1)"; then check fail "${out#freelunch: state: }"; return 0; fi
   state_setup
+  # doctor says how things stand now, without waiting for a new key.
+  STATE_RETRY=0
   for s in $(project_stacks); do
     if ! where="$( (state_where "$s") 2>&1)"; then
       check fail "$s: $( { grep '^==> ' <<< "$where" || grep '^freelunch: ' <<< "$where"; } | tail -1 | sed -e 's/^==> //' -e 's/^freelunch: state: //')"
@@ -3556,7 +3644,7 @@ state_where() {
   elif [[ -z "$here" ]]; then echo "in the store only (serial ${there#* }); freelunch state pull brings it here"
   elif [[ "${here% *}" != "${there% *}" ]]; then echo "the store has another state (lineage ${there% *}, here ${here% *}): check {stack} in $(rel "$(state_config)")"
   elif [[ "$here" == "$there" ]]; then
-    if same_state "$file" "$remote"; then echo "in step (serial ${here#* })"; else echo "$both"; fi
+    if [[ -z "$last" || "$last" == "$here" ]] || same_state "$file" "$remote"; then echo "in step (serial ${here#* })"; else echo "$both"; fi
   elif [[ ${there#* } -gt ${here#* } ]]; then
     if [[ -z "$last" || "$last" == "$here" ]]; then echo "newer in the store (serial ${there#* }, here ${here#* }); freelunch state pull brings it here"; else echo "$both"; fi
   else
@@ -3699,6 +3787,8 @@ state_store_oci() {
     printf '\n# The state store (freelunch state init oci): a Customer Secret Key of your OCI user\n' >> "$PROJECT/.env"
     env_add FREELUNCH_STATE_AWS_ACCESS_KEY_ID "$(jq -r '.data.id' <<< "$out")"
     env_add FREELUNCH_STATE_AWS_SECRET_ACCESS_KEY "$(jq -r '.data.key' <<< "$out")"
+    # A new key takes a few minutes to work everywhere; state runs wait for it until then.
+    env_add FREELUNCH_STATE_KEY_MADE "$(date +%s)"
     log "oci: made a Customer Secret Key for Object Storage's S3 API and put it in $(rel "$PROJECT")/.env"
   fi
   {
@@ -3814,7 +3904,7 @@ state_init_store() {
   state_passphrase
   log "commit $(rel "$(state_config)"); the passphrase and keys stay in $(rel "$PROJECT")/.env, out of git"
   [[ "$store" == "oci" ]] || return 0
-  log "freelunch state push copies the state there now, and every command that uses it does from now on (a new key can take a few minutes to work)"
+  log "freelunch state push copies the state there now, and every command that uses it does from now on. A new key takes a few minutes to work on all of Object Storage's servers; until then, state runs try again while the store turns it down"
 }
 
 # --- CI -------------------------------------------------------------------------------
@@ -4481,7 +4571,7 @@ main() {
   esac
   # Commands that read or change state start from the state store's copy when it is newer.
   case "$cmd" in
-    plan|apply|destroy|deploy|status|output|hybrid|inventory|trust) resolve_state_refs; sync_start ;;
+    plan|apply|destroy|deploy|status|output|hybrid|inventory|trust) resolve_state_refs; sync_start "$cmd" "$@" ;;
   esac
   case "$cmd" in
     init)                 cmd_init "$@" ;;

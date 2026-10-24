@@ -27,7 +27,8 @@ For a project set up with freelunch from `main` before 1.0.0:
 
 - **Project mode.** `freelunch init` creates a `.freelunch/` folder in any repository, with a
   `terraform.tfvars.example` per stack, `apps.tfvars`, `.env.example` and a `.gitignore`.
-  Each example sets `name_prefix` to the project's name (`--name`, or the folder's), so VMs,
+  Each example sets `name_prefix` to the project's name (`--name`, the one the project's
+  other stacks have, or the folder's), so VMs,
   networks, tunnels and service tokens are named after the project and two projects on the
   same accounts don't clash. When it runs again, `init` keeps every file, adds the lines an older
   `.gitignore` lacks, and checks the compose files that the `apps.tfvars` it kept names.
@@ -165,8 +166,12 @@ For a project set up with freelunch from `main` before 1.0.0:
   Customer Secret Key for its S3 API; `r2`, `b2` and `gitlab` write the settings to fill in.
   Commands that read state take the store's copy when it is newer, and apply, destroy and
   each attempt of a wait copy theirs back. A copy never overwrites a newer one, and when two
-  machines changed a stack at once, commands stop until `freelunch state push --force` or
-  `pull --force` keeps one. The copy is encrypted with OpenTofu's state encryption and
+  machines changed a stack at once, a command that works on that stack stops until
+  `freelunch state push --force` or `pull --force` keeps one; the others go on with the copy
+  here. The same lineage and serial count as in step, whichever tofu/terraform version wrote
+  them. While the store turns down a key `state init oci` made minutes ago (a new Customer
+  Secret Key works on some servers before the others), state runs try again for up to 10
+  minutes and say "key not active yet" instead of the raw S3 error. The copy is encrypted with OpenTofu's state encryption and
   `FREELUNCH_STATE_PASSPHRASE`, which `state init` makes. `freelunch state` shows where each
   stack stands, and `doctor` checks the store. The store's credentials
   (`FREELUNCH_STATE_<NAME>`) reach its runs only.
