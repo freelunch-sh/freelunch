@@ -22,7 +22,8 @@ it when Oracle has no Arm capacity for you, or when you would rather not run a V
 | Services | **2**, always on, no sleeping | ✅ deploy counts your apps plus cloudflared |
 | Plans | up to **nf-compute-20** (0.2 vCPU, 512 MB); bigger plans are locked on a free project | ✅ needs `acknowledge_billable_resources = true` |
 | Resources | up to $20/month; nf-compute-20 is $5.40 and nf-compute-10 (cloudflared) $2.70 | by the plans above |
-| Projects, jobs, databases | 2 projects, 2 jobs, 1 database | one project per freelunch project; jobs and databases not used yet |
+| Projects | **1** (the [docs](https://northflank.com/docs/v1/application/getting-started/create-a-project) say one; the pricing page says 2, but a second one gets a 409) | ✅ doctor, plan and apply check that the team has room for the project |
+| Jobs, databases | 2 jobs, 1 database | not used yet |
 | Volumes | no free allowance | ✅ deploy stops at an app with volumes |
 
 Limits live in [`provider.yaml`](provider.yaml) under `limits:`. Free tiers change, so
@@ -79,7 +80,9 @@ adding `app`, and running `freelunch deploy`
 ## What deploy does
 
 `apply` checks the plan against the free limits and makes the project, named after
-`name_prefix`. `deploy` then creates or updates a service per app, from the one service in
+`name_prefix`, unless another project already takes the Sandbox's one; `plan --out` warns
+about that too. Where Northflank turns a request down, the error has its details: the field
+and why, with secrets left out. `deploy` then creates or updates a service per app, from the one service in
 the app's Compose file:
 
 | Compose | Northflank |
@@ -93,7 +96,8 @@ the app's Compose file:
 
 Everything else in the Compose file (restart policies, networks, security options) has no
 equivalent there and is left out. A registry under `registries` in `apps.tfvars` becomes a
-saved login at Northflank, which only this project can use. Unlike on a VM, the token stays
+saved login at Northflank, which only this project can use, named `freelunch <project>
+<registry>` (`freelunch shop ghcr-io`: Northflank takes no dots). Unlike on a VM, the token stays
 there, because Northflank pulls the image again whenever it starts a container: give it a
 read-only one (`read:packages` on GHCR).
 
@@ -103,7 +107,7 @@ the tunnel is connected. Every service runs on one instance, and deploy waits up
 `FREELUNCH_DEPLOY_TIMEOUT` seconds (180) for each.
 
 `freelunch status` asks Northflank which services run, `freelunch doctor` checks the token,
-the region and the project, and `freelunch destroy northflank` deletes the services, the
+the region and the project, and whether the team has room for it, and `freelunch destroy northflank` deletes the services, the
 saved registry logins and the project. freelunch marks what it makes (`Managed by freelunch`
 in the description) and never takes over or deletes a project it didn't make.
 

@@ -137,13 +137,15 @@ For a project set up with freelunch from `main` before 1.0.0:
   without a VM, through their API. **Northflank** is the first, and the recommended one in
   Containers & PaaS: its free Sandbox runs two always-on services without a card.
   `freelunch apply northflank` checks the plan against the free limits and creates a project
-  named after the freelunch project. `freelunch deploy` turns each app's Compose service into
+  named after the freelunch project; `doctor`, `plan --out` and `apply` say when another
+  project already takes the Sandbox's one. `freelunch deploy` turns each app's Compose service into
   a Northflank service (the image pinned to the digest its tag points to, command,
   environment with the app's env file, private ports, the healthcheck as a readiness check),
   saves the registry logins for that project only, runs `cloudflared` as the second service
   and waits until each one runs. `status` and `doctor` ask Northflank, and
   `destroy northflank` deletes the services, the logins and the project. freelunch never
-  takes over a project it didn't make. Moving an app from a VM is changing its target in
+  takes over a project it didn't make. A request Northflank turns down shows its details
+  (the field and why), with the request's secrets left out. Moving an app from a VM is changing its target in
   `apps.tfvars` and its route, which names the app on a platform (`app = "api"`); the
   walkthrough's new "Switch to another provider" shows it for Northflank and GCP.
 - The [platform contract](docs/architecture.md#platform-contract): `hybrid/` aggregates
@@ -189,6 +191,9 @@ For a project set up with freelunch from `main` before 1.0.0:
 
 ### Changed
 
+- `apply` and `destroy` without a terminal, where tofu/terraform can't ask for a yes, say
+  what to use instead: a saved plan (`plan --out`, then `apply --plan`), or
+  `FREELUNCH_AUTO_APPROVE=1` for `destroy`.
 - `apply --wait-for-capacity` also retries what leaves nothing half done: a 401 for clock
   skew, from a request signed before the machine slept, and a network failure while
   planning, or on a read while applying. An attempt that made part of a reviewed plan no
