@@ -1867,7 +1867,7 @@ northflank_registry() {
     id="$(jq -r '.data.id // empty' "$TMP/nf.json")"
   fi
   rm -f "$TMP/registry.json"
-  nf_ok "$code" && [[ -n "$id" ]] || die "northflank: can't save the login to $server ($code): $(nf_error)"
+  if ! nf_ok "$code" || [[ -z "$id" ]]; then die "northflank: can't save the login to $server ($code): $(nf_error)"; fi
   echo "$id"
 }
 
