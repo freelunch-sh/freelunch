@@ -258,7 +258,8 @@ hybrid_state() {
 is_configured() { [[ -f "$(config_dir "$1")/terraform.tfvars" ]]; }
 is_deployed() {
   local state; state="$(config_dir "$1")/terraform.tfstate"
-  [[ -s "$state" ]] && grep -q '"outputs": {' "$state" && ! grep -q '"outputs": {}' "$state"
+  # Compact or not: tofu/terraform write it indented, state pull prints it on one line.
+  [[ -s "$state" ]] && grep -Eq '"outputs": ?[{]' "$state" && ! grep -Eq '"outputs": ?[{][[:space:]]*[}]' "$state"
 }
 
 # tofu/terraform would still load a terraform.tfvars sitting next to the code, on top of the
@@ -546,7 +547,8 @@ take_state() {
   local file
   file="$(config_dir "$1")/terraform.tfstate"
   mkdir -p "$(dirname "$file")"
-  (umask 077 && cp "$2" "$file.new") && mv "$file.new" "$file"
+  # state pull prints it on one line; written out like tofu/terraform do, it reads the same.
+  (umask 077 && jq . "$2" > "$file.new") && mv "$file.new" "$file"
   state_id "$file" > "$file.synced"
 }
 
@@ -1340,7 +1342,9 @@ cmd_inventory() {
   local out state=()
   out="$(state_root)/inventory.json"
   [[ -z "$PROJECT" ]] || state=(-state="$(hybrid_state)")
-  [[ -s "$(hybrid_state)" ]] || cmd_hybrid >/dev/null
+  # Built again each time: an earlier one may be from before a stack was applied or taken
+  # from the store.
+  cmd_hybrid >/dev/null
   tf_for hybrid "$ROOT/hybrid" output ${state[@]+"${state[@]}"} -json hosts > "$out"
   log "wrote $(rel "$out") ($(jq length "$out" 2>/dev/null || echo '?') hosts)"
 }
