@@ -120,6 +120,11 @@ The first release, planned as 1.0.0: deploy your project's container from its ow
   and `deploy/` reads each platform app's Compose file and stops on what the platform can't
   do: volumes, a build without an image, Compose variables in the image, more services than
   the free plan has, or a route to an app or port that isn't there.
+- Catalog: Google Cloud Run and Scaleway Serverless Containers with their free tiers, and
+  Railway's Free plan checked again, each with what stops it for now. The container
+  platforms (Koyeb, Render, Railway and the rest) moved to the `platform` layer. The GCP
+  page notes that an external IPv6 address isn't billed, while ghcr.io has no IPv6 yet, and
+  that Standard Tier's 200 GiB of free egress is per account, not per region.
 
 ### Changed
 
