@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export NORTHFLANK_API_TOKEN (or put it in .freelunch/.env).
+
+# Where the project runs. curl https://api.northflank.com/v1/regions lists the regions.
+region = "europe-west"
+
+# Every app gets a service of its own on this plan. The free Sandbox has two services and
+# runs plans up to nf-compute-20 (0.2 vCPU, 512 MB). With the cloudflare stack, cloudflared
+# takes the second service, on nf-compute-10 (0.1 vCPU, 256 MB).
+plan = "nf-compute-20"

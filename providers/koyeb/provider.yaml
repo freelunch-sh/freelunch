@@ -3,7 +3,7 @@ name: koyeb
 display_name: "Koyeb"
 category: containers
 status: planned
-layer: service
+layer: platform
 terraform_provider: "koyeb/koyeb"
 iac: partner
 free_tier_type: always-free

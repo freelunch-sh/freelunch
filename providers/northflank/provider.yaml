@@ -1,18 +1,28 @@
 # freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+# The `limits` block is also enforced by providers/northflank/stack through preconditions.
 name: northflank
 display_name: "Northflank"
 category: containers
-status: planned
-layer: service
+status: ready
+layer: platform
+recommended: true
 terraform_provider: null
 iac: none
 free_tier_type: always-free
-free_tier: "2 services, 2 cron jobs and 1 database"
-card_required: "unknown"
+free_tier: "Sandbox: 2 services, 2 jobs and 1 database, always on with no sleeping, plans up to nf-compute-20 (0.2 vCPU, 512 MB) and up to $20/month of resources; no card"
+card_required: "no"
 url: "https://northflank.com/pricing"
-last_verified: "2026-10-18"
-notes: "No Terraform provider; Northflank has its own API and templates."
+last_verified: "2026-10-24"
+notes: "No Terraform provider for services (the community Vestmark/northflank provider manages secret groups only), so freelunch deploys through Northflank's API. With a Cloudflare Tunnel, cloudflared takes the second free service."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
-  - "registry.terraform.io (checked 2026-10-18)"
+  - "northflank.com/pricing (Sandbox: 2 services, 2 jobs, 1 database, always on, no card, up to $20/month of resources; checked 2026-10-24)"
+  - "api.northflank.com/v1/plans (nf-compute-10: 0.1 vCPU, 256 MB, $2.70/month; nf-compute-20: 0.2 vCPU, 512 MB, $5.40/month; checked 2026-10-24)"
+  - "github.com/Hennit-Dave/rota/issues/7 (plans above nf-compute-20 are locked on a free project, 2026-10-17)"
+  - "northflank.com/docs/v1/application/network/networking-on-northflank (private ports are reached as <service>:<port> inside a project)"
+  - "@northflank/js-client 0.12.0 (API endpoints and payloads, checked 2026-10-24)"
+  - "github.com/Vestmark/terraform-provider-northflank (secret groups only, checked 2026-10-24)"
 inspire: []
+
+limits:
+  plans: [nf-compute-10, nf-compute-20] # a free project locks the bigger plans
+  max_services: 2

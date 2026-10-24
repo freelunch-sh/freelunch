@@ -8,7 +8,9 @@ Everything freelunch needs lives in your repository, in a `.freelunch/` folder: 
 state and an apps file. freelunch itself is pinned at a version, either as a git submodule
 or as a Docker image.
 
-[`examples/backend-app`](../examples/backend-app/) is the finished result.
+[`examples/backend-app`](../examples/backend-app/) is the finished result. No Arm capacity at
+Oracle, or no wish to run a VM? [Switch to another provider](#switch-to-another-provider)
+shows the same setup on Northflank's free plan or a GCP micro VM.
 
 ## What you need
 
@@ -354,6 +356,86 @@ freelunch destroy all     # the tunnel and DNS record first, then the VM
 If Cloudflare refuses to delete a tunnel that still has a connection, run
 `freelunch destroy oci` first, then `freelunch destroy cloudflare`.
 
+## Switch to another provider
+
+Oracle's free Arm capacity can stay short for days. The same project runs elsewhere: the
+app, its Compose file and the Cloudflare zone stay as they are, and only the name of the
+target changes in `apps.tfvars` and the routes.
+
+| Target | Free | Card | What to know |
+|---|---|---|---|
+| `oci-main` | 2 Arm OCPUs, 12 GB, 100 GB disk | yes | Arm capacity is often short (`--wait-for-capacity`) |
+| `northflank-main` | 2 always-on services of up to 0.2 vCPU and 512 MB: your app and `cloudflared` | no | no volumes, `linux/amd64` images, one app per free project |
+| `gcp-main` | 1 `e2-micro` (1 GB) in a US region, 30 GB disk | yes | the IPv4 address costs about $3.65/month; not live-tested |
+
+More platforms that would fit are in the [checklist](../README.md#provider-checklist), with what
+stops them for now: Cloud Run scales to zero, so it can't hold the tunnel open; Scaleway's
+free allowance keeps a 128 MB container up all month; Koyeb and Render sleep when idle.
+
+### To Northflank
+
+1. Create an API token ([permissions](../providers/northflank/README.md#api-token)) and put
+   it in `.freelunch/.env` as `NORTHFLANK_API_TOKEN`.
+2. Add the stack, and let `apply` create the project at Northflank:
+
+   ```bash
+   freelunch init northflank      # adds .freelunch/northflank/ and keeps everything else
+   cp .freelunch/northflank/terraform.tfvars.example .freelunch/northflank/terraform.tfvars
+   freelunch apply northflank
+   ```
+
+3. Point the app and its route at `northflank-main`. Each app is a service of its own there,
+   which `cloudflared` reaches by name, so the route says which app it goes to:
+
+   ```hcl
+   # .freelunch/apps.tfvars
+   api = { host = "northflank-main", compose = "../compose.yaml", env_file = "api.env" }
+
+   # .freelunch/cloudflare/terraform.tfvars
+   "api.example.com" = { host = "northflank-main", app = "api", port = 8080 }
+   ```
+
+4. Move the tunnel, then deploy:
+
+   ```bash
+   freelunch doctor              # the token, the region, the project, a linux/amd64 build of the image
+   freelunch apply cloudflare    # a tunnel for northflank-main; the DNS record goes with it
+   freelunch deploy              # the app and cloudflared, as two services
+   ```
+
+`apply cloudflare` points the DNS record at the new tunnel before `deploy` starts
+`cloudflared` there, so the app is away for the minute in between. To try it first, route a
+second hostname (`api2.example.com`) to `northflank-main`, deploy, check it, then move
+`api.example.com`. If Cloudflare refuses to delete the old tunnel while the VM's
+`cloudflared` is still connected, run `freelunch destroy oci` and then `apply cloudflare`
+again.
+
+The Compose file needs one service per app, an image to pull and no volumes; `deploy` says
+what to change otherwise. Northflank's hosts are x86, so the image needs a `linux/amd64`
+build. The workflow from `freelunch init --image-workflow` builds for the stacks you name;
+for one written for OCI alone, set `platforms: linux/amd64,linux/arm64` in it.
+The [Northflank page](../providers/northflank/README.md) has the details: what `deploy` sends,
+what stays on Northflank and the limits of the free plan.
+
+### To a GCP micro VM
+
+1. Sign in with `gcloud auth application-default login`, then add the stack:
+
+   ```bash
+   freelunch init gcp
+   cp .freelunch/gcp/terraform.tfvars.example .freelunch/gcp/terraform.tfvars
+   ```
+
+2. Set `project_id`, `region` and `ssh_public_keys`, and decide on the IPv4 address:
+   `acknowledge_public_ipv4_charge = true` accepts about $3.65/month, which the $300 trial
+   credit covers for its 90 days ([why](../providers/gcp/README.md#whats-free)).
+3. `freelunch apply gcp`, change `oci-main` to `gcp-main` in `apps.tfvars` and the routes,
+   `freelunch apply cloudflare`, then `freelunch deploy`.
+
+`freelunch trust` reads OCI consoles only so far. On GCP, cloud-init prints the host keys to
+the serial port too, so you can compare them with the key `deploy` shows on first contact:
+`gcloud compute instances get-serial-port-output <name_prefix>-main --zone <region>-b`.
+
 ## Reaching hosts over Tailscale
 
 With Tailscale, port 22 is closed to the internet and `deploy` reaches the host through your
@@ -398,6 +480,11 @@ as `myapp-oci-main`. The machine you deploy from has to be on the same tailnet.
 | Cloudflare error 1033 | cloudflared is not running on the host: run `freelunch deploy` |
 | Cloudflare error 502 | cloudflared runs but the app does not answer on `127.0.0.1:<port>` |
 | `apply cloudflare` says a host is unknown | Apply the host stack first; host names are `<provider>-<instance>` |
+| `routes go to a container platform ... need app` | Add `app = "<name>"` to the route: the app in `apps.tfvars` it goes to |
+| `northflank: there is no project ... yet` | `freelunch apply northflank` creates it |
+| `Northflank doesn't take NORTHFLANK_API_TOKEN (401)` | The token in `.freelunch/.env` is wrong or expired, or its role lacks a [permission](../providers/northflank/README.md#api-token) |
+| `northflank-main runs 3 services ..., and its free plan has 2` | The free plan runs your app and `cloudflared`. Move the other app to another target, and delete services you made in the dashboard |
+| `northflank: api is still in_progress after 180s` | The service's logs on app.northflank.com, in the project. Often the image has no `linux/amd64` build, or the app needs more than 512 MB |
 | `apply cloudflare` finds no zone | `freelunch domain status <zone>`: the zone has to be on the token's account (`freelunch domain add <zone>`) |
 | `locked provider ... does not match configured version constraint` | The freelunch release you moved to needs newer providers. Delete `.freelunch/<stack>/.terraform.lock.hcl`, run the command again and commit the new lock file |
 | `doesn't match any of the checksums previously recorded in the dependency lock file` | The provider download differs from the one your project locked. Find out why (a proxy, a mirror, tampering) before you touch the lock file |

@@ -131,6 +131,29 @@ For a project set up with freelunch from `main` before 1.0.0:
 - Offline tests: Cloudflare module and stack, `deploy/`, OCI network ingress, and
   `tests/cli.sh` for init, project state, deploy and domain suggest against a fake ssh,
   docker and DNS resolver.
+- **Container platforms**, a new `platform` layer for providers that run an app's image
+  without a VM, through their API. **Northflank** is the first, and the recommended one in
+  Containers & PaaS: its free Sandbox runs two always-on services without a card.
+  `freelunch apply northflank` checks the plan against the free limits and creates a project
+  named after the freelunch project. `freelunch deploy` turns each app's Compose service into
+  a Northflank service (the image pinned to the digest its tag points to, command,
+  environment with the app's env file, private ports, the healthcheck as a readiness check),
+  saves the registry logins for that project only, runs `cloudflared` as the second service
+  and waits until each one runs. `status` and `doctor` ask Northflank, and
+  `destroy northflank` deletes the services, the logins and the project. freelunch never
+  takes over a project it didn't make. Moving an app from a VM is changing its target in
+  `apps.tfvars` and its route, which names the app on a platform (`app = "api"`); the
+  walkthrough's new "Switch to another provider" shows it for Northflank and GCP.
+- The [platform contract](docs/architecture.md#platform-contract): `hybrid/` aggregates
+  `platforms` next to `hosts`, the cloudflare stack routes to `<app>:<port>` on a platform,
+  and `deploy/` reads each platform app's Compose file and stops on what the platform can't
+  do: volumes, a build without an image, Compose variables in the image, more services than
+  the free plan has, or a route to an app or port that isn't there.
+- Catalog: Google Cloud Run and Scaleway Serverless Containers with their free tiers, and
+  Railway's Free plan checked again, each with what stops it for now. The container
+  platforms (Koyeb, Render, Railway and the rest) moved to the `platform` layer. The GCP
+  page notes that an external IPv6 address isn't billed, while ghcr.io has no IPv6 yet, and
+  that Standard Tier's 200 GiB of free egress is per account, not per region.
 
 ### Changed
 
@@ -144,6 +167,12 @@ For a project set up with freelunch from `main` before 1.0.0:
   new `name_prefix` renames the VCN and its hosts in place instead of replacing them.
 - `freelunch fmt` takes `-check`.
 - `freelunch list` no longer reports a destroyed stack as deployed.
+- `freelunch init` routes the cloudflare example to the project's first host or platform
+  (`gcp-main`, `northflank-main`) instead of always `oci-main`, and on a platform makes the
+  app's name one the platform takes.
+- `freelunch destroy` of glue or service stacks alone no longer exits with status 1 after a
+  successful destroy, and `freelunch status` no longer stops when the cloudflare stack has
+  state but no `terraform.tfvars`.
 
 ### Removed
 

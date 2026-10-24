@@ -1,0 +1,9 @@
+services:
+  worker:
+    image: traefik/whoami
+    entrypoint: /whoami
+    environment:
+      - MODE=worker
+      - URL=https://example.com/?a=b
+    healthcheck:
+      test: curl -f http://localhost/ || exit 1

@@ -4,29 +4,34 @@
 | | |
 |---|---|
 | **Status** | 🚧 Planned |
-| **Category** | VPS & cloud credits |
-| **Layer** | `host`: produces Docker hosts for the hybrid inventory |
-| **Free tier** | 🎓 Startup / research programs only |
+| **Category** | Containers & PaaS |
+| **Layer** | `platform`: runs your apps' images without a VM; deploy goes through its API |
+| **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | yes |
 | **Terraform provider** | [`scaleway/scaleway`](https://registry.terraform.io/providers/scaleway/scaleway/latest) (partner) |
-| **Last verified** | 2026-10-18 |
+| **Last verified** | 2026-10-24 |
 
 ## What's free
 
-No always-free compute; Startup Program for EU early-stage companies (up to EUR 36K)
+Serverless Containers: 400,000 GB-s of memory and 200,000 vCPU-s per account and month, enough for one 128 MB container all month or bigger ones that scale to zero; no free VMs; Startup Program for EU companies (up to EUR 36K)
 
-> Free tiers change without notice. Check <https://www.scaleway.com/en/pricing/> before relying on this.
+> Free tiers change without notice. Check <https://www.scaleway.com/en/pricing/serverless/> before relying on this.
+
+## Notes
+
+The smallest container has 128 MB and 70 mVCPU; 256 MB comes with 140 mVCPU and runs about half a month on the allowance. Beyond it, EUR 0.000002 per GB-s and EUR 0.00001 per vCPU-s (Paris). The Terraform provider has scaleway_container_namespace, scaleway_container and scaleway_container_domain for a custom domain. Instances (VMs) have no free tier.
 
 ## Plan
 
-- `modules/docker-host`: a Docker host that follows the [host contract](../../docs/architecture.md#host-contract), rendering its user data with [`shared/modules/docker-bootstrap`](../../shared/modules/docker-bootstrap/)
-- Free-tier limits in `provider.yaml` under `limits:`, enforced with preconditions (see [OCI](../oci/) for the pattern)
-- `stack/`: the root module with a `hosts` output, so [`hybrid/`](../../hybrid/) picks it up
+- `stack/`: a root module whose `platforms` output follows the [platform contract](../../docs/architecture.md#platform-contract), so [`hybrid/`](../../hybrid/) picks it up
+- `freelunch deploy`: one service per app through the provider's API, from the app's Compose file (see [Northflank](../northflank/) for the pattern)
 
 ## References
 
+- scaleway.com/en/pricing/serverless (free tiers per account and month, prices beyond them; checked 2026-10-24)
+- scaleway.com/en/blog/a-transparent-update-on-scaleway-pricing (Serverless Containers memory at EUR 0.000002/GB-s from 2026-06-01)
+- Pulumi Scaleway container docs (memory and vCPU tiers from 128 MB / 70 mVCPU to 4096 MB / 2240 mVCPU, checked 2026-10-24)
 - inspire/listing/cloudcredits.io (2025-10)
-- thundercompute.com/blog/free-cloud-gpu-credits (2026-10-01)
 - registry.terraform.io (checked 2026-10-18)
 
 ## Contributing

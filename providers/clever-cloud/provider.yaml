@@ -3,7 +3,7 @@ name: clever-cloud
 display_name: "Clever Cloud"
 category: containers
 status: planned
-layer: service
+layer: platform
 terraform_provider: "CleverCloud/clevercloud"
 iac: community
 free_tier_type: trial

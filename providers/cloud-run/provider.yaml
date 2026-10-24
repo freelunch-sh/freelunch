@@ -1,0 +1,20 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: cloud-run
+display_name: "Google Cloud Run"
+category: containers
+status: planned
+layer: platform
+terraform_provider: "hashicorp/google"
+iac: official
+free_tier_type: always-free
+free_tier: "With request-based billing, per billing account and month: 2M requests, 180,000 vCPU-seconds and 360,000 GB-seconds; scales to zero between requests"
+card_required: "yes"
+url: "https://cloud.google.com/run/pricing"
+last_verified: "2026-10-24"
+notes: "It scales to zero, so it can't keep a Cloudflare Tunnel open, and Cloudflare's free plan can't rewrite the Host header a run.app URL needs (Origin Rules do that on Enterprise only). A domain on Cloudflare needs a Worker in front of it (100,000 requests a day free) or a Cloud Run domain mapping. Public images come straight from Artifact Registry, Docker Hub or GHCR; private GHCR images through an Artifact Registry remote repository (0.5 GB of storage free). Needs a billing account, like the gcp stack."
+sources:
+  - "docs.cloud.google.com/free/docs/free-cloud-features (Cloud Run: 2 million requests, 360,000 GB-seconds, 180,000 vCPU-seconds a month with request-based billing; Artifact Registry 0.5 GB; last updated 2026-10-20, checked 2026-10-24)"
+  - "docs.cloud.google.com/run/docs/deploying (Artifact Registry, public Docker Hub and GHCR images; others through an Artifact Registry remote repository; checked 2026-10-24)"
+  - "developers.cloudflare.com/rules/origin-rules (Host header, SNI and DNS record overrides are Enterprise only; checked 2026-10-24)"
+  - "registry.terraform.io (google_cloud_run_v2_service, checked 2026-10-24)"
+inspire: []

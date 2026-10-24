@@ -2,15 +2,15 @@
 
 **Free infrastructure as code.** Terraform/OpenTofu modules for every cloud provider's free tier,
 one folder per provider. Use one provider on its own, or combine them into a hybrid setup:
-an Arm VM on Oracle, a micro VM on Google, a Postgres on Neon, DNS and tunnels on Cloudflare,
-all joined in one inventory. Then deploy your project's containers onto it from your own
-repository.
+an Arm VM on Oracle, a micro VM on Google, a container on Northflank, a Postgres on Neon, DNS
+and tunnels on Cloudflare, all joined in one inventory. Then deploy your project's containers
+onto it from your own repository, and move them to another provider by changing one name.
 
 > **Status:** early. Four hyperscalers are implemented (Oracle Cloud, Google Cloud, AWS and
-> Azure) plus Cloudflare for tunnels and DNS, each with offline test suites. GCP, AWS and
-> Azure have not been applied against live accounts yet. Every other provider is catalogued
-> with its free tier, Terraform provider and a plan. See the [checklist](#provider-checklist)
-> and the [roadmap](#roadmap).
+> Azure), Northflank for containers without a VM, and Cloudflare for tunnels and DNS, each
+> with offline test suites. GCP, AWS, Azure and Northflank have not been used against live
+> accounts yet. Every other provider is catalogued with its free tier, Terraform provider
+> and a plan. See the [checklist](#provider-checklist) and the [roadmap](#roadmap).
 
 ## Principles
 
@@ -22,27 +22,32 @@ repository.
 - **One folder per provider, each usable on its own.** `providers/<name>/` holds that
   provider's README, metadata, modules and a deployable stack.
 - **Hybrid by composition.** Every compute provider outputs the same
-  [host contract](docs/architecture.md#host-contract). `hybrid/` merges whatever is deployed
-  into one inventory (Ansible, SSH config, JSON), and edge providers such as Cloudflare build on it.
+  [host contract](docs/architecture.md#host-contract), and every container platform the same
+  [platform contract](docs/architecture.md#platform-contract). `hybrid/` merges whatever is
+  deployed into one inventory (Ansible, SSH config, JSON), and edge providers such as
+  Cloudflare build on it, so moving an app is changing the name of its target.
 - **Docker-first workloads.** Hosts boot with Docker and Compose through one shared cloud-init
-  module, so an app deploys the same way on any cloud.
+  module, so an app deploys the same way on any cloud, and a container platform runs the
+  same Compose file.
 - **Respect provider terms.** No automated account creation, no idle-reclaim dodging, no
   multi-account farming.
 
 ## How it works
 
 ```
-providers/oci/stack   ─┐                          ┌─> inventory.json / ansible / ssh_config
-providers/gcp/stack   ─┤                          │
-providers/aws/stack   ─┼─> hybrid/ (reads state) ─┤
-providers/azure/stack ─┘   one host list          └─> glue stacks: cloudflare (DNS, tunnels), tailscale (ACLs)
+providers/oci/stack        ─┐                          ┌─> inventory.json / ansible / ssh_config
+providers/gcp/stack        ─┤                          │
+providers/aws/stack        ─┼─> hybrid/ (reads state) ─┤
+providers/azure/stack      ─┤   hosts and platforms    └─> glue stacks: cloudflare (DNS, tunnels), tailscale (ACLs)
+providers/northflank/stack ─┘
 
 providers/neon/stack, providers/upstash/stack, ...   standalone services (databases, storage, monitoring)
 ```
 
 Each provider stack has its own state, credentials and lifecycle, so OCI being out of
 capacity never blocks GCP, and you never need AWS credentials just to deploy to Oracle.
-`freelunch deploy` then copies your Compose apps to the hosts over SSH.
+`freelunch deploy` then copies your Compose apps to the hosts over SSH, or on a container
+platform turns each one into a service through the platform's API.
 Read [docs/architecture.md](docs/architecture.md) for the reasoning.
 
 ## Quick start: deploy your project
@@ -71,8 +76,12 @@ freelunch deploy               # copy compose files and secrets, start, wait unt
 
 If OCI is out of Arm capacity, `freelunch apply oci --wait-for-capacity` keeps trying, in
 every availability domain, until the VM exists; with a reviewed plan it can wait in the
-background and notify you. To ship a new version, change the image tag and run `freelunch deploy` again;
-the VM stays. Without installing anything but Docker:
+background and notify you. No capacity, or no wish to run a VM? Northflank's free plan runs
+the same app, without a card, as two always-on services: your app and `cloudflared`
+([switch to another provider](docs/deploy-a-container.md#switch-to-another-provider)).
+
+To ship a new version, change the image tag and run `freelunch deploy` again; the VM stays.
+Without installing anything but Docker:
 
 ```bash
 docker run --rm -it -v "$PWD:/project" -v ~/.oci:/root/.oci:ro \
@@ -106,15 +115,18 @@ bin/freelunch apply oci
 `apply` prints the hybrid inventory when it finishes. `bin/freelunch inventory` writes
 `inventory.json`. Full details, free-tier layouts and caveats are in [providers/oci](providers/oci/).
 
-## GCP, AWS and Azure
+## Other hosts and platforms
 
-GCP, AWS and Azure work the same way: copy `stack/terraform.tfvars.example` to
+GCP, AWS and Azure work the same way as OCI: copy `stack/terraform.tfvars.example` to
 `stack/terraform.tfvars`, fill it in, then `bin/freelunch plan <provider>`. Each stack outputs
-the same `hosts` list, so they join the OCI host in one inventory.
+the same `hosts` list, so they join the OCI host in one inventory. Northflank is a container
+platform: there is no VM, and `deploy` puts each app there as a service through its API. A
+project moves between them by changing its target's name in `apps.tfvars` and the routes
+([how](docs/deploy-a-container.md#switch-to-another-provider)).
 
-> **Not live-tested yet.** The GCP, AWS and Azure stacks pass their offline tests but have
-> not been applied against real accounts. Read the plan before you apply, and please open an
-> issue with what you find.
+> **Not live-tested yet.** The GCP, AWS, Azure and Northflank stacks pass their offline tests
+> but have not been used against real accounts. Read the plan before you apply, and please
+> open an issue with what you find.
 
 | Provider | Free host by default | Credentials | What costs money |
 |---|---|---|---|
@@ -122,6 +134,7 @@ the same `hosts` list, so they join the OCI host in one inventory.
 | [GCP](providers/gcp/) | 1 `e2-micro`, 1 GB, 30 GB disk in us-west1/us-central1/us-east1 (always free) | `gcloud auth application-default login` | external IPv4, about $3.65/month |
 | [AWS](providers/aws/) | 1 `t3.micro`, 1 GB, 20 GB gp3 on the Free plan (6 months) | `~/.aws` / `AWS_PROFILE` | everything draws on the credit, about $13/month |
 | [Azure](providers/azure/) | 1 `B2ats_v2`, 1 GiB, 64 GB P6 disk (12 months; a second, Arm host also fits) | `az login` or `ARM_*` | public IPv4, about $3.65/month per VM |
+| [Northflank](providers/northflank/) | 2 always-on services of up to 0.2 vCPU and 512 MB: your app and `cloudflared` (no card) | `NORTHFLANK_API_TOKEN` | nothing on the Sandbox plan |
 
 ```bash
 bin/freelunch plan gcp aws azure
@@ -134,15 +147,15 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 | Command | What it does |
 |---|---|
 | `freelunch init [--name <name>] [--image-workflow] [stack...]` | Create `.freelunch/` in your project (default stacks: `oci cloudflare`), with resources named after the project. `--image-workflow` adds a GitHub Actions workflow that builds your image for the hosts and pushes it to GHCR |
-| `freelunch deploy [host\|provider]` | Check that every image has a build for its host, copy Compose apps and their secrets to the hosts over SSH, start them, wait until healthy, start `cloudflared` (`--dry-run` to preview) |
+| `freelunch deploy [host\|provider]` | Check that every image has a build for its host, copy Compose apps and their secrets to the hosts over SSH, start them, wait until healthy, start `cloudflared` (`--dry-run` to preview). On a container platform (Northflank) each app becomes a service through its API instead |
 | `freelunch trust <host>` | Pin an OCI host's SSH keys in `known_hosts` from its serial console before the first deploy, and check that the host answers with one of them |
 | `freelunch domain suggest <name...>` | Whether the name you typed is registered, then free names like it at every free domain provider, and similar ones where yours is taken ([docs/free-domains.md](docs/free-domains.md)) |
 | `freelunch domain add\|status <name>` | Put the name on Cloudflare and print the nameservers to set at its provider; say when they are set and the zone is active |
 | `freelunch list` | Every provider with category, status, layer, IaC support and deployment state |
-| `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts → services → hybrid → glue). `plan --show-user-data` prints each host's cloud-init with secrets left out, `plan --out <file>` saves a plan and `apply --plan <file>` applies it without a prompt. `apply --wait-for-capacity` retries hosts while OCI is out of capacity, `--detach` in the background ([how](providers/oci/README.md#waiting-for-capacity)) |
-| `freelunch status` | One screen after setup: hosts and addresses, the apps on each host and whether they run, tunnels and their URLs, service token expiry, capacity waits |
-| `freelunch doctor` | Check what plan, apply and deploy will need before they run: tools, the OCI sign-in, home region and the VCNs and A1 cores the tenancy has left, SSH keys, images and registry logins, the Cloudflare token, its permissions and the zone. It changes nothing |
-| `freelunch hybrid` | Re-aggregate deployed host stacks |
+| `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts and platforms → services → hybrid → glue). A platform's `apply` makes the target there (the Northflank project) and `destroy` deletes it with what `deploy` put in it. `plan --show-user-data` prints each host's cloud-init with secrets left out, `plan --out <file>` saves a plan and `apply --plan <file>` applies it without a prompt. `apply --wait-for-capacity` retries hosts while OCI is out of capacity, `--detach` in the background ([how](providers/oci/README.md#waiting-for-capacity)) |
+| `freelunch status` | One screen after setup: hosts and platforms, the apps on each one and whether they run, tunnels and their URLs, service token expiry, capacity waits |
+| `freelunch doctor` | Check what plan, apply and deploy will need before they run: tools, the OCI sign-in, home region and the VCNs and A1 cores the tenancy has left, the Northflank token, region and project, SSH keys, images and registry logins, the Cloudflare token, its permissions and the zone. It changes nothing |
+| `freelunch hybrid` | Re-aggregate deployed host and platform stacks |
 | `freelunch inventory` | Write `inventory.json` |
 | `freelunch output <stack> [name]` | Print a stack's outputs from its state, e.g. `output cloudflare -json service_tokens` or `output hybrid -raw ssh_config` |
 | `freelunch catalog` | Regenerate the checklist below and the stub provider READMEs from `provider.yaml` files |
@@ -169,6 +182,7 @@ freelunch/
 │   │   ├── modules/               network, compute, docker-host
 │   │   └── stack/                 deployable root module (+ tests)
 │   ├── gcp/, aws/, azure/         ✅ implemented, same layout as oci/
+│   ├── northflank/                ✅ container platform: a project per freelunch project, apps deployed through its API
 │   ├── cloudflare/                ✅ glue: tunnel, DNS and Access per host, plus the cloudflared app
 │   └── <provider>/                provider.yaml + README for every catalogued provider
 ├── shared/modules/docker-bootstrap  provider-agnostic cloud-init: Docker, Compose apps, swap, Tailscale, hardening
@@ -187,7 +201,8 @@ Releases are small: every usable feature gets its own tag.
 
 - **v1.0 (next release), deploy your project from its own repo:** pin freelunch in another repository (git
   submodule or a versioned Docker image), keep config and state in that project, put its
-  Docker image (public or from a private registry) on an always-free host, reach it at
+  Docker image (public or from a private registry) on an always-free host (an Oracle VM, or
+  Northflank's free plan when Oracle has no capacity), reach it at
   `https://api.example.com` through a Cloudflare Tunnel and DNS, and ship new versions with
   `freelunch deploy` without replacing the VM.
 - **Next, in order:**
@@ -199,8 +214,8 @@ Releases are small: every usable feature gets its own tag.
   6. **`freelunch doctor`, continued:** billable leftovers, expiring trials and free names.
 - **Later:** more menus (self-hosted PaaS, homelab, k3s, VPN, n8n, CI runners, game
   servers), moving a host to another cloud with its data, encrypted remote state, secrets
-  managers, PaaS and GPU providers, and a linter that flags billable resources in any
-  Terraform repo.
+  managers, more container platforms (Cloud Run, Scaleway, Koyeb, Render) and GPU providers,
+  and a linter that flags billable resources in any Terraform repo.
 
 Ideas and requests are welcome as issues.
 
@@ -213,7 +228,7 @@ the provider's page before relying on one.
 
 <!-- BEGIN PROVIDER CHECKLIST -->
 <!-- Generated by `bin/freelunch catalog` from providers/*/provider.yaml. Edit those files, not this block. -->
-**8 of 121 providers implemented** · 98 can be managed with a maintained Terraform/OpenTofu provider
+**9 of 122 providers implemented** · 99 can be managed with a maintained Terraform/OpenTofu provider
 
 **Legend:** checked = implemented in freelunch · **recommended** = the one to start with where a section has several ·
 🟢 official/partner Terraform provider · 🟡 community provider · 🟠 provider exists but is stale · ⚪ no Terraform provider (API/CLI only) ·
@@ -232,7 +247,7 @@ Large public clouds. Only OCI and GCP give always-free VMs; Azure gives new acco
 - [x] **[Oracle Cloud (OCI)](providers/oci/)** 🟢 `oracle/oci` · ♾️ 2 Arm A1 OCPUs + 12 GB RAM, 2 AMD micro VMs, 200 GB block storage, 10 TB egress/month, 2 VCNs, 1 flexible load balancer, 20 GB object storage; home region only
 - [ ] **[Tencent Cloud](providers/tencent-cloud/)** 🟢 `tencentcloudstack/tencentcloud` · ⏳ Free trial packages for new accounts; startup program
 
-### VPS & cloud credits (0/11)
+### VPS & cloud credits (0/10)
 
 Developer clouds with trial credits or low-cost VMs: secondary hosts while credits last, and paid fallbacks.
 
@@ -244,7 +259,6 @@ Developer clouds with trial credits or low-cost VMs: secondary hosts while credi
 - [ ] **[Hetzner Cloud](providers/hetzner/)** 🟢 `hetznercloud/hcloud` · 💲 No free compute; low-cost Arm and x86 VMs; free DNS zones (managed by the same provider via hcloud_zone)
 - [ ] **[IONOS Cloud](providers/ionos/)** 🟢 `ionos-cloud/ionoscloud` · ⏳ Time-limited trial for new accounts
 - [ ] **[OVHcloud](providers/ovhcloud/)** 🟢 `ovh/ovh` · 🎓 No always-free compute; Startup Program (up to EUR 100K for EU scale-ups)
-- [ ] **[Scaleway](providers/scaleway/)** 🟢 `scaleway/scaleway` · 🎓 No always-free compute; Startup Program for EU early-stage companies (up to EUR 36K)
 - [ ] **[UpCloud](providers/upcloud/)** 🟢 `UpCloudLtd/upcloud` · ⏳ Time-limited free trial for new accounts
 - [ ] **[Vultr](providers/vultr/)** 🟢 `vultr/vultr` · ⏳ $250 free credit program for new accounts (time-limited)
 
@@ -264,18 +278,20 @@ GPU VMs and clusters. Almost none are free; access comes through startup or rese
 - [ ] **[Vast.ai](providers/vast-ai/)** ⚪ · 🎓 GPU marketplace, no free tier; startup program up to $2,500 (launched Feb 2026)
 - [ ] **[Verda (formerly DataCrunch)](providers/verda/)** 🟡 `verda-cloud/verda` · 💲 No free tier found during research; renamed from DataCrunch in Nov 2025
 
-### Containers & PaaS (0/10)
+### Containers & PaaS (1/12)
 
 Run a container without managing a VM. Free tiers usually sleep when idle.
 
 - [ ] **[Appwrite Cloud](providers/appwrite/)** 🟢 `appwrite/appwrite` · ♾️ Unlimited projects with no pausing; per project: 1 database, 3 buckets, 5 functions
 - [ ] **[Back4App Containers](providers/back4app/)** ⚪ · ♾️ 1 container, 256 MB RAM, 100 GB transfer
 - [ ] **[Clever Cloud](providers/clever-cloud/)** 🟡 `CleverCloud/clevercloud` · ⏳ EUR 20 credit at sign-up; DEV plan with free MySQL and PostgreSQL
+- [ ] **[Google Cloud Run](providers/cloud-run/)** 🟢 `hashicorp/google` · ♾️ With request-based billing, per billing account and month: 2M requests, 180,000 vCPU-seconds and 360,000 GB-seconds; scales to zero between requests
 - [ ] **[Koyeb](providers/koyeb/)** 🟢 `koyeb/koyeb` · ♾️ 1 free web service per organisation (512 MB, 0.1 vCPU, Frankfurt or Washington), scales to zero after 1 h idle; free Postgres with 5 compute-hours/month
 - [ ] **[Leapcell](providers/leapcell/)** ⚪ · ♾️ Hobby plan: 20 projects, 100k serverless invocations/month, 3 GB-hours compute, 2 GB transfer
-- [ ] **[Northflank](providers/northflank/)** ⚪ · ♾️ 2 services, 2 cron jobs and 1 database
-- [ ] **[Railway](providers/railway/)** 🟡 `terraform-community-providers/railway` · 🔁 $5 one-time trial credit (30 days), then Free plan: $1/month credit, 1 project, 3 services
+- [x] **[Northflank](providers/northflank/)** ⚪ · ♾️ Sandbox: 2 services, 2 jobs and 1 database, always on with no sleeping, plans up to nf-compute-20 (0.2 vCPU, 512 MB) and up to $20/month of resources; no card · **recommended**
+- [ ] **[Railway](providers/railway/)** 🟡 `terraform-community-providers/railway` · 🔁 $5 trial credit for 30 days, then the Free plan: $1 of usage credit a month, up to 1 vCPU and 0.5 GB RAM per service, 0.5 GB volume
 - [ ] **[Render](providers/render/)** 🟢 `render-oss/render` · ♾️ Free web services: 750 instance-hours/month, 512 MB / 0.1 CPU, spin down after 15 min idle; free Postgres expires after 30 days; 5 GB/month bandwidth
+- [ ] **[Scaleway](providers/scaleway/)** 🟢 `scaleway/scaleway` · ♾️ Serverless Containers: 400,000 GB-s of memory and 200,000 vCPU-s per account and month, enough for one 128 MB container all month or bigger ones that scale to zero; no free VMs; Startup Program for EU companies (up to EUR 36K)
 - [ ] **[SnapDeploy](providers/snapdeploy/)** ⚪ · ♾️ 4 containers, 100 container-hours/month, 512 MB / 0.25 vCPU; sleeps after 15 min idle
 - [ ] **[Zeabur](providers/zeabur/)** ⚪ · ♾️ $0 plan with auto-sleep
 

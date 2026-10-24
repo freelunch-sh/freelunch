@@ -14,12 +14,13 @@ Every provider declares a `layer` in its `provider.yaml`:
 | Layer | Produces | Examples | Runs |
 |---|---|---|---|
 | `host` | Docker hosts (VMs) with SSH | OCI, GCP, AWS, Hetzner | first |
-| `service` | Standalone managed services | Neon, Upstash, Koyeb, Grafana Cloud | second |
+| `platform` | Targets that run apps' images without a VM, through the provider's API | Northflank, Cloud Run, Koyeb | first, with the hosts |
+| `service` | Standalone managed services | Neon, Upstash, Grafana Cloud | second |
 | `glue` | Wiring across hosts, reading the hybrid inventory | Cloudflare (DNS, Tunnel), Tailscale (ACLs) | last, after `hybrid/` |
 
-`bin/freelunch apply` runs hosts, then services, refreshes `hybrid/`, then glue.
-`destroy` runs the reverse order. `freelunch deploy` comes after all of them and puts apps
-on the hosts (see [Deploy](#deploy)).
+`bin/freelunch apply` runs hosts and platforms, then services, refreshes `hybrid/`, then
+glue. `destroy` runs the reverse order. `freelunch deploy` comes after all of them and puts
+apps on the hosts and platforms (see [Deploy](#deploy)).
 
 ## Why one stack per provider instead of one big root module
 
@@ -70,6 +71,33 @@ updates, optional swap, optional Tailscale, and Compose apps from
 `/opt/freelunch/apps/<name>/`. So a workload deploys the same way on any cloud, and
 `freelunch deploy` can update it later over SSH.
 
+## Platform contract
+
+A container platform runs each app's image as a service of its own, with no machine to log
+in to. Every `platform`-layer stack must output `platforms`, a list of objects with these
+attributes:
+
+| Attribute | Type | Example |
+|---|---|---|
+| `provider` | string | `northflank` |
+| `name` | string | `main` (unique within the provider) |
+| `id` | string | the provider's ID for the target, e.g. the Northflank project |
+| `region` | string | `europe-west` |
+| `arch` | string | `amd64` |
+| `size` | string | the plan each app gets, e.g. `nf-compute-20` |
+| `tunnel` | bool | whether `cloudflared` can run there, so Cloudflare Tunnel routes work |
+| `max_services` | number | how many services the free plan runs, apps and `cloudflared` together; null for no limit |
+
+`hybrid/` aggregates them into its `platforms` output, apart from `hosts`, so SSH configs and
+Ansible inventories only list machines. Targets are named `<provider>-<name>` like hosts
+(`northflank-main`), and apps and routes point at them the same way.
+
+Most platforms have no Terraform resources for what runs on them, so the stack only
+declares the target and checks it against the free tier (Northflank's plans, for one).
+`bin/freelunch` makes the target through the provider's API after `apply`, puts a service
+per app there on `deploy`, and deletes both on `destroy`. It marks what it makes, and leaves
+alone what it didn't make.
+
 ## Glue contract
 
 A `glue`-layer stack reads the hybrid inventory instead of talking to host stacks. It
@@ -82,10 +110,12 @@ variable "inventory_state_path" {
 }
 ```
 
-and reads `hosts` from that state file with `terraform_remote_state`. `bin/freelunch` passes
-the project's path in project mode. Hosts are named `<provider>-<name>` (`oci-main`), the
-same names as in `ssh_config` and `apps.tfvars`. A glue stack should fail its plan when it
-refers to a host that is not in the inventory.
+and reads `hosts` and `platforms` from that state file with `terraform_remote_state`.
+`bin/freelunch` passes the project's path in project mode. Hosts are named
+`<provider>-<name>` (`oci-main`), the same names as in `ssh_config` and `apps.tfvars`, and so
+are platforms (`northflank-main`). A glue stack should fail its plan when it refers to a
+host that is not in the inventory. On a platform, `cloudflared` is a service of its own and
+reaches an app by its service name, so a route there names the app (`app = "api"`).
 
 [`providers/cloudflare`](../providers/cloudflare/) is the first glue stack.
 
@@ -140,8 +170,17 @@ container that stays unhealthy fails the deploy, prints the digest of every imag
 starts `cloudflared` with the host's tunnel token, prunes unused images, and logs out of the
 registries again.
 
-Secrets travel over SSH and land in root-only files. They never go into user data, which is
-readable from the instance metadata service. SSH uses `StrictHostKeyChecking=accept-new`
+On a container platform there is nothing to SSH to. `deploy/` reads each app's Compose file
+(one service: image, command, environment, ports, healthcheck) and stops on what the
+platform can't do, such as volumes or a build without an image. `deploy` then creates or
+updates a service per app through the provider's API, with the image pinned to the digest
+its tag points to, the env file as the service's environment, private ports, and the
+healthcheck as a readiness check, plus `cloudflared` as one more service with the tunnel
+token. It waits until each one runs.
+
+Secrets travel over SSH and land in root-only files, or in API request bodies over HTTPS,
+never on a command line. They never go into user data, which is readable from the instance
+metadata service. SSH uses `StrictHostKeyChecking=accept-new`
 with the project's own `known_hosts`: a changed key fails the deploy, and a new one is
 trusted and printed, unless it was pinned beforehand
 ([how](deploy-a-container.md#check-the-host-key)).
@@ -155,6 +194,9 @@ trusted and printed, unless it was pinned beforehand
   warnings scroll past.
 - Every module that enforces a limit takes `acknowledge_billable_resources` (default `false`).
   Exceeding a free cap should be deliberate, not impossible.
+- Platform stacks do the same: the northflank stack fails its plan on a plan the free
+  Sandbox doesn't run, and `deploy/` fails when the apps and `cloudflared` need more services
+  than the free plan has.
 - Some free VMs still need a billed extra to be useful. GCP and Azure bill the public IPv4
   address (about $3.65/month), so their compute modules also take
   `acknowledge_public_ipv4_charge`, and the plan fails until you either accept the charge

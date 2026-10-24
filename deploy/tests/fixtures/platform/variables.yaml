@@ -1,0 +1,6 @@
+services:
+  api:
+    image: ghcr.io/me/api:${TAG}
+    ports: ["${PORT}:8080"]
+    environment:
+      - SECRET
