@@ -2850,6 +2850,18 @@ cf_api() {
 
 cf_errors() { jq -r '[.errors[]? | "\(.message) (\(.code))"] | join("; ")' <<< "$1" 2>/dev/null; }
 
+# cf_accounts: the Cloudflare accounts the token sees, "<id> (<name>)" a line. Listing them
+# takes Account > Account Settings > Read; without it, the accounts of the zones the token
+# can read stand in, so only an account's first zone needs it.
+cf_accounts() {
+  local out
+  out="$(cf_api GET "/accounts?per_page=50")"
+  if [[ "$(jq -r '.result | length' <<< "$out" 2>/dev/null)" == 0 ]]; then
+    out="$(cf_api GET "/zones?per_page=50" | jq -c '{result: ([.result[]?.account // empty] | unique_by(.id))}' 2>/dev/null || true)"
+  fi
+  jq -r '.result[]? | "\(.id) (\(.name))"' <<< "$out" 2>/dev/null || true
+}
+
 # where_to_register <name>: where its nameservers are set
 where_to_register() {
   local p
@@ -2859,13 +2871,15 @@ where_to_register() {
 # domain_add <name>: put the name on Cloudflare's free plan as a zone of its own, and print
 # the two nameservers to give the provider
 domain_add() {
-  local name="$1" account="${CLOUDFLARE_ACCOUNT_ID:-}" out zone
+  local name="$1" account="${CLOUDFLARE_ACCOUNT_ID:-}" accounts out zone
   if [[ -z "$account" ]]; then
-    out="$(cf_api GET "/accounts?per_page=50")"
-    case "$(jq -r '.result | length' <<< "$out" 2>/dev/null)" in
-      1) account="$(jq -r '.result[0].id' <<< "$out")" ;;
-      0|"") die "domain add: the token sees no Cloudflare account; set CLOUDFLARE_ACCOUNT_ID (on the dashboard's account home page). $(cf_errors "$out")" ;;
-      *)    die "domain add: the token sees several accounts; set CLOUDFLARE_ACCOUNT_ID to one of: $(jq -r '[.result[] | "\(.id) (\(.name))"] | join(", ")' <<< "$out")" ;;
+    accounts="$(cf_accounts)"
+    case "$(grep -c . <<< "$accounts" || true)" in
+      1) account="${accounts%% *}" ;;
+      0) out="$(cf_api GET /user/tokens/verify)"
+         cf_ok "$out" || die "domain add: Cloudflare doesn't take CLOUDFLARE_API_TOKEN: $(cf_errors "$out")"
+         die "domain add: the token can't see its Cloudflare account. Give it Account > Account Settings > Read, or set CLOUDFLARE_ACCOUNT_ID in .freelunch/.env to the ID in the dashboard's address (dash.cloudflare.com/<account id>/...)" ;;
+      *) die "domain add: the token sees several accounts; set CLOUDFLARE_ACCOUNT_ID to one of: $(awk 'NR > 1 { printf ", " } { printf "%s", $0 }' <<< "$accounts")" ;;
     esac
   fi
   out="$(cf_api POST /zones "$(jq -nc --arg n "$name" --arg a "$account" '{name: $n, account: {id: $a}, type: "full"}')")"
@@ -3335,6 +3349,18 @@ cf_get() {
 
 cf_ok() { [[ "$(jq -r '.success' <<< "$1" 2>/dev/null)" == "true" ]]; }
 
+# doctor_cf_account: whether domain add can tell which account to put the zone in
+doctor_cf_account() {
+  local accounts
+  if [[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then check ok "domain add puts the zone in CLOUDFLARE_ACCOUNT_ID ($CLOUDFLARE_ACCOUNT_ID)"; return 0; fi
+  accounts="$( (cf_accounts) 2>/dev/null || true)"
+  case "$(grep -c . <<< "$accounts" || true)" in
+    1) check ok "domain add puts the zone in the token's account, $accounts" ;;
+    0) check warn "domain add can't tell which account to put $zone in: give the token Account > Account Settings > Read, or set CLOUDFLARE_ACCOUNT_ID in $(rel "$(state_root)")/.env" ;;
+    *) check warn "the token sees several accounts: set CLOUDFLARE_ACCOUNT_ID in $(rel "$(state_root)")/.env to the one domain add should put $zone in" ;;
+  esac
+}
+
 doctor_cloudflare() {
   local tfvars zone out zone_id account status name exp days
   is_configured cloudflare || return 0
@@ -3359,6 +3385,7 @@ doctor_cloudflare() {
   out="$(cf_get "/zones?name=$zone")"
   if ! cf_ok "$out" || [[ "$(jq -r '.result | length' <<< "$out")" != "1" ]]; then
     check fail "the token can't see the zone $zone: add it to Cloudflare (freelunch domain add $zone), or to the token's zone resources"
+    doctor_cf_account
     return 0
   fi
   zone_id="$(jq -r '.result[0].id' <<< "$out")"
