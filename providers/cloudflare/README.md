@@ -82,9 +82,20 @@ Or `CLOUDFLARE_API_TOKEN=op://<vault>/<item>/<field>` (1Password) or
 `freelunch domain add` creates the zone itself, which a token limited to one zone can't do,
 since the zone doesn't exist yet. For that one command, use a token whose *Zone Resources*
 are *All zones from an account* (yours), with *Zone → DNS → Edit* or *Zone → Zone → Edit*
-(Cloudflare's API takes either for creating a zone). Once the zone exists,
-narrow its *Zone Resources* to it, or switch back to the narrower token. `freelunch domain
-status` only reads the zone and works with either.
+(Cloudflare's API takes either for creating a zone), and *Account → Account Settings →
+Read*, which lets the token list its account so the zone goes there. Instead of that
+permission, you can put the account's ID in `.freelunch/.env`; it is in the dashboard's
+address, `dash.cloudflare.com/<account id>/...`:
+
+```bash
+CLOUDFLARE_ACCOUNT_ID=...
+```
+
+For a second domain, `domain add` finds the account from the zone you added first and needs
+neither. `freelunch doctor` warns when `domain add` couldn't tell which account to use.
+
+Once the zone exists, narrow its *Zone Resources* to it, or switch back to the narrower
+token. `freelunch domain status` only reads the zone and works with either.
 
 ## Usage
 

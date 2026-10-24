@@ -113,9 +113,11 @@ For a project set up with freelunch from `main` before 1.0.0:
   recommended one first, and offers similar names where yours is taken. A paid name you
   type comes first, with whether it is registered (RDAP, or DNS where an extension has no
   RDAP server). `freelunch domain add <name>` creates the zone on Cloudflare's free plan and
-  prints the nameservers to set at the provider, and `freelunch domain status <name>` says
-  whether they are set and the zone is active, asks Cloudflare to check again once they
-  are, and exits with an error until the name is ready.
+  prints the nameservers to set at the provider. It puts the zone in the account the token
+  lists (with Account → Account Settings → Read), the account of a zone the token can read,
+  or `CLOUDFLARE_ACCOUNT_ID`, and `doctor` warns when it can't tell which. `freelunch domain
+  status <name>` says whether the nameservers are set and the zone is active, asks
+  Cloudflare to check again once they are, and exits with an error until the name is ready.
   `docs/free-domains.md` compares the providers and shows how to put a name on Cloudflare.
 - `recommended: true` in `provider.yaml` marks the provider to start with in its category;
   the checklist shows it.
