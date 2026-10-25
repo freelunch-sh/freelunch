@@ -26,3 +26,24 @@ output "service_tokens" {
   value       = module.tunnel.service_tokens
   sensitive   = true
 }
+
+# `buckets` and `bucket_keys` are the freelunch storage contract; deploy reads them.
+output "buckets" {
+  description = "R2 buckets of this stack (docs/architecture.md#storage-contract)."
+  value = [for k, n in local.r2_names : {
+    provider = "cloudflare"
+    name     = k
+    bucket   = cloudflare_r2_bucket.this[k].name
+    endpoint = "https://${local.account_id}.r2.cloudflarestorage.com"
+    region   = "auto"
+  }]
+}
+
+output "bucket_keys" {
+  description = "S3 access key per R2 bucket, keyed cloudflare-<name>."
+  value = { for k, n in local.r2_names : "cloudflare-${k}" => {
+    access_key_id     = cloudflare_account_token.r2[k].id
+    secret_access_key = sha256(cloudflare_account_token.r2[k].value)
+  } }
+  sensitive = true
+}

@@ -334,7 +334,9 @@ mkdir -p "$WORK/doh-bin"
 #   ends in FAKE_NF_PENDING, and its container is stopped in FAKE_NF_STOPPED. A project has
 #   a uid, a 24-digit hex ObjectId. A registry login is refused when its name breaks
 #   Northflank's rule or it is restricted to anything but uids, and with
-#   FAKE_NF_ECHO_PASSWORD by a message that quotes the password.
+#   FAKE_NF_ECHO_PASSWORD by a message that quotes the password. Volumes keep the services
+#   they are attached to, and with FAKE_NF_NO_VOLUMES the plan has none. A volume read
+#   back has no mounts, as Northflank's reference doesn't list them.
 cat > "$WORK/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 method=GET data="" headers="" out="" write="" auth="" basic="" url="" query=()
@@ -437,8 +439,37 @@ case "$url" in
     if [[ "$path" != /regions && "$auth" != "${FAKE_NF_TOKEN:-nf-token}" ]]; then respond 401 '{"error":{"status":401,"message":"Invalid token"}}'; exit 0; fi
     project="${path#/projects/}"
     project="${project%%/*}"
+    volume="${path#/projects/"$project"/volumes/}"
+    volume="${volume%%/*}"
+    vf="$nf/volumes/$project/$volume.json"
     case "$method $path" in
       "GET /regions") respond 200 '{"data":{"regions":[{"id":"europe-west"},{"id":"us-central"}]}}' ;;
+      "GET /projects/"*/volumes\?*)
+        respond 200 "$(for f in "$nf/volumes/$project"/*.json; do [[ -f "$f" ]] && jq -c '. + {id: .name}' "$f"; done | jq -sc '{data: .}')" ;;
+      "GET /projects/"*/volumes/*)
+        if [[ -f "$vf" ]]; then respond 200 "$(jq -c '{data: (. + {id: .name, status: "BOUND"} | del(.mounts))}' "$vf")"; else nf_missing Volume; fi ;;
+      "POST /projects/"*/volumes)
+        if [[ -n "${FAKE_NF_NO_VOLUMES:-}" ]]; then respond 403 '{"error":{"status":403,"message":"Volumes are not available on your plan"}}'; exit 0; fi
+        volume="$(jq -r .name <<< "$data")"
+        mkdir -p "$nf/volumes/$project"
+        jq -c '. + {attachedObjects: (.attachedObjects // [])}' <<< "$data" > "$nf/volumes/$project/$volume.json"
+        respond 200 "$(jq -nc --arg v "$volume" '{data: {id: $v, name: $v}}')" ;;
+      "POST /projects/"*/volumes/*/attach|"POST /projects/"*/volumes/*/detach)
+        [[ -f "$vf" ]] || { nf_missing Volume; exit 0; }
+        if [[ "$path" == */attach ]]; then op='.attachedObjects += [$o]'; else op='.attachedObjects -= [$o]'; fi
+        jq -c --argjson o "$(jq -c .nfObject <<< "$data")" "$op" "$vf" > "$vf.new" && mv "$vf.new" "$vf"
+        respond 200 '{"data":{}}' ;;
+      "POST /projects/"*/volumes/*)
+        [[ -f "$vf" ]] || { nf_missing Volume; exit 0; }
+        jq -c --argjson d "$data" '. * $d' "$vf" > "$vf.new" && mv "$vf.new" "$vf"
+        respond 200 '{"data":{}}' ;;
+      "DELETE /projects/"*/volumes/*)
+        # A volume can't go while a service it is attached to is still there.
+        attached=""
+        for service in $(jq -r '.attachedObjects[]?.id' "$vf" 2>/dev/null); do [[ ! -f "$nf/services/$project/$service.json" ]] || attached=1; done
+        if [[ -n "$attached" ]]; then respond 409 '{"error":{"status":409,"message":"Volume is attached"}}'
+        elif [[ -f "$vf" ]]; then rm "$vf"; respond 200 '{"data":{}}'
+        else nf_missing Volume; fi ;;
       "GET /projects/"*/services/*/containers)
         service="${path%/containers}"
         service="${service##*/}"
@@ -461,6 +492,13 @@ case "$url" in
         invalid="$(nf_invalid_service "$data")"
         if [[ -n "$invalid" ]]; then respond 400 "$invalid"; exit 0; fi
         service="$(jq -r .name <<< "$data")"
+        # Volumes to attach count only when the service is new, as their name says.
+        if [[ ! -f "$nf/services/$project/$service.json" ]]; then
+          for volume in $(jq -r '.createOptions.volumesToAttach[]?' <<< "$data"); do
+            vf="$nf/volumes/$project/$volume.json"
+            jq -c --arg s "$service" '.attachedObjects += [{id: $s, type: "service"}]' "$vf" > "$vf.new" && mv "$vf.new" "$vf"
+          done
+        fi
         mkdir -p "$nf/services/$project"
         printf '%s\n' "$data" > "$nf/services/$project/$service.json"
         respond 200 "$(jq -nc --arg s "$service" '{data: {id: $s, name: $s}}')" ;;
@@ -482,7 +520,7 @@ case "$url" in
         printf '%s\n' "$data" > "$nf/projects/$project.json"
         respond 200 "$(jq -c '{data: (. + {id: .name})}' <<< "$data")" ;;
       "DELETE /projects/"*)
-        if ls "$nf/services/$project"/*.json >/dev/null 2>&1; then respond 409 '{"error":{"status":409,"message":"Project is not empty"}}'
+        if ls "$nf/services/$project"/*.json "$nf/volumes/$project"/*.json >/dev/null 2>&1; then respond 409 '{"error":{"status":409,"message":"Project is not empty"}}'
         elif [[ -f "$nf/projects/$project.json" ]]; then rm "$nf/projects/$project.json"; respond 200 '{"data":{}}'
         else nf_missing Project; fi ;;
       "GET /integrations/registries")
@@ -2083,6 +2121,100 @@ test_northflank_dry_run_leaves_out_secrets() {
   lacks "$out" "mock-tunnel-token"
   lacks "$out" "ghp_test-token"
   fails grep -q '^nf ' "$p/fake.log"
+}
+
+# A named volume in the Compose file becomes a Northflank volume: made once, attached to the
+# app's service, detached when the Compose file drops it, and deleted only by destroy.
+test_northflank_keeps_named_volumes() {
+  local p="$WORK/nf-volumes" out v
+  nf_project "$p"
+  printf '    volumes: ["results:/var/lib/results"]\nvolumes:\n  results: {}\n' >> "$p/compose.yaml"
+  v="$p/nf/volumes/freelunch/api-results.json"
+  out="$(GHCR_TOKEN=x TEST_NF_TOKEN='' nf_in "$p" deploy --dry-run 2>&1)"
+  contains "$out" "volume api-results: 4096 MB at /var/lib/results, made when missing and attached to api"
+  out="$(GHCR_TOKEN=x nf_in "$p" deploy 2>&1)"
+  contains "$out" "northflank: made the volume api-results (4096 MB) for api"
+  equals "$(jq -c '{mounts, spec, attachedObjects}' "$v")" \
+    '{"mounts":[{"containerMountPath":"/var/lib/results"}],"spec":{"accessMode":"ReadWriteOnce","storageSize":4096},"attachedObjects":[{"id":"api","type":"service"}]}'
+  # The new service starts with it, so there is nothing to attach afterwards.
+  equals "$(sent "$p" api | jq -c .createOptions)" '{"volumesToAttach":["api-results"]}'
+  fails grep -q '^nf POST /projects/freelunch/volumes/api-results/attach' "$p/fake.log"
+  # Again: the same volume, still attached, and no createOptions for a service that runs.
+  out="$(GHCR_TOKEN=x nf_in "$p" deploy 2>&1)"
+  lacks "$out" "made the volume"
+  equals "$(grep -c '^nf POST /projects/freelunch/volumes ' "$p/fake.log")" 1
+  equals "$(sent "$p" api | jq -c .createOptions)" null
+  # status lists it.
+  out="$(nf_in "$p" status)"
+  contains "$out" "  api-results          volume, 4096 MB, mounted in api"
+  # A service that runs and gets a volume has it attached.
+  jq -c '.attachedObjects = []' "$v" > "$v.new" && mv "$v.new" "$v"
+  out="$(GHCR_TOKEN=x nf_in "$p" deploy 2>&1)"
+  contains "$out" "northflank: attached the volume api-results to api"
+  # Without it in the Compose file, it is detached and keeps its data.
+  sed -i.bak '/volumes/d; /results: {}/d' "$p/compose.yaml"
+  out="$(GHCR_TOKEN=x nf_in "$p" deploy 2>&1)"
+  contains "$out" "northflank: detached the volume api-results from api, which no longer mounts it. Its data stays there until you delete it at app.northflank.com"
+  equals "$(jq -c .attachedObjects "$v")" '[]'
+  # destroy deletes it with the project.
+  out="$(FREELUNCH_AUTO_APPROVE=1 nf_in "$p" destroy northflank 2>&1)"
+  contains "$out" "northflank: deleted the volume api-results and its data"
+  contains "$out" "northflank: deleted the project freelunch"
+  [[ ! -f "$v" ]]
+}
+
+test_northflank_volume_errors_come_through() {
+  local p="$WORK/nf-volumes-fail" out
+  nf_project "$p"
+  printf '    volumes: ["results:/var/lib/results"]\nvolumes:\n  results: {}\n' >> "$p/compose.yaml"
+  if out="$(GHCR_TOKEN=x FAKE_NF_NO_VOLUMES=1 nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "northflank: can't make the volume api-results for api (403): Volumes are not available on your plan"
+  fails grep -q '^nf PUT' "$p/fake.log"
+  # A volume of the same name that another service uses stays where it is.
+  mkdir -p "$p/nf/volumes/freelunch"
+  echo '{"name":"api-results","spec":{"storageSize":4096},"attachedObjects":[{"id":"worker","type":"service"}]}' > "$p/nf/volumes/freelunch/api-results.json"
+  if out="$(GHCR_TOKEN=x nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "northflank: the volume api-results is attached to worker, not api"
+  # A bigger volume_size grows it; a smaller one can't shrink it.
+  echo '{"name":"api-results","spec":{"storageSize":8192},"attachedObjects":[]}' > "$p/nf/volumes/freelunch/api-results.json"
+  out="$(GHCR_TOKEN=x nf_in "$p" deploy 2>&1)"
+  contains "$out" "northflank: the volume api-results stays at 8192 MB, since a volume can't shrink (volume_size is 4096)"
+  equals "$(jq -c .spec.storageSize "$p/nf/volumes/freelunch/api-results.json")" 8192
+}
+
+# An app with a bucket gets the bucket's S3 settings in its environment, before its env_file,
+# on a VM and on Northflank, and never in a dry run.
+test_deploy_gives_an_app_its_bucket() {
+  local p="$WORK/bucket-vm" n="$WORK/bucket-nf" out env
+  new_project "$p"
+  mkdir -p "$p/.freelunch/backblaze-b2"
+  cp "$ROOT/deploy/tests/fixtures/storage.tfstate" "$p/.freelunch/backblaze-b2/terraform.tfstate"
+  sed -i.bak 's|env_file = "api.env" }|env_file = "api.env", bucket = "backblaze-b2-results" }|' "$p/.freelunch/apps.tfvars"
+  GHCR_TOKEN=ghp_test-token deploy_in "$p" >/dev/null 2>&1
+  env="$(cat "$p/host/apps/api/.env")"
+  equals "$env" "$(printf 'AWS_ACCESS_KEY_ID=mock-key-id\nAWS_ENDPOINT_URL_S3=https://s3.us-west-004.backblazeb2.com\nAWS_REGION=us-west-004\nAWS_SECRET_ACCESS_KEY=mock-key\nS3_BUCKET=freelunch-results\nAPI_SECRET=s3cret-value')"
+  out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" --dry-run 2>&1)"
+  contains "$out" "<the S3 settings of backblaze-b2-results, then $p/.freelunch/api.env, redacted>"
+  lacks "$out" "mock-key"
+  # Without an env_file the bucket's settings are the whole .env.
+  sed -i.bak 's|env_file = "api.env", ||' "$p/.freelunch/apps.tfvars"
+  GHCR_TOKEN=ghp_test-token deploy_in "$p" >/dev/null 2>&1
+  equals "$(tail -1 "$p/host/apps/api/.env")" "S3_BUCKET=freelunch-results"
+  # A bucket no stack made stops the deploy.
+  sed -i.bak 's|backblaze-b2-results|cloudflare-results|' "$p/.freelunch/apps.tfvars"
+  if out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "Apps use buckets that no storage stack has made"
+  # On Northflank they are the service's environment, under the env_file's values.
+  nf_project "$n"
+  mkdir -p "$n/.freelunch/backblaze-b2"
+  cp "$ROOT/deploy/tests/fixtures/storage.tfstate" "$n/.freelunch/backblaze-b2/terraform.tfstate"
+  sed -i.bak 's|env_file = "api.env" }|env_file = "api.env", bucket = "backblaze-b2-results" }|' "$n/.freelunch/apps.tfvars"
+  printf 'S3_BUCKET=my-own\n' >> "$n/.freelunch/api.env"
+  out="$(GHCR_TOKEN=x nf_in "$n" deploy 2>&1)"
+  contains "$out" ", with the bucket backblaze-b2-results"
+  equals "$(sent "$n" api | jq -c .runtimeEnvironment)" \
+    '{"AWS_ACCESS_KEY_ID":"mock-key-id","AWS_ENDPOINT_URL_S3":"https://s3.us-west-004.backblazeb2.com","AWS_REGION":"us-west-004","AWS_SECRET_ACCESS_KEY":"mock-key","S3_BUCKET":"my-own","API_SECRET":"s3cret-value","QUOTED":"with spaces","LOG_LEVEL":"info"}'
+  lacks "$(cat "$n/fake.log")" "mock-key"
 }
 
 # A Sandbox team has room for one project. doctor and plan say when another one has it, apply

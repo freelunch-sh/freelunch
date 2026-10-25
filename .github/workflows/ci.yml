@@ -26,7 +26,7 @@ jobs:
           # (keyed override targets, partial mock objects), so OpenTofu runs the rest.
           - tool: tofu
             suites: >-
-              catalog deploy hybrid shared tests providers/aws providers/cloudflare providers/gcp
+              catalog deploy hybrid shared tests providers/aws providers/backblaze-b2 providers/cloudflare providers/gcp
               providers/northflank providers/oci/modules/network
     env:
       FREELUNCH_TF: ${{ matrix.tool }}

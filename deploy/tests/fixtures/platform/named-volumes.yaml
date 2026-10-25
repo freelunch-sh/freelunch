@@ -1,0 +1,12 @@
+services:
+  api:
+    image: traefik/whoami
+    volumes:
+      - results:/var/lib/results
+      - type: volume
+        source: Cache_Dir
+        target: /cache
+      - results:/srv/results
+volumes:
+  results: {}
+  Cache_Dir: {}

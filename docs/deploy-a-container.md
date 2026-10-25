@@ -296,7 +296,28 @@ and a read-only access token. Variables set in your shell (or in CI) override
 Relative paths in the Compose file resolve on the host under `/opt/freelunch/apps/<app>/`,
 so `./data` above is `/opt/freelunch/apps/api/data`. It survives deploys and image updates.
 It does not survive destroying the VM, and Oracle can reclaim idle Always Free VMs: keep
-important data in a managed database or back it up (backups are planned for v1.5).
+important data in a bucket ([below](#keep-data-in-a-bucket)) or a managed database.
+
+On a container platform there is no host folder. A named volume (`data:/data`, listed under
+`volumes:` at the top of the Compose file) works on both: Docker keeps it on a VM, and on
+Northflank `deploy` makes a volume for it.
+
+### Keep data in a bucket
+
+A bucket keeps an app's files off the machine it runs on, so they survive a new VM or a
+move to another platform. Make one with the [backblaze-b2](../providers/backblaze-b2/) stack
+(10 GB free, no card) or R2 in the [cloudflare](../providers/cloudflare/README.md#r2-buckets)
+stack, and name it in `apps.tfvars`:
+
+```hcl
+api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", bucket = "backblaze-b2-results" }
+```
+
+`deploy` puts `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`,
+`AWS_ENDPOINT_URL_S3` and `S3_BUCKET` into the app's environment, with a key of its own for
+that bucket alone. The AWS SDKs, boto3 and the aws CLI read the first four without any code,
+so the app uses `S3_BUCKET` and writes there instead of to disk. On a VM they go into the
+app's `.env`, so keep `env_file: .env` in the Compose service.
 
 ## 6. Deploy
 
@@ -382,7 +403,7 @@ target changes in `apps.tfvars` and the routes.
 | Target | Free | Card | What to know |
 |---|---|---|---|
 | `oci-main` | 2 Arm OCPUs, 12 GB, 100 GB disk | yes | Arm capacity is often short (`--wait-for-capacity`) |
-| `northflank-main` | 2 always-on services of up to 0.2 vCPU and 512 MB: your app and `cloudflared` | no | no volumes, `linux/amd64` images, one app per free project |
+| `northflank-main` | 2 always-on services of up to 0.2 vCPU and 512 MB: your app and `cloudflared` | no | named volumes only (4 GB each, not live-tested), `linux/amd64` images, one app per free project |
 | `gcp-main` | 1 `e2-micro` (1 GB) in a US region, 30 GB disk | yes | the IPv4 address costs about $3.65/month; not live-tested |
 
 More platforms that would fit are in the [checklist](../README.md#provider-checklist), with what
@@ -427,7 +448,10 @@ second hostname (`api2.example.com`) to `northflank-main`, deploy, check it, the
 `cloudflared` is still connected, run `freelunch destroy oci` and then `apply cloudflare`
 again.
 
-The Compose file needs one service per app, an image to pull and no volumes; `deploy` says
+The Compose file needs one service per app and an image to pull. A named volume
+(`results:/var/lib/results`) becomes a Northflank volume that keeps its data across deploys
+and restarts; a folder of the VM (`./data:/data`) has nowhere to go there, so change it to a
+named volume, or keep the data in a bucket ([below](#keep-data-in-a-bucket)). `deploy` says
 what to change otherwise. Northflank's hosts are x86, so the image needs a `linux/amd64`
 build. The workflow from `freelunch init --image-workflow` builds for the stacks you name;
 for one written for OCI alone, set `platforms: linux/amd64,linux/arm64` in it.
