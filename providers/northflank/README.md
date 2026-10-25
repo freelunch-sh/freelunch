@@ -24,7 +24,7 @@ it when Oracle has no Arm capacity for you, or when you would rather not run a V
 | Resources | up to $20/month; nf-compute-20 is $5.40 and nf-compute-10 (cloudflared) $2.70 | by the plans above |
 | Projects | **1** (the [docs](https://northflank.com/docs/v1/application/getting-started/create-a-project) say one; the pricing page says 2, but a second one gets a 409) | ✅ doctor, plan and apply check that the team has room for the project |
 | Jobs, databases | 2 jobs, 1 database | not used yet |
-| Volumes | the pricing page lists volumes on the Sandbox, billed at $0.11657 per GB a month, so the smallest (4 GB) is about $0.47 of the $20 | `volume_size` (4096 MB by default); not live-tested yet |
+| Volumes | the pricing page lists volumes on the Sandbox, billed at $0.11657 per GB a month, so the smallest it takes (6 GB, since the default nvme storage class refuses less) is about $0.70 of the $20 | `volume_size` (6144 MB by default and at least); not live-tested yet |
 
 Limits live in [`provider.yaml`](provider.yaml) under `limits:`. Free tiers change, so
 check the [pricing page](https://northflank.com/pricing) before relying on this.
@@ -123,7 +123,7 @@ in the description) and never takes over or deletes a project it didn't make.
 - **Small plans.** 0.2 vCPU and 512 MB per service at most. Images are x86 (`linux/amd64`).
 - **Keep data in a volume or a bucket.** A container's own files are lost on every deploy
   and restart. A named volume in the Compose file keeps them: deploy makes it the first
-  time (`volume_size` MB, 4096 by default, Northflank's smallest), attaches it to the app's
+  time (`volume_size` MB, 6144 by default, the smallest Northflank takes), attaches it to the app's
   service, and detaches it, data and all, when the Compose file drops it. Only `freelunch
   destroy northflank` deletes it, with the data. A volume can grow (a bigger `volume_size`)
   but never shrink. With a volume, the old container stops before the new one starts, so

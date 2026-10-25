@@ -10,6 +10,6 @@ region = "europe-west"
 plan = "nf-compute-20"
 
 # Size in MB of each volume deploy makes for a named volume in an app's Compose file.
-# 4096 is Northflank's smallest, about $0.47 a month of the Sandbox's $20. Volumes grow
+# 6144 is the smallest Northflank takes, about $0.70 a month of the Sandbox's $20. Volumes grow
 # when this grows, and never shrink.
-# volume_size = 4096
+# volume_size = 6144

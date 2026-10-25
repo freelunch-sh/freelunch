@@ -403,7 +403,7 @@ target changes in `apps.tfvars` and the routes.
 | Target | Free | Card | What to know |
 |---|---|---|---|
 | `oci-main` | 2 Arm OCPUs, 12 GB, 100 GB disk | yes | Arm capacity is often short (`--wait-for-capacity`) |
-| `northflank-main` | 2 always-on services of up to 0.2 vCPU and 512 MB: your app and `cloudflared` | no | named volumes only (4 GB each, not live-tested), `linux/amd64` images, one app per free project |
+| `northflank-main` | 2 always-on services of up to 0.2 vCPU and 512 MB: your app and `cloudflared` | no | named volumes only (6 GB each, not live-tested), `linux/amd64` images, one app per free project |
 | `gcp-main` | 1 `e2-micro` (1 GB) in a US region, 30 GB disk | yes | the IPv4 address costs about $3.65/month; not live-tested |
 
 More platforms that would fit are in the [checklist](../README.md#provider-checklist), with what
