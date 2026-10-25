@@ -53,8 +53,10 @@ Read [docs/architecture.md](docs/architecture.md) for the reasoning.
 ## Quick start: deploy your project
 
 Put your backend's container on an Always Free Oracle Cloud VM and serve it at
-`https://api.example.com` through a Cloudflare Tunnel, with no port open except SSH. Config
-and state live in your repository; freelunch is pinned as a submodule or a Docker image.
+`https://api.example.com` through a Cloudflare Tunnel, with no port open except SSH.
+freelunch is a command you install once. Your repository gets only a `.freelunch/` folder
+with its config, and `.freelunch/version` pins the freelunch it runs, so every machine and CI
+job runs the same one.
 
 The domain can be free too. `freelunch domain suggest myapp` finds free names like
 `myapp.dpdns.org` at each [free domain provider](#provider-checklist), the recommended one
@@ -62,12 +64,10 @@ first. `freelunch domain add` puts the one you register on Cloudflare and `domai
 says when it's ready ([docs/free-domains.md](docs/free-domains.md)).
 
 ```bash
-cd your-project
-git submodule add https://github.com/freelunch-sh/freelunch freelunch   # or use the runner image
-git -C freelunch checkout v1.0.0
-alias freelunch="$PWD/freelunch/bin/freelunch"
+curl -fsSL https://raw.githubusercontent.com/freelunch-sh/freelunch/main/install.sh | bash
 
-freelunch init                 # creates .freelunch/: tfvars examples, apps.tfvars, .gitignore
+cd your-project
+freelunch init                 # creates .freelunch/: tfvars examples, apps.tfvars, the version
 # fill in .freelunch/oci/terraform.tfvars, .freelunch/cloudflare/terraform.tfvars, .freelunch/.env
 freelunch apply oci            # the VM, with Docker
 freelunch apply cloudflare     # tunnel + DNS record
@@ -83,6 +83,19 @@ the same app, without a card, as two always-on services: your app and `cloudflar
 ([switch to another provider](docs/deploy-a-container.md#switch-to-another-provider)).
 
 To ship a new version, change the image tag and run `freelunch deploy` again; the VM stays.
+`freelunch upgrade` moves the project to the latest freelunch release.
+
+In GitHub Actions, the [Run freelunch](action.yml) action runs any command with the version
+the project pins; `freelunch ci init` writes the workflows:
+
+```yaml
+- uses: actions/checkout@v7
+- uses: freelunch-sh/freelunch@v1.0.0
+  with:
+    run: deploy
+    bundle: ${{ secrets.FREELUNCH_BUNDLE }}
+```
+
 Without installing anything but Docker:
 
 ```bash
@@ -204,8 +217,8 @@ freelunch/
 
 Releases are small: every usable feature gets its own tag.
 
-- **v1.0 (next release), deploy your project from its own repo:** pin freelunch in another repository (git
-  submodule or a versioned Docker image), keep config and state in that project, put its
+- **v1.0 (next release), deploy your project from its own repo:** install freelunch once and pin its
+  version in each project (or use the versioned Docker image), keep config and state in that project, put its
   Docker image (public or from a private registry) on an always-free host (an Oracle VM, or
   Northflank's free plan when Oracle has no capacity), reach it at
   `https://api.example.com` through a Cloudflare Tunnel and DNS, and ship new versions with

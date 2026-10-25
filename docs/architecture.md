@@ -127,12 +127,16 @@ The CLI runs in one of two modes:
   `terraform.tfstate` in `providers/<name>/stack/`, as during development.
 - **Project mode**, in any repository with a `.freelunch/` folder (found by walking up from
   the current directory, but never past the freelunch checkout; or set `FREELUNCH_PROJECT`).
-  freelunch is pinned as a submodule or a runner image, and the project holds everything
-  that is its own:
+  The project pins the freelunch it runs in `.freelunch/version`, a release tag or a commit.
+  An installed freelunch (`install.sh`, `freelunch upgrade`), the GitHub Action and the
+  runner image run that version, from a copy under `~/.local/share/freelunch/<version>`
+  that they download the first time; a checkout (development, or an older project's
+  submodule) runs its own code. The project holds everything that is its own:
 
 ```
 .freelunch/
 ├── apps.tfvars                 apps per host (committed)
+├── version                     the freelunch version it runs (committed)
 ├── .env                        credentials for the CLI (git-ignored)
 ├── <app>.env                   app secrets, copied by deploy (git-ignored)
 ├── oci/terraform.tfvars        stack config (git-ignored)
@@ -152,7 +156,7 @@ still auto-loads a `terraform.tfvars` next to the code, so the CLI refuses to ru
 when the checkout has one.
 
 The dependency lock file is the exception to `TF_DATA_DIR`: tofu/terraform always read and
-write `.terraform.lock.hcl` next to the code, which in a submodule or the runner image is
+write `.terraform.lock.hcl` next to the code, which in an installed copy or the runner image is
 not the project's to commit. So the CLI copies `.freelunch/<stack>/.terraform.lock.hcl` next
 to the code before `init` (or removes whatever lock is there) and copies it back afterwards.
 The project commits it, and every machine then installs the same provider builds and checks
