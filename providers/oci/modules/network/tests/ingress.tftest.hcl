@@ -51,11 +51,11 @@ run "renaming_keeps_the_vcn" {
   command = plan
 
   variables {
-    name = "myapp"
+    name = "sunbird"
   }
 
   assert {
-    condition     = oci_core_vcn.this.dns_label == "freelunch" && oci_core_vcn.this.display_name == "myapp-vcn"
+    condition     = oci_core_vcn.this.dns_label == "freelunch" && oci_core_vcn.this.display_name == "sunbird-vcn"
     error_message = "A new name should rename the VCN, not replace it for a new DNS label."
   }
 }
