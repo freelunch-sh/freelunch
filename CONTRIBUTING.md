@@ -45,3 +45,12 @@ Follow [docs/adding-a-provider.md](docs/adding-a-provider.md). In short:
   attribution. freelunch is Apache-2.0.
 - Out of scope for now: LLM APIs and inference platforms, app-level SaaS such as auth or
   email, and anything that automates account creation or dodges a provider's terms.
+- Add a line for your change under `## [Unreleased]` in `CHANGELOG.md`.
+
+## Releases
+
+A release is a pull request that renames `## [Unreleased]` in `CHANGELOG.md` to the new
+version and the day, e.g. `## [1.2.0] - 2026-11-03`, with a new empty `## [Unreleased]`
+above it. Once it is merged, the release workflow runs the tests, tags `v1.2.0`, pushes the
+runner image and makes the GitHub release from that section. Every usable feature gets its
+own minor release; a major one is only for breaking changes to the CLI or the project layout.

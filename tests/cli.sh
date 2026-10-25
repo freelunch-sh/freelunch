@@ -2581,8 +2581,7 @@ test_ci_secrets_bundle_what_git_leaves_out() {
 }
 
 # ci init writes a workflow that waits for capacity, every half hour in a private repository
-# and every quarter of an hour in a public one, and one that deploys after a new image. In a
-# submodule, they use its copy of the action.
+# and every quarter of an hour in a public one, and one that deploys after a new image.
 test_ci_init_writes_the_workflows() {
   local p="$WORK/ci-init" out wait
   mkdir -p "$p" && (cd "$p" && "$CLI" init >/dev/null 2>&1)
@@ -2606,12 +2605,6 @@ test_ci_init_writes_the_workflows() {
   FAKE_VISIBILITY=PUBLIC ci_in "$p" ci init >/dev/null 2>&1
   grep -q '    - cron: "4,19,34,49 \* \* \* \*" # every quarter of an hour' "$wait"
   grep -q '    workflows: \[image\]' "$p/.github/workflows/freelunch.yml"
-  # freelunch as a submodule of the project
-  rm -r "$p/.github"
-  scratch_checkout "$p/freelunch" oci
-  TEST_CLI="$p/freelunch/bin/freelunch" ci_in "$p" ci init >/dev/null 2>&1
-  grep -q '      - uses: ./freelunch$' "$wait"
-  grep -q '          submodules: true' "$wait"
   # GitLab
   ci_in "$p" ci init gitlab >/dev/null 2>&1
   grep -q '    - /opt/freelunch/bin/freelunch ci restore' "$p/.gitlab-ci.yml"

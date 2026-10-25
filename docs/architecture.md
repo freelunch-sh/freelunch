@@ -130,8 +130,7 @@ The CLI runs in one of two modes:
   The project pins the freelunch it runs in `.freelunch/version`, a release tag or a commit.
   An installed freelunch (`install.sh`, `freelunch upgrade`), the GitHub Action and the
   runner image run that version, from a copy under `~/.local/share/freelunch/<version>`
-  that they download the first time; a checkout (development, or an older project's
-  submodule) runs its own code. The project holds everything that is its own:
+  that they download the first time; a freelunch checkout runs its own code, for development. The project holds everything that is its own:
 
 ```
 .freelunch/

@@ -68,12 +68,6 @@ the container. A session profile needs the same for `key_file` and `security_tok
 which `oci session authenticate` writes as absolute paths. On Linux, files the container
 writes into your project are owned by root.
 
-A project made with freelunch as a git submodule keeps working: a checkout always runs its
-own code. To drop the submodule, install the command, run `freelunch init` again (it adds
-`.freelunch/version` and keeps everything else), then `git rm freelunch` and run
-`freelunch ci init` again if the project has CI workflows, so they use the published action
-instead of `./freelunch`.
-
 ## 2. Create the project folder
 
 ```bash

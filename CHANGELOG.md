@@ -8,21 +8,6 @@ contract, the CLI or the project layout.
 
 The first release, planned as 1.0.0: deploy your project's container from its own repository.
 
-### Upgrading a project made before this release
-
-For a project set up with freelunch from `main` before 1.0.0:
-
-- Run `freelunch init` in it again. It keeps every file and adds the lines
-  `.freelunch/.gitignore` lacks (`*/wait.log`, `*/wait.state` and `*.tfplan` came later).
-- `name_prefix` came later too. Without it, a stack's resources keep the name `freelunch`;
-  `init` only writes it into examples it creates, so set it in each stack's
-  `terraform.tfvars` yourself. The OCI network and hosts are renamed in place. Review the
-  other stacks' plans with `freelunch plan <stack> --out <file>`, which says what a plan
-  replaces: a replaced tunnel gets a new token, which the next `freelunch deploy` takes to
-  its host.
-- `init` doesn't rewrite examples it kept. Compare yours with the stack's
-  `project.tfvars.example` in freelunch for settings that came since.
-
 ### Added
 
 - **Install once, pin per project.** `install.sh` (`curl -fsSL
