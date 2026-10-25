@@ -839,22 +839,22 @@ test_init_names_the_project() {
     grep -qx 'name_prefix = "money-spider-v2"' "$p/Money_Spider.v2/.freelunch/$s/terraform.tfvars.example"
   done
   grep -q 'address = "money-spider-v2-oci-main"' "$p/Money_Spider.v2/.freelunch/apps.tfvars"
-  (cd "$p/other" && "$CLI" init --name moneyspider cloudflare)
-  grep -qx 'name_prefix = "moneyspider"' "$p/other/.freelunch/cloudflare/terraform.tfvars.example"
+  (cd "$p/other" && "$CLI" init --name sunbird cloudflare)
+  grep -qx 'name_prefix = "sunbird"' "$p/other/.freelunch/cloudflare/terraform.tfvars.example"
   rm -rf "$p/other/.freelunch"
-  (cd "$p/other" && "$CLI" init --name=moneyspider oci)
-  grep -qx 'name_prefix = "moneyspider"' "$p/other/.freelunch/oci/terraform.tfvars.example"
+  (cd "$p/other" && "$CLI" init --name=sunbird oci)
+  grep -qx 'name_prefix = "sunbird"' "$p/other/.freelunch/oci/terraform.tfvars.example"
   # Names every provider takes, and a fallback for a folder name that gives none.
   rm -rf "$p/other/.freelunch"
   fails in_dir "$p/other" "$CLI" init --name Money_Spider
   fails in_dir "$p/other" "$CLI" init --name m
-  fails in_dir "$p/other" "$CLI" init --name moneyspider-
+  fails in_dir "$p/other" "$CLI" init --name sunbird-
   fails in_dir "$p/other" "$CLI" init --name a-name-longer-than-21-characters
   fails in_dir "$p/other" "$CLI" init --name
   absent "$p/other/.freelunch"
   # A stack added later gets the name the project has.
-  (cd "$p/other" && "$CLI" init --name=moneyspider oci >/dev/null 2>&1 && "$CLI" init cloudflare >/dev/null 2>&1)
-  grep -qx 'name_prefix = "moneyspider"' "$p/other/.freelunch/cloudflare/terraform.tfvars.example"
+  (cd "$p/other" && "$CLI" init --name=sunbird oci >/dev/null 2>&1 && "$CLI" init cloudflare >/dev/null 2>&1)
+  grep -qx 'name_prefix = "sunbird"' "$p/other/.freelunch/cloudflare/terraform.tfvars.example"
   rm -rf "$p/other/.freelunch"
   equals "$(project_name_of "1-x")" "freelunch"
   equals "$(project_name_of "A very long project folder name")" "a-very-long-project-f"
@@ -1767,14 +1767,14 @@ test_tunnel_only_hosts_get_cloudflared() {
 
 test_domain_suggest_checks_every_free_domain_provider() {
   local d="$WORK/suggest" out s headers
-  out="$(suggest_in "$d" freelunch.sh MoneySpider.app 2>&1)"
+  out="$(suggest_in "$d" freelunch.sh SunBird.app 2>&1)"
   for s in dpdns.org qzz.io us.kg xx.kg eu.org pp.ua; do
     grep -q "^  freelunch\.$s  *free$" <<< "$out"
-    grep -q "^  moneyspider\.$s  *free$" <<< "$out"
+    grep -q "^  sunbird\.$s  *free$" <<< "$out"
   done
   # One block per provider, the recommended one first, each with where to register. The
   # names as typed come before them.
-  headers="$(grep -v -e '^ ' -e '^$' -e '^==>' -e '^freelunch\.sh: ' -e '^moneyspider\.app: ' <<< "$out" | cut -d: -f1)"
+  headers="$(grep -v -e '^ ' -e '^$' -e '^==>' -e '^freelunch\.sh: ' -e '^sunbird\.app: ' <<< "$out" | cut -d: -f1)"
   equals "$(head -1 <<< "$headers")" "DigitalPlat FreeDomain (recommended)"
   contains "$headers" "EU.org"
   contains "$headers" "pp.ua"
@@ -1784,7 +1784,7 @@ test_domain_suggest_checks_every_free_domain_provider() {
   lacks "$out" "is-a.dev"
   lacks "$out" "qd.je"
   # Nothing was taken, so no similar names were looked up. DNS lookups go to Cloudflare's resolver.
-  lacks "$out" "getmoneyspider"
+  lacks "$out" "getsunbird"
   equals "$(grep -c '^lookup https://cloudflare-dns.com/dns-query?name=.*&type=NS$' "$d/fake.log")" "$(grep -c '^lookup' "$d/fake.log")"
   contains "$out" "the provider has the final say"
 }
@@ -1792,46 +1792,46 @@ test_domain_suggest_checks_every_free_domain_provider() {
 # A paid name as typed comes first: is it registered? RDAP says, or DNS where there is no RDAP.
 test_domain_suggest_reports_the_name_as_typed() {
   local d="$WORK/suggest-typed" out
-  out="$(FAKE_REGISTERED="moneyspider.app" suggest_in "$d" moneyspider.app freelunch.sh shop 2>&1)"
-  equals "$(sed -n 1,3p <<< "$out")" "$(printf 'moneyspider.app: registered\nfreelunch.sh: not in DNS, so probably not registered, but .sh names cost money. The names below are free\n')"
+  out="$(FAKE_REGISTERED="sunbird.app" suggest_in "$d" sunbird.app freelunch.sh shop 2>&1)"
+  equals "$(sed -n 1,3p <<< "$out")" "$(printf 'sunbird.app: registered\nfreelunch.sh: not in DNS, so probably not registered, but .sh names cost money. The names below are free\n')"
   grep -q '^rdap https://data.iana.org/rdap/dns.json$' "$d/fake.log"
-  grep -q '^rdap https://rdap.example/domain/moneyspider.app$' "$d/fake.log"
+  grep -q '^rdap https://rdap.example/domain/sunbird.app$' "$d/fake.log"
   rm "$d/fake.log"
-  out="$(FAKE_TAKEN="freelunch.sh" suggest_in "$d" moneyspider.app freelunch.sh 2>&1)"
-  contains "$out" "moneyspider.app: not registered, but .app names cost money at a registrar. The names below are free"
+  out="$(FAKE_TAKEN="freelunch.sh" suggest_in "$d" sunbird.app freelunch.sh 2>&1)"
+  contains "$out" "sunbird.app: not registered, but .app names cost money at a registrar. The names below are free"
   contains "$out" "freelunch.sh: registered (it is in DNS)"
   # A free name as typed is checked with the others, not twice.
   rm "$d/fake.log"
-  out="$(suggest_in "$d" moneyspider.dpdns.org 2>&1)"
-  lacks "$out" "moneyspider.dpdns.org:"
-  grep -q '^  moneyspider\.dpdns\.org  *free$' <<< "$out"
+  out="$(suggest_in "$d" sunbird.dpdns.org 2>&1)"
+  lacks "$out" "sunbird.dpdns.org:"
+  grep -q '^  sunbird\.dpdns\.org  *free$' <<< "$out"
   fails grep -q '^rdap' "$d/fake.log"
 }
 
 test_domain_suggest_offers_similar_names_where_taken() {
   local d="$WORK/suggest-taken" out
-  out="$(FAKE_TAKEN="moneyspider.dpdns.org moneyspider-app.dpdns.org moneyspider.pp.ua" suggest_in "$d" moneyspider.app 2>&1)"
-  grep -q '^  moneyspider\.dpdns\.org  *taken$' <<< "$out"
-  grep -q '^  getmoneyspider\.dpdns\.org  *free$' <<< "$out"
-  grep -q '^  moneyspider\.pp\.ua  *taken$' <<< "$out"
-  grep -q '^  moneyspider-app\.pp\.ua  *free$' <<< "$out"
+  out="$(FAKE_TAKEN="sunbird.dpdns.org sunbird-app.dpdns.org sunbird.pp.ua" suggest_in "$d" sunbird.app 2>&1)"
+  grep -q '^  sunbird\.dpdns\.org  *taken$' <<< "$out"
+  grep -q '^  getsunbird\.dpdns\.org  *free$' <<< "$out"
+  grep -q '^  sunbird\.pp\.ua  *taken$' <<< "$out"
+  grep -q '^  sunbird-app\.pp\.ua  *free$' <<< "$out"
   # Taken stand-ins are skipped, one stand-in per taken name, and none where the name is free.
-  lacks "$out" "moneyspider-app.dpdns.org"
-  lacks "$out" "moneyspiderhq"
-  lacks "$out" "getmoneyspider.eu.org"
+  lacks "$out" "sunbird-app.dpdns.org"
+  lacks "$out" "sunbirdhq"
+  lacks "$out" "getsunbird.eu.org"
   # Without an extension there is no name-extension stand-in.
-  out="$(FAKE_TAKEN="moneyspider.eu.org" suggest_in "$d" moneyspider 2>&1)"
-  grep -q '^  getmoneyspider\.eu\.org  *free$' <<< "$out"
+  out="$(FAKE_TAKEN="sunbird.eu.org" suggest_in "$d" sunbird 2>&1)"
+  grep -q '^  getsunbird\.eu\.org  *free$' <<< "$out"
 }
 
 test_domain_suggest_reports_failed_lookups() {
   local d="$WORK/suggest-failed" out
-  out="$(FAKE_BROKEN="moneyspider.eu.org" suggest_in "$d" moneyspider 2>&1)"
-  grep -q '^  moneyspider\.eu\.org  *unknown$' <<< "$out"
-  lacks "$out" "getmoneyspider.eu.org"
+  out="$(FAKE_BROKEN="sunbird.eu.org" suggest_in "$d" sunbird 2>&1)"
+  grep -q '^  sunbird\.eu\.org  *unknown$' <<< "$out"
+  lacks "$out" "getsunbird.eu.org"
   # Offline, it stops after the first lookup instead of timing out on every name.
   rm "$d/fake.log"
-  if out="$(FAKE_OFFLINE=1 suggest_in "$d" moneyspider 2>&1)"; then echo "suggest should fail offline"; return 1; fi
+  if out="$(FAKE_OFFLINE=1 suggest_in "$d" sunbird 2>&1)"; then echo "suggest should fail offline"; return 1; fi
   contains "$out" "can't reach Cloudflare's DNS-over-HTTPS resolver"
   equals "$(grep -c '^lookup' "$d/fake.log")" 1
 }
@@ -1839,18 +1839,18 @@ test_domain_suggest_reports_failed_lookups() {
 # domain add puts the name on Cloudflare and says which nameservers to set at the provider.
 test_domain_add_puts_a_name_on_cloudflare() {
   local d="$WORK/domain-add" out
-  out="$(TEST_CF_TOKEN=cf-token domain_in "$d" add MoneySpider.dpdns.org 2>&1)"
+  out="$(TEST_CF_TOKEN=cf-token domain_in "$d" add SunBird.dpdns.org 2>&1)"
   grep -qx 'api GET /accounts?per_page=50 token=cf-token' "$d/fake.log"
-  grep -qxF 'api POST /zones token=cf-token {"name":"moneyspider.dpdns.org","account":{"id":"acc1"},"type":"full"}' "$d/fake.log"
-  contains "$out" "moneyspider.dpdns.org is on Cloudflare now, on the free plan"
-  contains "$out" "$(printf 'Set these nameservers for moneyspider.dpdns.org at DigitalPlat FreeDomain (https://dash.domain.digitalplat.org/), in place of any others:\n  bob.ns.cloudflare.com\n  ada.ns.cloudflare.com')"
-  contains "$out" "freelunch domain status moneyspider.dpdns.org says when"
+  grep -qxF 'api POST /zones token=cf-token {"name":"sunbird.dpdns.org","account":{"id":"acc1"},"type":"full"}' "$d/fake.log"
+  contains "$out" "sunbird.dpdns.org is on Cloudflare now, on the free plan"
+  contains "$out" "$(printf 'Set these nameservers for sunbird.dpdns.org at DigitalPlat FreeDomain (https://dash.domain.digitalplat.org/), in place of any others:\n  bob.ns.cloudflare.com\n  ada.ns.cloudflare.com')"
+  contains "$out" "freelunch domain status sunbird.dpdns.org says when"
   # Once more: the zone is there already, and an active one needs nothing else.
-  out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="moneyspider.dpdns.org:pending" domain_in "$d" add moneyspider.dpdns.org 2>&1)"
-  contains "$out" "moneyspider.dpdns.org is on Cloudflare already"
+  out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="sunbird.dpdns.org:pending" domain_in "$d" add sunbird.dpdns.org 2>&1)"
+  contains "$out" "sunbird.dpdns.org is on Cloudflare already"
   contains "$out" "  ada.ns.cloudflare.com"
-  out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="moneyspider.dpdns.org:active" domain_in "$d" add moneyspider.dpdns.org 2>&1)"
-  contains "$out" 'moneyspider.dpdns.org is active: set zone = "moneyspider.dpdns.org"'
+  out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="sunbird.dpdns.org:active" domain_in "$d" add sunbird.dpdns.org 2>&1)"
+  contains "$out" 'sunbird.dpdns.org is active: set zone = "sunbird.dpdns.org"'
   lacks "$out" "Set these nameservers"
   # Any domain works. With several accounts, CLOUDFLARE_ACCOUNT_ID picks one.
   rm "$d/fake.log"
@@ -1875,10 +1875,10 @@ test_domain_add_puts_a_name_on_cloudflare() {
   contains "$out" "Cloudflare refused sub.example.org: Please ensure you are providing the root domain (1116)"
   contains "$out" "whose zone resources are all zones of the account"
   # A token and one domain name.
-  if out="$(domain_in "$d" add moneyspider.dpdns.org 2>&1)"; then echo "add should have failed"; return 1; fi
+  if out="$(domain_in "$d" add sunbird.dpdns.org 2>&1)"; then echo "add should have failed"; return 1; fi
   contains "$out" "CLOUDFLARE_API_TOKEN is not set"
   TEST_CF_TOKEN=cf-token fails domain_in "$d" add "my app.dpdns.org"
-  TEST_CF_TOKEN=cf-token fails domain_in "$d" add moneyspider
+  TEST_CF_TOKEN=cf-token fails domain_in "$d" add sunbird
   TEST_CF_TOKEN=cf-token fails domain_in "$d" add one.dpdns.org two.dpdns.org
 }
 
@@ -1886,28 +1886,28 @@ test_domain_add_puts_a_name_on_cloudflare() {
 test_domain_status_says_when_a_name_is_ready() {
   local d="$WORK/domain-status" out
   # Registered, nameservers not set yet.
-  if out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="moneyspider.dpdns.org:pending" domain_in "$d" status moneyspider.dpdns.org 2>&1)"; then echo "status should have failed"; return 1; fi
+  if out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="sunbird.dpdns.org:pending" domain_in "$d" status sunbird.dpdns.org 2>&1)"; then echo "status should have failed"; return 1; fi
   contains "$out" "  nameservers: none yet. Set ada.ns.cloudflare.com and bob.ns.cloudflare.com at DigitalPlat FreeDomain (https://dash.domain.digitalplat.org/)"
   contains "$out" "  Cloudflare: pending"
   lacks "$out" "asked Cloudflare"
   # The nameservers are other ones.
-  if out="$(TEST_CF_TOKEN=cf-token FAKE_TAKEN="moneyspider.dpdns.org" FAKE_ZONES="moneyspider.dpdns.org:pending" domain_in "$d" status moneyspider.dpdns.org 2>&1)"; then echo "status should have failed"; return 1; fi
+  if out="$(TEST_CF_TOKEN=cf-token FAKE_TAKEN="sunbird.dpdns.org" FAKE_ZONES="sunbird.dpdns.org:pending" domain_in "$d" status sunbird.dpdns.org 2>&1)"; then echo "status should have failed"; return 1; fi
   contains "$out" "  nameservers: ns1.example.net, not Cloudflare's for this zone. Set ada.ns.cloudflare.com and bob.ns.cloudflare.com at"
   # Delegated, and Cloudflare hasn't noticed yet: it asks Cloudflare to check.
   rm "$d/fake.log"
-  if out="$(TEST_CF_TOKEN=cf-token FAKE_DELEGATED="moneyspider.dpdns.org" FAKE_ZONES="moneyspider.dpdns.org:pending" domain_in "$d" status moneyspider.dpdns.org 2>&1)"; then echo "status should have failed"; return 1; fi
+  if out="$(TEST_CF_TOKEN=cf-token FAKE_DELEGATED="sunbird.dpdns.org" FAKE_ZONES="sunbird.dpdns.org:pending" domain_in "$d" status sunbird.dpdns.org 2>&1)"; then echo "status should have failed"; return 1; fi
   contains "$out" "  nameservers: ada.ns.cloudflare.com, bob.ns.cloudflare.com (Cloudflare's)"
   contains "$out" "  asked Cloudflare to check the nameservers again"
-  grep -qx 'api PUT /zones/zone-moneyspider.dpdns.org/activation_check token=cf-token' "$d/fake.log"
+  grep -qx 'api PUT /zones/zone-sunbird.dpdns.org/activation_check token=cf-token' "$d/fake.log"
   # Active: ready, and the exit status says so.
-  out="$(TEST_CF_TOKEN=cf-token FAKE_DELEGATED="moneyspider.dpdns.org" FAKE_ZONES="moneyspider.dpdns.org:active" domain_in "$d" status moneyspider.dpdns.org 2>&1)"
+  out="$(TEST_CF_TOKEN=cf-token FAKE_DELEGATED="sunbird.dpdns.org" FAKE_ZONES="sunbird.dpdns.org:active" domain_in "$d" status sunbird.dpdns.org 2>&1)"
   contains "$out" "  Cloudflare: active"
-  contains "$out" 'ready: zone = "moneyspider.dpdns.org" in .freelunch/cloudflare/terraform.tfvars, then freelunch apply cloudflare'
+  contains "$out" 'ready: zone = "sunbird.dpdns.org" in .freelunch/cloudflare/terraform.tfvars, then freelunch apply cloudflare'
   # Without a token only the nameservers are checked; without a zone, add comes first.
-  out="$(FAKE_DELEGATED="moneyspider.dpdns.org" domain_in "$d" status moneyspider.dpdns.org 2>&1)"
+  out="$(FAKE_DELEGATED="sunbird.dpdns.org" domain_in "$d" status sunbird.dpdns.org 2>&1)"
   contains "$out" "  Cloudflare: not checked without CLOUDFLARE_API_TOKEN"
-  if out="$(TEST_CF_TOKEN=cf-token domain_in "$d" status moneyspider.dpdns.org 2>&1)"; then echo "status should have failed"; return 1; fi
-  contains "$out" "  Cloudflare: no zone for moneyspider.dpdns.org on this account yet (freelunch domain add moneyspider.dpdns.org)"
+  if out="$(TEST_CF_TOKEN=cf-token domain_in "$d" status sunbird.dpdns.org 2>&1)"; then echo "status should have failed"; return 1; fi
+  contains "$out" "  Cloudflare: no zone for sunbird.dpdns.org on this account yet (freelunch domain add sunbird.dpdns.org)"
 }
 
 test_domain_suggest_checks_names_first() {
@@ -1945,30 +1945,30 @@ test_init_sets_up_a_platform() {
 # The stack runs for real (it has no provider to download), and apply makes the project.
 test_apply_and_destroy_make_and_delete_the_project() {
   local p="$WORK/nf-apply" out
-  mkdir -p "$p/nf" && (cd "$p" && "$CLI" init --name moneyspider northflank) >/dev/null 2>&1
+  mkdir -p "$p/nf" && (cd "$p" && "$CLI" init --name sunbird northflank) >/dev/null 2>&1
   cp "$p/.freelunch/northflank/terraform.tfvars.example" "$p/.freelunch/northflank/terraform.tfvars"
   out="$(FREELUNCH_AUTO_APPROVE=1 nf_in "$p" apply northflank 2>&1)"
-  equals "$(jq -c . "$p/nf/projects/moneyspider.json")" '{"name":"moneyspider","region":"europe-west","description":"Managed by freelunch"}'
+  equals "$(jq -c . "$p/nf/projects/sunbird.json")" '{"name":"sunbird","region":"europe-west","description":"Managed by freelunch"}'
   grep -qx 'nf PUT /projects token=nf-token' "$p/fake.log"
-  contains "$out" "northflank: project moneyspider in europe-west"
-  contains "$out" "northflank-main is ready: Northflank project moneyspider in europe-west"
+  contains "$out" "northflank: project sunbird in europe-west"
+  contains "$out" "northflank-main is ready: Northflank project sunbird in europe-west"
   equals "$(jq -c '.outputs.platforms.value | map("\(.provider)-\(.name)")' "$p/.freelunch/hybrid/terraform.tfstate")" '["northflank-main"]'
   equals "$(jq -r '.outputs.platforms.value[0].max_services' "$p/.freelunch/northflank/terraform.tfstate")" 2
   # Destroy deletes what deploy put there too: the services and the registry logins.
-  mkdir -p "$p/nf/services/moneyspider"
-  echo '{"name":"api"}' > "$p/nf/services/moneyspider/api.json"
-  echo '{"name":"freelunch moneyspider ghcr.io"}' > "$p/nf/registries/freelunch-moneyspider-ghcr-io.json"
+  mkdir -p "$p/nf/services/sunbird"
+  echo '{"name":"api"}' > "$p/nf/services/sunbird/api.json"
+  echo '{"name":"freelunch sunbird ghcr.io"}' > "$p/nf/registries/freelunch-sunbird-ghcr-io.json"
   echo '{"name":"someone else"}' > "$p/nf/registries/someone-else.json"
   out="$(FREELUNCH_AUTO_APPROVE=1 nf_in "$p" destroy northflank 2>&1)"
-  absent "$p/nf/projects/moneyspider.json"
-  absent "$p/nf/services/moneyspider/api.json"
-  absent "$p/nf/registries/freelunch-moneyspider-ghcr-io.json"
+  absent "$p/nf/projects/sunbird.json"
+  absent "$p/nf/services/sunbird/api.json"
+  absent "$p/nf/registries/freelunch-sunbird-ghcr-io.json"
   exists "$p/nf/registries/someone-else.json"
-  contains "$out" "northflank: deleted the project moneyspider"
+  contains "$out" "northflank: deleted the project sunbird"
   equals "$(jq -c '.outputs.platforms.value // []' "$p/.freelunch/hybrid/terraform.tfstate")" '[]'
   # A second run finds nothing left to delete.
   out="$(FREELUNCH_AUTO_APPROVE=1 nf_in "$p" destroy northflank 2>&1)"
-  contains "$out" "northflank: there is no project moneyspider at Northflank"
+  contains "$out" "northflank: there is no project sunbird at Northflank"
 }
 
 test_apply_leaves_other_projects_alone() {

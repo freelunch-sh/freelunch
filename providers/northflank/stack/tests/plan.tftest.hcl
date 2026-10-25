@@ -23,12 +23,12 @@ run "the_project_is_named_after_the_project" {
   command = plan
 
   variables {
-    name_prefix = "moneyspider"
+    name_prefix = "sunbird"
     region      = "us-central"
   }
 
   assert {
-    condition     = output.platforms[0].id == "moneyspider" && terraform_data.project.input.region == "us-central"
+    condition     = output.platforms[0].id == "sunbird" && terraform_data.project.input.region == "us-central"
     error_message = "name_prefix is the Northflank project's ID."
   }
 }
