@@ -117,8 +117,8 @@ This writes two workflows:
 
 - `.github/workflows/freelunch-wait.yml` waits for capacity on a schedule. Each run makes one
   attempt with the plan you approved, and the workflow turns itself off once the host
-  exists, or when there is nothing to wait for. It runs every half hour in a private
-  repository and every quarter of an hour in a public one.
+  exists, or when there is nothing to wait for. It runs about every half hour in a private
+  repository and every quarter of an hour in a public one, as GitHub finds room.
 - `.github/workflows/freelunch.yml` runs `freelunch deploy` after the image workflow
   (`freelunch init --image-workflow`) pushes a new image of `main`, and any other command you
   start from the Actions tab or with `gh workflow run freelunch.yml -f run="status"`.
@@ -171,7 +171,10 @@ was approved stop it too. Every attempt is in the next availability domain, numb
 the run. While OCI is out of capacity, a run passes and the next one goes on; when the host
 exists, the run says so, `FREELUNCH_NOTIFY` (ntfy, Discord or Slack, from `.env`) gets a
 message, and the workflow turns itself off. A wait that stops for another reason fails the
-run, so GitHub tells you, and also turns the workflow off.
+run, so GitHub tells you. The workflow stays on, since what stopped one run may be gone by
+the next, until three runs in a row have failed; then it turns itself off, and once you have
+fixed the cause, `freelunch ci wait oci` (without `--plan`, as the approval is still there)
+turns it on again.
 
 ```bash
 freelunch status        # oci: waiting for capacity in CI since 2026-10-24T10:12:03Z (freelunch ci wait) ...
@@ -186,7 +189,9 @@ the bundle and turns the workflow off.
 
 A run takes a minute or two. In a public repository GitHub runs them for free; a private
 one on GitHub Free has 2,000 minutes a month, which lasts about 20 days of a run every half
-hour. Change the `cron` line to wait less often.
+hour. Change the `cron` line to wait less often. The schedule is a wish, not a promise:
+GitHub starts scheduled runs when it has room, so a run can come an hour or two late, and
+now and then not at all.
 
 ## 5. Deploy from GitHub Actions
 
@@ -280,4 +285,6 @@ AWS, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; for Azure, a service princ
 | `has changed since the plan was approved` | The tfvars in the bundle aren't the ones the plan was made with. Plan again, then `freelunch ci wait` with the new plan |
 | `its host key isn't pinned` (in CI) | Pin it here (`freelunch trust <host>`), then `freelunch ci secrets` |
 | `couldn't turn freelunch-wait.yml off` | The workflow lacks `permissions: actions: write`; turn it off in the Actions tab |
-| A run waits for minutes before it starts | GitHub starts scheduled runs late when it is busy, now and then not at all; the next one goes on |
+| A run waits for minutes before it starts, or comes hours late | GitHub starts scheduled runs late when it is busy, now and then not at all; the next one goes on |
+| `three runs in a row failed, so freelunch-wait.yml is off` | Fix what the runs' logs show, then `freelunch ci wait oci` turns it on again with the same approval |
+| `encrypting state takes OpenTofu` | `FREELUNCH_TF` isn't OpenTofu: the message says what its `version` printed. With Terraform, set `FREELUNCH_STATE_PASSPHRASE=none` |

@@ -190,7 +190,8 @@ For a project set up with freelunch from `main` before 1.0.0:
   puts the approval in the bundle and starts the wait workflow. Each run makes one attempt
   (`ci resume`), in the next availability domain, and applies only what the approval
   lists, with the tfvars it was made with; the workflow turns itself off once the host
-  exists. Meanwhile `status` shows the wait, and `apply` and `destroy` of that stack stop
+  exists, and after three failed runs in a row; `ci wait <stack>` without `--plan` turns it
+  on again. Meanwhile `status` shows the wait, and `apply` and `destroy` of that stack stop
   here; `ci wait --cancel` ends it. `FREELUNCH_WAIT_ATTEMPT` lets any scheduler go on with
   a wait from run to run, and such a run exits with 75 where `FREELUNCH_CAPACITY_TIMEOUT`
   pauses it.

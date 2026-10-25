@@ -76,7 +76,8 @@ CI:
   ci wait <stack> --plan <file> [--cancel]
                           Hand a wait for capacity to GitHub Actions: approve what the reviewed
                           plan changes, update FREELUNCH_BUNDLE and start the wait workflow.
-                          Each run then makes one attempt, until the host exists
+                          Each run then makes one attempt, until the host exists. Without
+                          --plan, a wait that stopped goes on with the approval it has
   ci restore [--force], ci resume
                           In a CI job: unpack FREELUNCH_BUNDLE (outside CI, files that are there
                           already are kept unless --force), and go on with approved waits
@@ -410,7 +411,11 @@ project_stacks() {
 }
 
 tool_name() { # tool_name: tofu or terraform, whichever TF is
-  if CHECKPOINT_DISABLE=1 "$TF" version 2>/dev/null | head -1 | grep -q OpenTofu; then echo tofu; else echo terraform; fi
+  # Not piped into head: under pipefail a tofu that writes again after head is gone dies of
+  # SIGPIPE, and the pipe fails although tofu is there.
+  local v
+  v="$(CHECKPOINT_DISABLE=1 "$TF" version 2>/dev/null)" || true
+  if [[ "$v" == *OpenTofu* ]]; then echo tofu; else echo terraform; fi
 }
 
 # state_encryption [fallback]: TF_ENCRYPTION for FREELUNCH_STATE_PASSPHRASE: AES-GCM with a
@@ -441,7 +446,10 @@ state_setup() {
       die "state: FREELUNCH_STATE_PASSPHRASE is not set. State holds secrets such as tunnel tokens, and the passphrase encrypts the copy in the store: put one of 16 characters or more in $(rel "$PROJECT")/.env and keep it somewhere safe too (FREELUNCH_STATE_PASSPHRASE=none keeps the copy unencrypted)" ;;
     none) ;;
     *)
-      [[ "$(tool_name)" == "tofu" ]] || die "state: encrypting state takes OpenTofu (FREELUNCH_TF=tofu). With Terraform, set FREELUNCH_STATE_PASSPHRASE=none, which keeps the copy in the store unencrypted"
+      if [[ "$(tool_name)" != "tofu" ]]; then
+        v="$(CHECKPOINT_DISABLE=1 "$TF" version 2>&1 | sed -n 1p)" || true
+        die "state: encrypting state takes OpenTofu, and $TF isn't it (its version says: ${v:-nothing}). Install OpenTofu and set FREELUNCH_TF=tofu, or, with Terraform, set FREELUNCH_STATE_PASSPHRASE=none, which keeps the copy in the store unencrypted"
+      fi
       [[ ${#FREELUNCH_STATE_PASSPHRASE} -ge 16 ]] || die "state: FREELUNCH_STATE_PASSPHRASE is too short: OpenTofu takes 16 characters or more"
       STATE_ENV+=("TF_ENCRYPTION=$(state_encryption "${1:-}")") ;;
   esac
@@ -4017,8 +4025,8 @@ github_workflows() {
 # Written by freelunch ci init. Waits for cloud capacity here instead of on your machine,
 # which can sleep: every run makes one attempt with the plan you approved (freelunch ci wait
 # <stack> --plan <file>), in the next availability domain each time, and the workflow turns
-# itself off once the host exists or when nothing is approved. freelunch ci wait turns it on
-# again.
+# itself off once the host exists, when nothing is approved, or after three failed runs in a
+# row. freelunch ci wait turns it on again.
 #
 # $minutes
 name: freelunch-wait
@@ -4448,6 +4456,22 @@ ci_wait() {
     fi
     return 0
   fi
+  # Without a plan, a wait CI has an approval for goes on: after a stop, or a cancel of the
+  # workflow by hand.
+  if [[ -z "$plan" && -f "$approval" ]]; then
+    state_setup
+    sync_pull "$stack"
+    if approval_done "$stack" "$approval"; then
+      rm -f "$approval"
+      log "$stack: the wait in CI is over: the state has everything its plan made"
+      return 0
+    fi
+    [[ "$where" == "github" ]] || die "ci wait: CI has an approved plan of $stack already; turn the pipeline schedule on again (Build > Pipeline schedules)"
+    make_bundle
+    upload_bundle
+    ci_start
+    return 0
+  fi
   [[ -n "$plan" ]] || die "ci wait: pass the plan you reviewed: freelunch plan $stack --out .freelunch/$stack/reviewed.tfplan, then freelunch ci wait $stack --plan .freelunch/$stack/reviewed.tfplan"
   [[ -f "$plan" ]] || die "ci wait: there is no plan at $plan"
   plan="$(abs_path "$plan")"
@@ -4498,11 +4522,22 @@ ci_schedule_off() {
   fi
 }
 
+# ci_failing: true when the two runs of the wait workflow before this one failed as well, or
+# when gh can't tell
+ci_failing() {
+  local runs n
+  runs="$(gh run list --workflow "$CI_WAIT_WORKFLOW" --limit 3 --json databaseId,conclusion 2>/dev/null)" || return 0
+  n="$(jq --arg id "${GITHUB_RUN_ID:-}" '[.[] | select((.databaseId | tostring) != $id)][:2] | map(select(.conclusion == "failure")) | length' <<< "$runs" 2>/dev/null)" || return 0
+  [[ "$n" == "2" ]]
+}
+
 # ci_resume: what a scheduled run does: one attempt for each approved wait (or as many as
 # FREELUNCH_CAPACITY_TIMEOUT has room for), numbered after the run, so that the next run
-# goes on in the next availability domain. Fails when a wait stopped for another reason.
+# goes on in the next availability domain. Fails when a wait stopped for another reason;
+# on GitHub the workflow stays on for the next run, unless that is the third failure in a
+# row, since what stopped this one may be gone by then.
 ci_resume() {
-  local f s n rc waiting=0 failed=0 approvals=()
+  local f s n rc waiting=0 failed="" approvals=()
   [[ -n "$PROJECT" ]] || die "ci resume: run it in a project, after freelunch ci restore"
   for f in "$PROJECT"/*/approved.json; do [[ ! -f "$f" ]] || approvals+=("$f"); done
   if [[ ${#approvals[@]} -eq 0 ]]; then
@@ -4518,11 +4553,20 @@ ci_resume() {
     case $rc in
       0)  ci_summary "$s: the wait is over, on attempt $n" ;;
       75) waiting=1; ci_summary "$s: still waiting after attempt $n; the next run goes on" ;;
-      *)  failed=1; ci_summary "$s: the wait stopped on attempt $n (see the log above)" ;;
+      *)  failed="${failed:-$s}"; ci_summary "$s: the wait stopped on attempt $n (see the log above)" ;;
     esac
   done
-  [[ $waiting -eq 1 ]] || ci_schedule_off
-  [[ $failed -eq 0 ]]
+  if [[ -n "$failed" && "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    if ci_failing; then
+      ci_schedule_off
+      ci_summary "three runs in a row failed, so $CI_WAIT_WORKFLOW is off. Fix what stopped them, then freelunch ci wait $failed turns it on again"
+    else
+      ci_summary "the next run tries again; after three failed runs in a row, $CI_WAIT_WORKFLOW turns itself off"
+    fi
+  elif [[ $waiting -eq 0 ]]; then
+    ci_schedule_off
+  fi
+  [[ -z "$failed" ]]
 }
 
 cmd_ci() {
