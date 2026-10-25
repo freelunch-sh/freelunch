@@ -26,6 +26,17 @@ variable "plan" {
   default     = "nf-compute-20"
 }
 
+variable "volume_size" {
+  description = "Size in MB of each volume freelunch deploy makes for an app's named volumes. Northflank's smallest is 4096; volumes can grow later but never shrink."
+  type        = number
+  default     = 4096
+
+  validation {
+    condition     = var.volume_size >= 4096 && floor(var.volume_size) == var.volume_size
+    error_message = "volume_size is a whole number of MB, 4096 (Northflank's smallest volume) or more."
+  }
+}
+
 variable "acknowledge_billable_resources" {
   description = "Allow plans outside the free Sandbox, and more services than it has."
   type        = bool

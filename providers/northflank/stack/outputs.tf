@@ -8,6 +8,8 @@ output "platforms" {
     region   = var.region
     arch     = "amd64"
     size     = var.plan
+    # A named volume in an app's Compose file becomes a Northflank volume of this size.
+    volume_size = var.volume_size
     # cloudflared runs as a service next to the apps, so Cloudflare Tunnel routes work.
     tunnel = true
     # Apps plus cloudflared; the free Sandbox has two services.

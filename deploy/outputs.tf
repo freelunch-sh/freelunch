@@ -11,17 +11,23 @@ output "targets" {
     condition     = length(local.missing_files) == 0
     error_message = "Files listed in apps.tfvars do not exist: ${join(", ", local.missing_files)}."
   }
+
+  precondition {
+    condition     = length(local.unknown_buckets) == 0
+    error_message = "Apps use buckets that no storage stack has made: ${join(", ", local.unknown_buckets)}. Known buckets: ${length(local.buckets) > 0 ? join(", ", sort(keys(local.buckets))) : "none"}. Add the bucket to that stack's buckets and apply it (freelunch apply backblaze-b2)."
+  }
 }
 
 output "platforms" {
-  description = "Deploy plan per container platform target: the provider's ID for it (the Northflank project), region and plan, and a service per app from its Compose file."
+  description = "Deploy plan per container platform target: the provider's ID for it (the Northflank project), region, plan and volume size, and a service per app from its Compose file."
   value = {
     for h, t in local.targets : h => {
-      provider = local.platforms[h].provider
-      id       = local.platforms[h].id
-      region   = local.platforms[h].region
-      size     = local.platforms[h].size
-      services = { for name, a in t.apps : name => try(local.specs[name], null) }
+      provider    = local.platforms[h].provider
+      id          = local.platforms[h].id
+      region      = local.platforms[h].region
+      size        = local.platforms[h].size
+      volume_size = try(local.platforms[h].volume_size, null)
+      services    = { for name, a in t.apps : name => try(local.specs[name], null) }
     } if t.kind == "platform"
   }
 
@@ -44,6 +50,12 @@ output "platforms" {
 output "tunnel_tokens" {
   description = "cloudflared token for each target that has a tunnel."
   value       = { for h in local.target_hosts : h => local.tokens[h] if contains(keys(local.tunnels), h) }
+  sensitive   = true
+}
+
+output "app_env" {
+  description = "Environment per app from its bucket: the S3 endpoint, region, bucket name and keys."
+  value       = local.app_env
   sensitive   = true
 }
 

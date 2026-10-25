@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: B2_APPLICATION_KEY_ID and B2_APPLICATION_KEY (or put them in .freelunch/.env).
+
+# Private buckets, each with a key that only reaches it. Bucket names are unique across
+# all of Backblaze, so each one is <name_prefix>-<name>, or name = "..." for a whole name.
+# An app takes one with bucket = "backblaze-b2-results" in apps.tfvars, and deploy puts
+# the S3 endpoint, region, bucket and key into its environment. The free tier is 10 GB in
+# all.
+buckets = {
+  results = {}
+}

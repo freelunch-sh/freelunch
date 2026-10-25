@@ -8,3 +8,8 @@ region = "europe-west"
 # runs plans up to nf-compute-20 (0.2 vCPU, 512 MB). With the cloudflare stack, cloudflared
 # takes the second service, on nf-compute-10 (0.1 vCPU, 256 MB).
 plan = "nf-compute-20"
+
+# Size in MB of each volume deploy makes for a named volume in an app's Compose file.
+# 4096 is Northflank's smallest, about $0.47 a month of the Sandbox's $20. Volumes grow
+# when this grows, and never shrink.
+# volume_size = 4096

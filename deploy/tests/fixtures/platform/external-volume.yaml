@@ -1,0 +1,7 @@
+services:
+  api:
+    image: traefik/whoami
+    volumes: ["results:/data"]
+volumes:
+  results:
+    external: true

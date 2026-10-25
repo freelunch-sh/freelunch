@@ -1,19 +1,29 @@
 # freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+# The `limits` block is also read by providers/backblaze-b2/stack.
 name: backblaze-b2
 display_name: "Backblaze B2"
 category: storage
-status: planned
+status: ready
 layer: service
+recommended: true
 terraform_provider: "Backblaze/b2"
 iac: partner
 free_tier_type: always-free
-free_tier: "10 GB S3-compatible storage"
+free_tier: "10 GB S3-compatible storage, always free; downloads free up to 3x the average stored"
 card_required: "no"
 url: "https://www.backblaze.com/cloud-storage/pricing"
-last_verified: "2026-10-18"
-notes: null
+last_verified: "2026-10-25"
+notes: "Buckets for apps: each one private, with a key that only reaches it, and its S3 settings in the app's environment on freelunch deploy."
 sources:
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
+  - "backblaze.com/cloud-storage/pricing (10 GB free, downloads free up to 3x the average stored, checked 2026-10-25)"
+  - "Backblaze/b2 provider 0.14.1 schema: b2_bucket, b2_application_key (bucket_ids), b2_account_info (s3_api_url), checked 2026-10-25"
 inspire:
   - "repos/terraform-providers/Backblaze-terraform-provider-b2"
+
+limits:
+  storage_gb: 10
+  # What a bucket's key may do: S3 clients list, read, write and delete in their bucket,
+  # and some ask for the bucket list first.
+  key_capabilities: [listBuckets, listAllBucketNames, listFiles, readFiles, writeFiles, deleteFiles]

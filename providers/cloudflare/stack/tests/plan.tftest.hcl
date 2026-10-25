@@ -17,6 +17,10 @@ mock_provider "cloudflare" {
   mock_data "cloudflare_zero_trust_tunnel_cloudflared_token" {
     defaults = { token = "mock-tunnel-token" }
   }
+
+  mock_resource "cloudflare_account_token" {
+    defaults = { id = "ed17574386854bf78a67040be0a770b0", value = "mock-r2-token" }
+  }
 }
 
 variables {
@@ -125,4 +129,63 @@ run "platforms_without_cloudflared_get_no_routes" {
   }
 
   expect_failures = [terraform_data.checks]
+}
+
+run "r2_buckets_get_a_key_of_their_own" {
+  command = apply
+
+  variables {
+    name_prefix = "shop"
+    buckets     = { results = { location = "weur" } }
+    # Terraform's mocks can't fill in the permission groups the stack looks up.
+    r2_permission_group_id = "2efd5506f9c8494dacb1fa10a3e7d5b6"
+  }
+
+  assert {
+    condition     = cloudflare_r2_bucket.this["results"].name == "shop-results" && cloudflare_r2_bucket.this["results"].location == "weur"
+    error_message = "An R2 bucket is <name_prefix>-<name> in the zone's account."
+  }
+
+  assert {
+    condition = (
+      [for g in one(cloudflare_account_token.r2["results"].policies).permission_groups : g.id] == ["2efd5506f9c8494dacb1fa10a3e7d5b6"] &&
+      jsondecode(one(cloudflare_account_token.r2["results"].policies).resources) == { "com.cloudflare.edge.r2.bucket.699d98642c564d2e855e9661899b7252_default_shop-results" = "*" }
+    )
+    error_message = "The bucket's token reads, writes and lists objects in that bucket only."
+  }
+
+  assert {
+    condition = output.buckets == [{
+      provider = "cloudflare", name = "results", bucket = "shop-results",
+      endpoint = "https://699d98642c564d2e855e9661899b7252.r2.cloudflarestorage.com", region = "auto"
+    }]
+    error_message = "The storage contract: provider, name, bucket, S3 endpoint and region."
+  }
+
+  assert {
+    condition = nonsensitive(output.bucket_keys["cloudflare-results"]) == {
+      access_key_id     = "ed17574386854bf78a67040be0a770b0"
+      secret_access_key = sha256("mock-r2-token")
+    }
+    error_message = "R2 takes the token's ID as the access key and the SHA-256 of its value as the secret."
+  }
+}
+
+run "no_buckets_need_no_token_permissions" {
+  command = plan
+
+  assert {
+    condition     = length(data.cloudflare_account_api_token_permission_groups_list.all) == 0 && output.buckets == []
+    error_message = "Without buckets the stack doesn't look up token permissions, so the tunnel token needs none."
+  }
+}
+
+run "r2_names_cloudflare_refuses_fail" {
+  command = plan
+
+  variables {
+    buckets = { "results-" = {} }
+  }
+
+  expect_failures = [terraform_data.r2_checks]
 }

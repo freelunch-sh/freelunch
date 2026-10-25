@@ -21,3 +21,11 @@ routes = {
   # prints the client ID and secret.
   # "internal.example.com" = { host = "oci-main", port = 8081, access = { service_tokens = ["backend"] } }
 }
+
+# Private R2 buckets, each with a key that only reaches it. An app takes one with
+# bucket = "cloudflare-results" in apps.tfvars, and deploy puts the S3 endpoint, bucket and
+# key into its environment. Turn R2 on in the dashboard first; the token needs two more
+# permissions (providers/cloudflare/README.md#r2-buckets).
+# buckets = {
+#   results = {}
+# }

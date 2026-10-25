@@ -68,6 +68,8 @@ permissions:
 | Account → Cloudflare Tunnel | Edit | create tunnels, set ingress rules, read the token (newer dashboards call it *Cloudflare One Connector: cloudflared*) |
 | Account → Access: Apps and Policies | Edit | only if a route uses `access` |
 | Account → Access: Service Tokens | Edit | only if a route uses `service_tokens` |
+| Account → Workers R2 Storage | Edit | only for `buckets` ([R2 buckets](#r2-buckets)) |
+| Account → Account API Tokens | Edit | only for `buckets`: each bucket gets a token of its own |
 
 Limit *Zone Resources* to the one zone and *Account Resources* to your account. Then put the
 token in `.freelunch/.env` (git-ignored):
@@ -172,6 +174,32 @@ To renew it, replace it and give the new secret to your clients:
 freelunch apply cloudflare -- -replace='module.tunnel.cloudflare_zero_trust_access_service_token.this["backend"]'
 ```
 
+### R2 buckets
+
+`buckets` makes private R2 buckets in the zone's account, each with a key that can only read
+, write and list the objects in it (the permission group *Workers R2 Storage Bucket Item
+Write*). An app takes one with `bucket = "cloudflare-<name>"` in
+apps.tfvars, and `freelunch deploy` puts the S3 endpoint, region (`auto`), bucket name and
+key into its environment ([what it gets](../../deploy/README.md#appstfvars)):
+
+```hcl
+# cloudflare/terraform.tfvars
+buckets = {
+  results = {}                        # freelunch-results, or <name_prefix>-results
+  # backups = { location = "weur" }   # a location hint; Cloudflare picks one without it
+}
+
+# apps.tfvars
+api = { host = "northflank-main", compose = "../compose.yaml", bucket = "cloudflare-results" }
+```
+
+R2's free tier is 10 GB a month of standard storage, with no fees for downloads. Turn R2 on
+once in the dashboard (*R2 Object Storage*) before the first apply; guides report that
+Cloudflare asks for a payment method then, though the free tier costs nothing. The key is an
+account API token, which R2 takes as an S3 key: its ID is the access key and the SHA-256 of
+its value the secret. It is in the stack's state, like the tunnel tokens. Not live-tested
+yet. For buckets without a card, use [Backblaze B2](../backblaze-b2/).
+
 ### Inputs
 
 | Name | Default | Description |
@@ -181,12 +209,15 @@ freelunch apply cloudflare -- -replace='module.tunnel.cloudflare_zero_trust_acce
 | `account_id` | the zone's account | Account that owns the tunnels |
 | `name_prefix` | `freelunch` | Tunnels are named `<prefix>-<host>`, service tokens `<prefix>-<name>`. `freelunch init` sets it to the project's name |
 | `service_token_duration` | `8760h` | How long a service token is valid (`forever` for no expiry) |
+| `buckets` | `{}` | R2 buckets, `<name_prefix>-<name>`, each with a key of its own ([above](#r2-buckets)) |
+| `r2_permission_group_id` | looked up | ID of the permission group *Workers R2 Storage Bucket Item Write*, which each bucket's key gets |
 | `inventory_state_path` | `hybrid/terraform.tfstate` | Set by `bin/freelunch` in project mode |
 
 ### Outputs
 
 `tunnels` (host → tunnel ID), `tunnel_tokens` (sensitive, read by `freelunch deploy`),
-`routes`, `urls`, and `service_tokens` (sensitive: client ID, secret and expiry per token).
+`routes`, `urls`, `service_tokens` (sensitive: client ID, secret and expiry per token), and
+`buckets` and `bucket_keys` (sensitive), which `freelunch deploy` reads for apps with a bucket.
 `freelunch output cloudflare <name>` prints one.
 
 ### As a module
@@ -230,11 +261,10 @@ bin/freelunch test
 | Suite | Covers |
 |---|---|
 | `modules/tunnel/tests/tunnel.tftest.hcl` | One tunnel per host, ingress per route with the catch-all last, proxied CNAMEs, tokens per host, Access only where asked, service tokens under a Service Auth policy, input validation |
-| `stack/tests/plan.tftest.hcl` | Zone and account lookup by name, routes must point at inventory hosts and stay inside the zone, routes to a platform go to `<app>:<port>` and need `app` |
+| `stack/tests/plan.tftest.hcl` | Zone and account lookup by name, routes must point at inventory hosts and stay inside the zone, routes to a platform go to `<app>:<port>` and need `app`, R2 buckets and their keys |
 
 ## Roadmap
 
 - [ ] Path-based routes (several services under one hostname)
 - [ ] Tunnel replicas on two hosts for failover
-- [ ] R2 bucket for backups (v1.5)
 - [ ] Pages and Workers for static sites (`static-edge` menu)

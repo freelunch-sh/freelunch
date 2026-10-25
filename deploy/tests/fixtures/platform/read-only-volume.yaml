@@ -1,0 +1,6 @@
+services:
+  api:
+    image: traefik/whoami
+    volumes: ["results:/data:ro"]
+volumes:
+  results: {}

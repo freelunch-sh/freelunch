@@ -55,3 +55,27 @@ variable "inventory_state_path" {
   type        = string
   default     = null
 }
+
+variable "buckets" {
+  description = <<-EOT
+    R2 buckets to make, keyed by name, e.g. { results = {} }. Each one is
+    <name_prefix>-<name> in the account, with an R2 key of its own that can only reach
+    it. An app takes one with bucket = "cloudflare-<name>" in apps.tfvars. location is a
+    hint, such as weur or enam; Cloudflare picks one near you without it.
+  EOT
+  type = map(object({
+    location = optional(string)
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for k in keys(var.buckets) : can(regex("^[a-z0-9][a-z0-9-]*$", k))])
+    error_message = "Bucket keys are lowercase letters, digits and hyphens, e.g. results."
+  }
+}
+
+variable "r2_permission_group_id" {
+  description = "ID of Cloudflare's permission group Workers R2 Storage Bucket Item Write, which each bucket's key gets. null looks it up by name."
+  type        = string
+  default     = null
+}
