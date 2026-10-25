@@ -123,10 +123,12 @@ This writes two workflows:
   (`freelunch init --image-workflow`) pushes a new image of `main`, and any other command you
   start from the Actions tab or with `gh workflow run freelunch.yml -f run="status"`.
 
-Both use the action in this repository (`uses: freelunch-sh/freelunch@<tag>`), which sets up
-the same tofu or terraform version you have, unpacks the bundle and runs the command. With
-freelunch as a submodule, they use the submodule's copy (`uses: ./freelunch`), so the
-workflows always run the version the project pins. Commit and push both files.
+Both use the action in this repository (`uses: freelunch-sh/freelunch@<version>`, also
+listed on the GitHub Marketplace as *Run freelunch*), which sets up the same tofu or
+terraform version you have, unpacks the bundle and runs the command with the freelunch
+version in `.freelunch/version`. After `freelunch upgrade`, the workflows run the new version
+without an edit. With freelunch as a submodule, they use the submodule's copy
+(`uses: ./freelunch`) instead. Commit and push both files.
 
 ## 3. The secret
 

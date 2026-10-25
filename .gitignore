@@ -25,6 +25,9 @@ known_hosts
 wait.log
 wait.state
 
+# The version an install wrote into its copy (install.sh, freelunch upgrade)
+/.version
+
 # A project folder at the root of the checkout (examples/ keep theirs)
 /.freelunch/
 
