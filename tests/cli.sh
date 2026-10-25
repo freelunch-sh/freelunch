@@ -254,7 +254,8 @@ cat > "$WORK/sleepy-bin/date" <<'EOF'
 if [[ "$*" == "+%s" ]]; then echo $(( $(/bin/date +%s) + $(cat "$FAKE_LOG.clock" 2>/dev/null || echo 0) )); else exec /bin/date "$@"; fi
 EOF
 # A gh that logs what it is asked. The repository is me/shop, with the visibility in
-# FAKE_VISIBILITY (PRIVATE by default), and a secret it sets lands in $FAKE_GH/<name>.
+# FAKE_VISIBILITY (PRIVATE by default), and a secret it sets lands in $FAKE_GH/<name>. Its
+# runs are FAKE_RUNS, as the JSON of gh run list.
 mkdir -p "$WORK/gh-bin"
 cat > "$WORK/gh-bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -265,10 +266,18 @@ case "$1 $2" in
   "secret set")
     mkdir -p "$FAKE_GH" && cat > "$FAKE_GH/$3" ;;
   "workflow enable"|"workflow disable"|"workflow run") ;;
+  "run list") echo "${FAKE_RUNS:-[]}" ;;
   *) exit 1 ;;
 esac
 EOF
-chmod +x "$WORK/sleepy-bin/"* "$WORK/gh-bin/gh"
+# The real tofu/terraform, except that its version comes in two writes with a pause between,
+# as on a slow runner
+cat > "$WORK/bin/slow-tf" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "version" ]]; then v="$("$REAL_TF" version)"; echo "${v%%$'\n'*}"; sleep 0.3; echo "${v#*$'\n'}"; exit 0; fi
+exec "$REAL_TF" "$@"
+EOF
+chmod +x "$WORK/sleepy-bin/"* "$WORK/gh-bin/gh" "$WORK/bin/slow-tf"
 mkdir -p "$WORK/nf-bin" && ln -s "$WORK/wait-bin/sleep" "$WORK/nf-bin/sleep"
 # Secret stores: 1Password's op knows op://Private/GHCR/token, the macOS keychain knows
 # freelunch-cloudflare. Both log what they are asked.
@@ -2588,6 +2597,10 @@ test_ci_init_writes_the_workflows() {
   fails grep -q '^  workflow_run:' "$p/.github/workflows/freelunch.yml"
   contains "$out" "freelunch state init oci (or r2, b2, gitlab)"
   if command -v actionlint >/dev/null; then actionlint "$wait" "$p/.github/workflows/freelunch.yml"; fi
+  # A version that comes in two writes is still the same tool.
+  rm -r "$p/.github"
+  TEST_TF="$WORK/bin/slow-tf" ci_in "$p" ci init >/dev/null 2>&1
+  grep -qx "          tool: $(basename "$REAL_TF")" "$wait"
   rm -r "$p/.github"
   mkdir -p "$p/.github/workflows" && touch "$p/.github/workflows/image.yml"
   FAKE_VISIBILITY=PUBLIC ci_in "$p" ci init >/dev/null 2>&1
@@ -2626,6 +2639,12 @@ test_ci_wait_hands_a_reviewed_plan_to_ci() {
   exists "$p-store/oci.tfstate"
   # This machine leaves the stack to CI meanwhile.
   contains "$(freelunch_in "$p" status)" "oci: waiting for capacity in CI since 2026-"
+  # Without --plan, the wait goes on with the approval it has, after the workflow stopped.
+  rm "$p/fake.log"
+  TEST_TF="$WORK/bin/fake-tf" TEST_CLI="$p-checkout/bin/freelunch" ci_in "$p" ci wait oci >/dev/null 2>&1
+  grep -qx 'gh workflow enable freelunch-wait.yml' "$p/fake.log"
+  grep -qx 'gh workflow run freelunch-wait.yml' "$p/fake.log"
+  exists "$p/.freelunch/oci/approved.json"
   if out="$(apply_in "$p" oci 2>&1)"; then echo "apply should have failed"; return 1; fi
   contains "$out" "CI waits for capacity for this stack"
   out="$(TEST_TF="$WORK/bin/fake-tf" TEST_CLI="$p-checkout/bin/freelunch" ci_in "$p" ci wait oci --cancel 2>&1)"
@@ -2666,10 +2685,21 @@ test_ci_resume_makes_an_attempt_per_run() {
   contains "$out" "oci: the wait is over, on attempt 13"
   grep -q '^desktop: oci: got the host on attempt 13' "$p/fake.log"
   grep -qx 'gh workflow disable freelunch-wait.yml' "$p/fake.log"
-  # A wait that stops for another reason fails the run.
+  # A wait that stops for another reason fails the run. The workflow stays on for the next
+  # run, unless the two before failed as well.
   rm "$p/fake.log"*
-  if out="$(FAKE_APPLY=auth FAKE_PLAN="$main" TEST_TF="$WORK/bin/fake-tf" TEST_CLI="$p-checkout/bin/freelunch" ci_in "$p" ci resume 2>&1)"; then echo "ci resume should have failed"; return 1; fi
-  contains "$out" "oci: the wait stopped on attempt 1"
+  if out="$(GITHUB_ACTIONS=true GITHUB_RUN_ID=3 GITHUB_RUN_NUMBER=14 GITHUB_WORKFLOW_REF=me/shop/.github/workflows/freelunch-wait.yml@refs/heads/main \
+    FAKE_RUNS='[{"databaseId":3,"conclusion":""},{"databaseId":2,"conclusion":"failure"},{"databaseId":1,"conclusion":"success"}]' \
+    FAKE_APPLY=auth FAKE_PLAN="$main" TEST_TF="$WORK/bin/fake-tf" TEST_CLI="$p-checkout/bin/freelunch" ci_in "$p" ci resume 2>&1)"; then echo "ci resume should have failed"; return 1; fi
+  contains "$out" "oci: the wait stopped on attempt 14"
+  contains "$out" "the next run tries again"
+  fails grep -q '^gh workflow disable' "$p/fake.log"
+  rm "$p/fake.log"*
+  if out="$(GITHUB_ACTIONS=true GITHUB_RUN_ID=4 GITHUB_RUN_NUMBER=15 GITHUB_WORKFLOW_REF=me/shop/.github/workflows/freelunch-wait.yml@refs/heads/main \
+    FAKE_RUNS='[{"databaseId":4,"conclusion":""},{"databaseId":3,"conclusion":"failure"},{"databaseId":2,"conclusion":"failure"}]' \
+    FAKE_APPLY=auth FAKE_PLAN="$main" TEST_TF="$WORK/bin/fake-tf" TEST_CLI="$p-checkout/bin/freelunch" ci_in "$p" ci resume 2>&1)"; then echo "ci resume should have failed"; return 1; fi
+  contains "$out" "three runs in a row failed, so freelunch-wait.yml is off. Fix what stopped them, then freelunch ci wait oci turns it on again"
+  grep -qx 'gh workflow disable freelunch-wait.yml' "$p/fake.log"
   # Nothing approved: nothing to do, and the schedule goes off.
   rm "$p/fake.log"* "$p/.freelunch/oci/approved.json"
   out="$(GITHUB_ACTIONS=true GITHUB_WORKFLOW_REF=me/shop/.github/workflows/freelunch-wait.yml@refs/heads/main \
