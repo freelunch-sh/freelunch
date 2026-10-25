@@ -1,7 +1,9 @@
 # freelunch as a GitHub Action: runs a freelunch command in a job, with the project's state
 # from its state store and the files git doesn't have from the FREELUNCH_BUNDLE secret.
-# freelunch ci init writes workflows that use it; docs/ci.md has the rest.
-name: freelunch
+# freelunch ci init writes workflows that use it; docs/ci.md has the rest. It runs the
+# freelunch version the project pins in .freelunch/version, whichever tag the workflow uses.
+# The GitHub Marketplace takes no name that is a GitHub user's, and the user freelunch exists.
+name: Run freelunch
 description: Run freelunch in a workflow, with the project's state store and the FREELUNCH_BUNDLE secret
 branding:
   icon: cloud

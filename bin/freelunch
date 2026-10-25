@@ -3,9 +3,18 @@
 # inventory, and deploy Compose apps to the hosts.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Through the links an install makes (~/.local/bin/freelunch, the current version) to the code.
+self="${BASH_SOURCE[0]}"
+while [[ -L "$self" ]]; do
+  link="$(readlink "$self")"
+  [[ "$link" == /* ]] || link="$(dirname "$self")/$link"
+  self="$link"
+done
+ROOT="$(cd "$(dirname "$self")/.." && pwd)"
+unset self link
 PROVIDERS_DIR="$ROOT/providers"
 README="$ROOT/README.md"
+SOURCE="${FREELUNCH_SOURCE:-https://github.com/freelunch-sh/freelunch}"
 TF="${FREELUNCH_TF:-$(command -v tofu || command -v terraform || true)}"
 SSH="${FREELUNCH_SSH:-ssh}"
 INIT_STACKS=(oci cloudflare)
@@ -48,6 +57,9 @@ Project:
                           healthy. On a container platform (northflank) each app becomes a
                           service through its API instead. Targets: all (default), a provider
                           (oci) or a host (oci-main). --dry-run prints what it would do
+  version                 This freelunch's version, and the one the project pins
+  upgrade [version]       Install a release (the latest by default, or v1.2.0, main or a commit)
+                          as the freelunch on this machine, and pin the project to it
   trust <host>            Pin a host's SSH keys in known_hosts from its serial console, so the
                           first deploy talks to the right machine (OCI hosts)
   domain suggest <name...>
@@ -115,6 +127,9 @@ Development:
                           folders, e.g. test providers/cloudflare deploy tests
   fmt [-check]            Format all HCL, or only check it
 
+A project pins its freelunch in .freelunch/version (init writes it). An installed freelunch,
+the action and the runner image run the version it pins, downloaded the first time into
+FREELUNCH_HOME (default ~/.local/share/freelunch); a freelunch checkout runs its own code.
 In a repository with a .freelunch/ folder (looked up from the current directory, or set
 FREELUNCH_PROJECT), terraform.tfvars, state, inventory.json and .env live in that folder.
 A value in .env can be op://<vault>/<item>/<field> (1Password) or keychain:<name> (macOS
@@ -171,6 +186,132 @@ find_project() {
     if [[ -d "$d/.freelunch" ]]; then PROJECT="$d/.freelunch"; return 0; fi
     d="$(dirname "$d")"
   done
+}
+
+# --- Versions -------------------------------------------------------------------------
+
+# An install keeps each version in a folder of its own under FREELUNCH_HOME, named after it
+# and marked with a .version file: ~/.local/share/freelunch/v1.2.0, ...; current links to the
+# one ~/.local/bin/freelunch runs. A project pins one in .freelunch/version.
+versions_home() { echo "${FREELUNCH_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/freelunch}"; }
+
+# A pin is a release tag or a full commit, never a branch, which would move under it.
+valid_version() { [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*$ || "$1" =~ ^[0-9a-f]{40}$ ]]; }
+
+# self_version: this copy's version: what an install wrote, or in a checkout its tag or commit
+self_version() {
+  if [[ -f "$ROOT/.version" ]]; then cat "$ROOT/.version"
+  elif [[ -e "$ROOT/.git" ]]; then
+    git -C "$ROOT" describe --tags --exact-match 2>/dev/null || git -C "$ROOT" rev-parse HEAD 2>/dev/null || true
+  fi
+}
+
+# release_version: the version a project can pin to run this copy: an installed one, or a
+# checkout at a release tag. A checkout's other commits may exist only here.
+release_version() {
+  if [[ -f "$ROOT/.version" ]]; then cat "$ROOT/.version"
+  elif [[ -e "$ROOT/.git" ]]; then git -C "$ROOT" describe --tags --exact-match 2>/dev/null || true
+  fi
+}
+
+pinned_version() {
+  if [[ -n "$PROJECT" && -f "$PROJECT/version" ]]; then tr -d '[:space:]' < "$PROJECT/version"; fi
+}
+
+# latest_version: the newest release tag of the source, or main's commit before the first one
+latest_version() {
+  local tag
+  tag="$(git ls-remote --tags --refs "$SOURCE" 'v*' 2>/dev/null | sed 's#.*refs/tags/##' \
+    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+  [[ -n "$tag" ]] || tag="$(main_commit)"
+  echo "$tag"
+}
+
+main_commit() {
+  local sha
+  sha="$(git ls-remote "$SOURCE" refs/heads/main 2>/dev/null | cut -f1)"
+  [[ -n "$sha" ]] || die "can't reach $SOURCE (git ls-remote failed)"
+  echo "$sha"
+}
+
+# fetch_version <version>: the folder of that version, downloaded the first time
+fetch_version() {
+  local ref="$1" home dir tmp
+  valid_version "$ref" || die "'$ref' isn't a version: use a release tag like v1.2.0 or a full commit"
+  home="$(versions_home)"; dir="$home/$ref"
+  if [[ ! -f "$dir/.version" ]]; then
+    command -v git >/dev/null || die "freelunch $ref has to be downloaded, which needs git"
+    mkdir -p "$home"
+    tmp="$(mktemp -d "$home/.download.XXXXXX")"
+    log "downloading freelunch $ref from $SOURCE"
+    if ! { git -C "$tmp" init -q && git -C "$tmp" fetch -q --depth 1 "$SOURCE" "$ref" \
+        && git -C "$tmp" -c advice.detachedHead=false checkout -q FETCH_HEAD; } >&2; then
+      rm -rf "$tmp"; die "can't download freelunch $ref from $SOURCE"
+    fi
+    rm -rf "$tmp/.git"
+    echo "$ref" > "$tmp/.version"
+    # Another run may have downloaded it meanwhile.
+    if [[ -f "$dir/.version" ]]; then rm -rf "$tmp"; else rm -rf "$dir"; mv "$tmp" "$dir"; fi
+  fi
+  echo "$dir"
+}
+
+# switch_version <args...>: run the version the project pins, when this is another one. A
+# checkout (development, or a submodule) always runs its own code.
+switch_version() {
+  local pin dir
+  pin="$(pinned_version)"
+  [[ -n "$pin" && ! -e "$ROOT/.git" && "$pin" != "$(self_version)" ]] || return 0
+  dir="$(fetch_version "$pin")"
+  exec "$dir/bin/freelunch" "$@"
+}
+
+cmd_version() {
+  local v pin
+  [[ $# -eq 0 ]] || die "version takes no arguments"
+  v="$(self_version)"
+  echo "freelunch ${v:-(unknown version)} in $ROOT"
+  [[ -n "$PROJECT" ]] || return 0
+  pin="$(pinned_version)"
+  if [[ -z "$pin" ]]; then echo "the project pins no version: freelunch init or freelunch upgrade pins it"
+  elif [[ "$pin" == "$v" ]]; then echo "the project pins this version ($(rel "$PROJECT/version"))"
+  elif [[ -e "$ROOT/.git" ]]; then echo "the project pins $pin; this checkout runs its own code"
+  else echo "the project pins $pin, which runs instead"
+  fi
+}
+
+# upgrade [version]: install that version (the latest release by default) as the freelunch
+# this machine runs, and in a project pin it there too
+cmd_upgrade() {
+  local ref="${1:-}" home bin old t missing=()
+  [[ $# -le 1 ]] || die "upgrade takes one version at most"
+  command -v git >/dev/null || die "upgrade needs git"
+  case "$ref" in
+    "")   ref="$(latest_version)" ;;
+    main) ref="$(main_commit)" ;;
+  esac
+  fetch_version "$ref" >/dev/null
+  home="$(versions_home)"
+  ln -sfn "$ref" "$home/current"
+  bin="${FREELUNCH_BIN:-$HOME/.local/bin}"
+  mkdir -p "$bin"
+  if [[ -e "$bin/freelunch" && ! -L "$bin/freelunch" ]]; then
+    die "$bin/freelunch is a file of its own; remove it, or set FREELUNCH_BIN to another folder"
+  fi
+  ln -sfn "$home/current/bin/freelunch" "$bin/freelunch"
+  log "freelunch $ref is installed: $bin/freelunch"
+  case ":$PATH:" in
+    *":$bin:"*) ;;
+    *) log "$bin isn't in PATH: add export PATH=\"$bin:\$PATH\" to your shell's profile" ;;
+  esac
+  for t in jq ssh; do command -v "$t" >/dev/null || missing+=("$t"); done
+  command -v tofu >/dev/null || command -v terraform >/dev/null || missing+=("tofu (or terraform)")
+  [[ ${#missing[@]} -eq 0 ]] || log "freelunch also needs: ${missing[*]}"
+  [[ -n "$PROJECT" ]] || return 0
+  old="$(pinned_version)"
+  [[ "$old" != "$ref" ]] || return 0
+  echo "$ref" > "$PROJECT/version"
+  log "pinned the project to $ref in $(rel "$PROJECT/version")${old:+ (was $old)}: commit it, and see what changes with freelunch plan all"
 }
 
 # Export KEY=VALUE lines from a dotenv file without running it as shell code. Variables that
@@ -1944,6 +2085,11 @@ cmd_init() {
     printf '\n# Added by freelunch init\n%s\n' "$missing" >> "$cfg/.gitignore"
     log "added to $(rel "$cfg/.gitignore"): $(paste -sd' ' - <<< "$missing")"
   fi
+  # The version the project runs: an installed freelunch, the action and the runner image
+  # switch to it. A checkout off a release tag has nothing to pin.
+  local release
+  release="$(release_version)"
+  if [[ -n "$release" ]]; then echo "$release" | write_new "$cfg/version"; fi
 
   # The first host or platform runs the app. On a platform the app becomes a service named
   # after it, and those names are stricter: letters, digits and single hyphens.
@@ -3984,12 +4130,13 @@ ci_ready() {
 }
 
 # action_ref <project root>: how its workflows use freelunch's action: the submodule's copy,
-# or this release on GitHub
+# or the version the project pins (which the action switches to anyway) on GitHub
 action_ref() {
-  local tag
+  local ref
   case "$ROOT" in "$1"/*) echo "./${ROOT#"$1"/}"; return 0 ;; esac
-  tag="$(git -C "$ROOT" describe --tags --exact-match 2>/dev/null || true)"
-  echo "freelunch-sh/freelunch@${tag:-main}"
+  ref="$(pinned_version)"
+  [[ -n "$ref" ]] || ref="$(release_version)"
+  echo "freelunch-sh/freelunch@${ref:-main}"
 }
 
 # tool_version: the version of tofu/terraform here, for CI to use the same
@@ -4652,6 +4799,10 @@ main() {
   if [[ -n "${FREELUNCH_PROJECT:-}" && -z "$PROJECT" && "$cmd" != "init" ]]; then
     die "FREELUNCH_PROJECT=$FREELUNCH_PROJECT has no .freelunch folder (run freelunch init there)"
   fi
+  case "$cmd" in
+    version|upgrade|help|-h|--help) ;;
+    *) switch_version "$cmd" "$@" ;;
+  esac
   load_env_file "$(state_root)/.env"
   # Secrets from a store are read by the commands that use credentials (domain: add and
   # status; doctor reports on them; ci secrets and ci wait put them in the bundle).
@@ -4664,6 +4815,8 @@ main() {
   esac
   case "$cmd" in
     init)                 cmd_init "$@" ;;
+    version)              cmd_version "$@" ;;
+    upgrade)              cmd_upgrade "$@" ;;
     state)                resolve_state_refs; cmd_state "$@" ;;
     ci)                   cmd_ci "$@" ;;
     deploy)               cmd_deploy "$@" ;;

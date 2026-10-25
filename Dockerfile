@@ -26,6 +26,9 @@ RUN set -eux; \
 ENV FREELUNCH_TF=tofu
 
 COPY . /opt/freelunch
+# The release's tag, so a project pinned to it runs the code here instead of downloading it
+ARG FREELUNCH_VERSION=""
+RUN if [ -n "$FREELUNCH_VERSION" ]; then echo "$FREELUNCH_VERSION" > /opt/freelunch/.version; fi
 
 # The project is mounted here; the CLI finds its .freelunch/ folder from the working directory.
 WORKDIR /project

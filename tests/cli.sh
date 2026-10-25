@@ -2748,6 +2748,117 @@ test_state_init_sets_up_a_store() {
   fails ci_in "$p" state init dropbox
 }
 
+# installed_copy <version>: freelunch as an install leaves it, a copy marked with .version
+installed_copy() {
+  local dir="$WORK/installed/$1" f
+  if [[ ! -d "$dir" ]]; then
+    mkdir -p "$dir/bin"
+    for f in "$ROOT"/*; do [[ "$(basename "$f")" == bin ]] || ln -s "$f" "$dir/"; done
+    cp "$CLI" "$dir/bin/"
+    echo "$1" > "$dir/.version"
+  fi
+  echo "$dir"
+}
+
+# source_repo: a git repository of releases v1.9.0 and v1.10.0 and a commit on main after
+# them, each with a CLI that only says which one it is
+source_repo() {
+  local src="$WORK/source" v
+  if [[ ! -d "$src" ]]; then
+    mkdir -p "$src/bin"
+    git -C "$src" init -q -b main
+    for v in v1.9.0 v1.10.0 next; do
+      printf '#!/usr/bin/env bash\necho "%s: $*"\n' "$v" > "$src/bin/freelunch"
+      chmod +x "$src/bin/freelunch"
+      git -C "$src" add -A
+      git -C "$src" -c user.name=test -c user.email=test@example.com commit -qm "$v"
+      if [[ "$v" != next ]]; then git -C "$src" -c user.name=test -c user.email=test@example.com tag -a "$v" -m "$v"; fi
+    done
+  fi
+  echo "$src"
+}
+
+# versions_in <dir> <cli> [args...]: run a freelunch with its versions in <dir>/home
+versions_in() {
+  local dir="$1"; shift
+  (cd "$dir" && FREELUNCH_SOURCE="$(source_repo)" FREELUNCH_HOME="$dir/home" FREELUNCH_BIN="$dir/bin" "$@")
+}
+
+# init pins the project to the installed freelunch that made it.
+test_init_pins_the_installed_version() {
+  local p="$WORK/pin-init" copy out
+  copy="$(installed_copy v1.0.0)"
+  mkdir -p "$p"
+  versions_in "$p" "$copy/bin/freelunch" init cloudflare >/dev/null 2>&1
+  equals "$(cat "$p/.freelunch/version")" "v1.0.0"
+  out="$(versions_in "$p" "$copy/bin/freelunch" version)"
+  contains "$out" "freelunch v1.0.0 in $copy"
+  contains "$out" "the project pins this version (.freelunch/version)"
+  # A link to the CLI, like ~/.local/bin/freelunch, finds the code it belongs to.
+  mkdir -p "$p/bin" && ln -s "$copy/bin/freelunch" "$p/bin/freelunch"
+  contains "$(versions_in "$p" "$p/bin/freelunch" version)" "freelunch v1.0.0 in $copy"
+}
+
+# An installed freelunch runs the version the project pins, downloaded the first time; a
+# checkout runs its own code.
+test_a_pinned_version_runs_instead() {
+  local p="$WORK/pin-run" copy sha out
+  copy="$(installed_copy v1.0.0)"
+  mkdir -p "$p/.freelunch"
+  echo v1.9.0 > "$p/.freelunch/version"
+  equals "$(versions_in "$p" "$copy/bin/freelunch" status 2>/dev/null)" "v1.9.0: status"
+  equals "$(cat "$p/home/v1.9.0/.version")" "v1.9.0"
+  fails test -e "$p/home/v1.9.0/.git"
+  # Downloaded once.
+  out="$(versions_in "$p" "$copy/bin/freelunch" deploy oci 2>&1)"
+  equals "$out" "v1.9.0: deploy oci"
+  contains "$(versions_in "$p" "$copy/bin/freelunch" version)" "the project pins v1.9.0, which runs instead"
+  sha="$(git -C "$(source_repo)" rev-parse main)"
+  echo "$sha" > "$p/.freelunch/version"
+  equals "$(versions_in "$p" "$copy/bin/freelunch" list 2>/dev/null)" "next: list"
+  contains "$(versions_in "$p" "$CLI" version)" "the project pins $sha; this checkout runs its own code"
+  # A branch would move under the project.
+  echo main > "$p/.freelunch/version"
+  out="$(versions_in "$p" "$copy/bin/freelunch" list 2>&1)" && return 1
+  contains "$out" "'main' isn't a version: use a release tag like v1.2.0 or a full commit"
+  echo v9.9.9 > "$p/.freelunch/version"
+  out="$(versions_in "$p" "$copy/bin/freelunch" list 2>&1)" && return 1
+  contains "$out" "can't download freelunch v9.9.9"
+  fails test -e "$p/home/v9.9.9"
+}
+
+# upgrade installs the latest release (or the one named) as the command, and pins the project.
+test_upgrade_installs_and_pins() {
+  local p="$WORK/pin-upgrade" copy out
+  copy="$(installed_copy v1.0.0)"
+  mkdir -p "$p/.freelunch"
+  echo v1.0.0 > "$p/.freelunch/version"
+  out="$(versions_in "$p" "$copy/bin/freelunch" upgrade 2>&1)"
+  contains "$out" "freelunch v1.10.0 is installed: $p/bin/freelunch"
+  contains "$out" "pinned the project to v1.10.0 in .freelunch/version (was v1.0.0)"
+  equals "$(cat "$p/.freelunch/version")" "v1.10.0"
+  equals "$("$p/bin/freelunch" x)" "v1.10.0: x"
+  versions_in "$p" "$copy/bin/freelunch" upgrade main >/dev/null 2>&1
+  equals "$(cat "$p/.freelunch/version")" "$(git -C "$(source_repo)" rev-parse main)"
+  equals "$("$p/bin/freelunch" x)" "next: x"
+  # Never over a command that isn't freelunch's link.
+  rm "$p/bin/freelunch" && touch "$p/bin/freelunch"
+  out="$(versions_in "$p" "$copy/bin/freelunch" upgrade v1.9.0 2>&1)" && return 1
+  contains "$out" "$p/bin/freelunch is a file of its own"
+}
+
+# install.sh downloads the latest release and hands over to its upgrade, outside any project.
+test_install_script() {
+  local p="$WORK/install" out
+  mkdir -p "$p/.freelunch"
+  out="$(versions_in "$p" bash "$ROOT/install.sh" 2>&1)"
+  contains "$out" "downloading freelunch v1.10.0"
+  contains "$out" "v1.10.0: upgrade v1.10.0"
+  equals "$(cat "$p/home/v1.10.0/.version")" "v1.10.0"
+  versions_in "$p" bash "$ROOT/install.sh" v1.9.0 >/dev/null 2>&1
+  test -f "$p/home/v1.9.0/bin/freelunch"
+}
+
 # tests/cli.sh <pattern>: only the tests whose name matches the pattern (grep -E)
 echo "tests/cli.sh"
 for t in $(declare -F | awk '{print $3}' | grep '^test_' | sed 's/^test_//' | grep -E "${1:-.}"); do run_test "$t"; done

@@ -25,6 +25,15 @@ For a project set up with freelunch from `main` before 1.0.0:
 
 ### Added
 
+- **Install once, pin per project.** `install.sh` (`curl -fsSL
+  https://raw.githubusercontent.com/freelunch-sh/freelunch/main/install.sh | bash`) installs
+  the latest release as the `freelunch` command, and `init` pins the project to it in
+  `.freelunch/version`. An installed freelunch, the GitHub Action and the runner image run
+  the version a project pins, downloaded the first time, so a project needs no submodule.
+  `freelunch version` shows both, and `freelunch upgrade [version]` installs a release and
+  moves the project's pin to it. The action is named *Run freelunch*, for the GitHub
+  Marketplace.
+
 - **Project mode.** `freelunch init` creates a `.freelunch/` folder in any repository, with a
   `terraform.tfvars.example` per stack, `apps.tfvars`, `.env.example` and a `.gitignore`.
   Each example sets `name_prefix` to the project's name (`--name`, the one the project's

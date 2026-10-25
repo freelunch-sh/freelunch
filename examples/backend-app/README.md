@@ -36,8 +36,8 @@ $EDITOR .freelunch/oci/terraform.tfvars .freelunch/cloudflare/terraform.tfvars .
 
 ## The five commands
 
-`freelunch` here is `../../bin/freelunch`, the `freelunch/bin/freelunch` submodule in your
-own repository, or the runner image (see the [walkthrough](../../docs/deploy-a-container.md#1-pin-freelunch)).
+`freelunch` here is `../../bin/freelunch`; in your own repository it is the installed
+command or the runner image (see the [walkthrough](../../docs/deploy-a-container.md#1-install-freelunch)).
 
 ```bash
 freelunch init                # creates .freelunch/ (already done in this example)

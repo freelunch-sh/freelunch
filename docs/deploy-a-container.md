@@ -5,8 +5,8 @@ Cloud VM, served at `https://api.example.com` through a Cloudflare Tunnel, and u
 `freelunch deploy` without replacing the VM. The only open port is SSH.
 
 Everything freelunch needs lives in your repository, in a `.freelunch/` folder: config,
-state and an apps file. freelunch itself is pinned at a version, either as a git submodule
-or as a Docker image.
+state and an apps file. freelunch itself is a command you install once; the project pins
+the version it runs in `.freelunch/version`, so nothing of freelunch's is copied in.
 
 [`examples/backend-app`](../examples/backend-app/) is the finished result. No Arm capacity at
 Oracle, or no wish to run a VM? [Switch to another provider](#switch-to-another-provider)
@@ -30,26 +30,31 @@ shows the same setup on Northflank's free plan or a GCP micro VM.
   image needs a `linux/arm64` build. No image yet? `freelunch init --image-workflow` adds a
   GitHub Actions workflow that builds it for your hosts and pushes it to GHCR.
 
-## 1. Pin freelunch
+## 1. Install freelunch
 
 Pick one. The CLI is the same either way.
 
-**Git submodule** (needs OpenTofu ≥ 1.6 or Terraform ≥ 1.6, plus `jq`, `ssh` and `bash` on
-your machine):
+**Install the command** (needs OpenTofu ≥ 1.6 or Terraform ≥ 1.6, plus `git`, `jq`, `ssh`
+and `bash` on your machine):
 
 ```bash
-git submodule add https://github.com/freelunch-sh/freelunch freelunch
-git -C freelunch checkout v1.0.0
-git add freelunch && git commit -m "Pin freelunch v1.0.0"
-
-alias freelunch="$PWD/freelunch/bin/freelunch"
+curl -fsSL https://raw.githubusercontent.com/freelunch-sh/freelunch/main/install.sh | bash
 ```
 
-Upgrading later is `git -C freelunch checkout v1.1.0` and a commit. If the new release
-needs newer providers, see [Troubleshooting](#troubleshooting).
+It puts the latest release in `~/.local/share/freelunch/<version>` and the `freelunch`
+command in `~/.local/bin` (`| bash -s v1.0.0` installs that version instead). `init` then
+pins the project to it in `.freelunch/version`. Whenever freelunch runs in a project pinned
+to another version, it runs that one instead, downloaded the first time, so a teammate, a
+second machine and CI all run what the project pins. `freelunch version` says which that is.
+
+`freelunch upgrade` installs the latest release and moves the project's pin to it (or
+`freelunch upgrade v1.1.0`, `main`, a commit). Commit `.freelunch/version`, and run
+`freelunch plan all` to see what the new version changes. If it needs newer providers, see
+[Troubleshooting](#troubleshooting).
 
 **Runner image** (needs only Docker). The image has OpenTofu and the freelunch code baked in;
-your project is mounted at `/project`:
+your project is mounted at `/project`. Use the tag of the version the project pins, or each
+run downloads that version into the container first:
 
 ```bash
 alias freelunch='docker run --rm -it -v "$PWD:/project" \
@@ -62,6 +67,12 @@ In `~/.oci/config`, write `key_file=~/.oci/<key>.pem` with a `~` so the path als
 the container. A session profile needs the same for `key_file` and `security_token_file`,
 which `oci session authenticate` writes as absolute paths. On Linux, files the container
 writes into your project are owned by root.
+
+A project made with freelunch as a git submodule keeps working: a checkout always runs its
+own code. To drop the submodule, install the command, run `freelunch init` again (it adds
+`.freelunch/version` and keeps everything else), then `git rm freelunch` and run
+`freelunch ci init` again if the project has CI workflows, so they use the published action
+instead of `./freelunch`.
 
 ## 2. Create the project folder
 
@@ -81,6 +92,7 @@ on the same accounts don't clash.
 ├── .gitignore                          state, tfvars, *.env, saved plans, wait logs, ...
 ├── apps.tfvars                         which app runs on which host (commit this)
 ├── .env.example                        credentials for the CLI
+├── version                             the freelunch version the project runs (commit this)
 ├── oci/terraform.tfvars.example
 └── cloudflare/terraform.tfvars.example
 ```
