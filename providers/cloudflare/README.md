@@ -196,7 +196,7 @@ the inventory check, for use from your own root module:
 
 ```hcl
 module "tunnel" {
-  source = "github.com/freelunch-sh/freelunch//providers/cloudflare/modules/tunnel?ref=v1.0.0"
+  source = "github.com/freelunch-sh/freelunch//providers/cloudflare/modules/tunnel?ref=v0.1.0"
 
   account_id = var.cloudflare_account_id
   zone_id    = var.cloudflare_zone_id
@@ -219,7 +219,7 @@ Run `cloudflared` on that host with `module.tunnel.tunnel_tokens["my-vm"]` as `T
   the host stack, then run `destroy cloudflare` again.
 - **One route per hostname.** Path-based routing is not supported yet.
 - **Not live-tested yet.** The stack is covered by offline tests against a mocked API. The
-  first live run is part of the v1.0 release checklist.
+  first live run is part of the v0.1 release checklist.
 
 ## Tests
 

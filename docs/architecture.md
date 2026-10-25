@@ -42,7 +42,7 @@ provider credentials.
 Modules remain composable. If you want one root module with OCI and GCP together, call
 `providers/oci/modules/docker-host` and `providers/gcp/modules/docker-host` from your own
 configuration, pinned to a tag:
-`source = "github.com/freelunch-sh/freelunch//providers/oci/modules/docker-host?ref=v1.0.0"`
+`source = "github.com/freelunch-sh/freelunch//providers/oci/modules/docker-host?ref=v0.1.0"`
 ([more](deploy-a-container.md#using-the-modules-from-your-own-root-module)).
 
 ## Host contract

@@ -1,5 +1,5 @@
 # freelunch runner: OpenTofu, the few tools the CLI uses, and the freelunch code itself.
-#   docker run --rm -it -v "$PWD:/project" ghcr.io/freelunch-sh/freelunch:1.0.0 <command>
+#   docker run --rm -it -v "$PWD:/project" ghcr.io/freelunch-sh/freelunch:0.1.0 <command>
 # Release images are built for amd64 and arm64 by .github/workflows/release.yml.
 FROM debian:trixie-slim
 
