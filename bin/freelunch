@@ -257,7 +257,7 @@ fetch_version() {
 }
 
 # switch_version <args...>: run the version the project pins, when this is another one. A
-# checkout (development, or a submodule) always runs its own code.
+# checkout always runs its own code, for development.
 switch_version() {
   local pin dir
   pin="$(pinned_version)"
@@ -4129,11 +4129,10 @@ ci_ready() {
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
 }
 
-# action_ref <project root>: how its workflows use freelunch's action: the submodule's copy,
-# or the version the project pins (which the action switches to anyway) on GitHub
+# action_ref: how a project's workflows use freelunch's action: at the version the project
+# pins (which the action switches to anyway)
 action_ref() {
   local ref
-  case "$ROOT" in "$1"/*) echo "./${ROOT#"$1"/}"; return 0 ;; esac
   ref="$(pinned_version)"
   [[ -n "$ref" ]] || ref="$(release_version)"
   echo "freelunch-sh/freelunch@${ref:-main}"
@@ -4142,16 +4141,13 @@ action_ref() {
 # tool_version: the version of tofu/terraform here, for CI to use the same
 tool_version() { CHECKPOINT_DISABLE=1 "$TF" version -json 2>/dev/null | jq -r '.terraform_version // empty' 2>/dev/null || true; }
 
-# ci_uses <project root> <indent>: the steps of a job that runs freelunch with the action
+# ci_uses <command>: the steps of a job that runs freelunch with the action
 ci_uses() {
-  local ref with=""
-  ref="$(action_ref "$1")"
-  [[ "$ref" != ./* ]] || with=$'\n        with:\n          submodules: true'
   cat <<EOF
-      - uses: actions/checkout@v7$with
-      - uses: $ref
+      - uses: actions/checkout@v7
+      - uses: $(action_ref)
         with:
-          run: $2
+          run: $1
           bundle: \${{ secrets.FREELUNCH_BUNDLE }}
           tool: $(tool_name)
           version: "$(tool_version)"
@@ -4198,7 +4194,7 @@ jobs:
     timeout-minutes: 20
     steps:
 EOF
-    ci_uses "$base" "ci resume"
+    ci_uses "ci resume"
   } | write_new "$base/.github/workflows/$CI_WAIT_WORKFLOW"
   [[ ! -f "$base/.github/workflows/image.yml" ]] || image=$'\n  # A new image of main, from the image workflow (freelunch init --image-workflow)\n  workflow_run:\n    workflows: [image]\n    types: [completed]\n    branches: [main]'
   {
@@ -4229,17 +4225,19 @@ jobs:
     timeout-minutes: 30
     steps:
 EOF
-    ci_uses "$base" "\${{ inputs.run || 'deploy' }}"
+    ci_uses "\${{ inputs.run || 'deploy' }}"
   } | write_new "$base/.github/workflows/$CI_WORKFLOW"
-  if [[ "$(action_ref "$base")" == *@main ]]; then
-    log "the workflows use freelunch-sh/freelunch@main; pin them to a release tag, the one your freelunch is at"
+  if [[ "$(action_ref)" == *@main ]]; then
+    log "the workflows use freelunch-sh/freelunch@main; pin the project to a release with freelunch upgrade, then run ci init again"
   fi
 }
 
 # gitlab_pipeline <project root>: a pipeline that runs freelunch in the runner image
 gitlab_pipeline() {
   local base="$1" file tag state_vars=""
-  tag="$(git -C "$ROOT" describe --tags --exact-match 2>/dev/null || true)"
+  tag="$(pinned_version)"
+  [[ -n "$tag" ]] || tag="$(release_version)"
+  [[ "$tag" == v* ]] || tag=""
   tag="${tag#v}"
   if [[ "$(state_config)" == */state.http.tfbackend ]] && grep -q 'gitlab.com/api' "$(state_config)"; then
     state_vars=$'\n    # GitLab\'s state for this project, reached with the job\'s own token\n    FREELUNCH_STATE_TF_HTTP_USERNAME: gitlab-ci-token\n    FREELUNCH_STATE_TF_HTTP_PASSWORD: $CI_JOB_TOKEN'

@@ -127,8 +127,7 @@ Both use the action in this repository (`uses: freelunch-sh/freelunch@<version>`
 listed on the GitHub Marketplace as *Run freelunch*), which sets up the same tofu or
 terraform version you have, unpacks the bundle and runs the command with the freelunch
 version in `.freelunch/version`. After `freelunch upgrade`, the workflows run the new version
-without an edit. With freelunch as a submodule, they use the submodule's copy
-(`uses: ./freelunch`) instead. Commit and push both files.
+without an edit. Commit and push both files.
 
 ## 3. The secret
 

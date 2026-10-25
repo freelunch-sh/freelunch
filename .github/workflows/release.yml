@@ -1,26 +1,74 @@
 name: release
 
-# Push a tag like v1.0.0. The image goes to ghcr.io/<owner>/freelunch with the tags
-# 1.0.0, 1.0 and 1, and the GitHub release notes come from that version's CHANGELOG.md section.
+# A release is a CHANGELOG.md heading: rename `## [Unreleased]` to `## [1.2.0] - 2026-11-03`
+# (with a new empty `## [Unreleased]` above it) and merge that to main. This workflow then
+# tags v1.2.0, pushes the image to ghcr.io/<owner>/freelunch as 1.2.0, 1.2 and 1, and makes
+# the GitHub release with that section as its notes. A version that is tagged already is left
+# alone, so it runs on every change to CHANGELOG.md. Run it from the Actions tab to retry.
 on:
   push:
-    tags: ["v*.*.*"]
+    branches: [main]
+    paths: [CHANGELOG.md]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency: release
+
 jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.find.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: find
+        name: the newest version in CHANGELOG.md, unless it has its tag
+        run: |
+          version="$(sed -n 's/^## \[\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)\].*/\1/p' CHANGELOG.md | head -1)"
+          if [ -z "$version" ]; then echo "no released version in CHANGELOG.md yet"; exit 0; fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then echo "v$version is tagged already"; exit 0; fi
+          latest="$(git tag -l 'v*.*.*' | sort -V | tail -1)"
+          if [ -n "$latest" ] && [ "$(printf '%s\nv%s\n' "$latest" "$version" | sort -V | tail -1)" != "v$version" ]; then
+            echo "::error::CHANGELOG.md says $version, which is older than $latest"; exit 1
+          fi
+          echo "releasing v$version"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
   ci:
+    needs: version
+    if: needs.version.outputs.tag != ''
     uses: ./.github/workflows/ci.yml
 
+  # A tag pushed with the workflow's token starts no other workflow, so the release goes on here.
+  tag:
+    needs: [version, ci]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "$TAG"
+
   image:
-    needs: ci
+    needs: [version, tag]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.tag }}
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
@@ -33,9 +81,9 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=semver,pattern={{version}},value=${{ needs.version.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.version.outputs.tag }}
+            type=semver,pattern={{major}},value=${{ needs.version.outputs.tag }}
       - uses: docker/build-push-action@v7
         with:
           context: .
@@ -43,23 +91,25 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: FREELUNCH_VERSION=${{ github.ref_name }}
+          build-args: FREELUNCH_VERSION=${{ needs.version.outputs.tag }}
 
   notes:
-    needs: image
+    needs: [version, image]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.tag }}
       - name: GitHub release from CHANGELOG.md
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           awk -v v="$version" '
             /^## \[/ { on = index($0, "## [" v "]") == 1; next }
             on
           ' CHANGELOG.md > notes.md
-          test -s notes.md || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
+          gh release create "$TAG" --title "$TAG" --notes-file notes.md
