@@ -222,6 +222,7 @@ run "apps_on_a_platform_become_services" {
       entrypoint  = null
       environment = { LOG_LEVEL = "info", WORKERS = "2" }
       ports       = [8080, 9090]
+      volumes     = []
       healthcheck = { cmd = "wget -qO- http://127.0.0.1:8080/health", initial_delay = 90, interval = 15, timeout = 5, retries = 6 }
     })
     error_message = "The service takes image, command, environment, ports and healthcheck from the Compose file."
@@ -245,6 +246,7 @@ run "compose_files_in_other_shapes" {
       entrypoint  = "/whoami"
       environment = { MODE = "worker", URL = "https://example.com/?a=b" }
       ports       = []
+      volumes     = []
       healthcheck = { cmd = "/bin/sh -c \"curl -f http://localhost/ || exit 1\"", initial_delay = 1, interval = 30, timeout = 30, retries = 3 }
     })
     error_message = "A list environment, a string entrypoint and a CMD-SHELL test (as a string) carry over too, with Docker's defaults."
@@ -269,7 +271,31 @@ run "platform_apps_run_one_container" {
   expect_failures = [output.platforms]
 }
 
-run "platform_apps_have_no_volumes_yet" {
+run "named_volumes_become_volumes_on_the_platform" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = null
+    apps                 = { api = { host = "northflank-main", compose = "named-volumes.yaml" } }
+  }
+
+  assert {
+    condition = jsonencode(output.platforms["northflank-main"].services.api.volumes) == jsonencode([
+      { id = "api-results", mounts = ["/var/lib/results", "/srv/results"] },
+      { id = "api-cache-dir", mounts = ["/cache"] },
+    ])
+    error_message = "Each named volume becomes <app>-<volume>, mounted wherever the service mounts it, in short or long syntax."
+  }
+
+  assert {
+    condition     = output.platforms["northflank-main"].volume_size == 4096
+    error_message = "The volume size comes from the platform stack."
+  }
+}
+
+run "platforms_dont_have_the_hosts_folders" {
   command = plan
 
   variables {
@@ -277,6 +303,58 @@ run "platform_apps_have_no_volumes_yet" {
     inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
     tunnel_state_path    = null
     apps                 = { api = { host = "northflank-main", compose = "volumes.yaml" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
+run "volumes_on_the_platform_need_a_name" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = null
+    apps                 = { api = { host = "northflank-main", compose = "anonymous-volume.yaml" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
+run "volumes_on_the_platform_cant_be_read_only" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = null
+    apps                 = { api = { host = "northflank-main", compose = "read-only-volume.yaml" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
+run "deploy_makes_the_volumes_on_the_platform" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = null
+    apps                 = { api = { host = "northflank-main", compose = "external-volume.yaml" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
+run "volumes_need_a_platform_that_keeps_them" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid-no-volumes.tfstate"
+    tunnel_state_path    = null
+    apps                 = { api = { host = "northflank-main", compose = "named-volumes.yaml" } }
   }
 
   expect_failures = [output.platforms]
@@ -383,4 +461,45 @@ run "hosts_and_platforms_side_by_side" {
     )
     error_message = "Hosts keep their SSH plan, and only platform targets get services."
   }
+}
+
+run "a_bucket_puts_its_s3_settings_in_the_apps_environment" {
+  command = plan
+
+  variables {
+    storage_state_paths = ["tests/fixtures/storage.tfstate"]
+    apps = {
+      api = { host = "oci-main", compose = "compose.yaml", bucket = "backblaze-b2-results" }
+      web = { host = "oci-main", compose = "compose.yaml" }
+    }
+  }
+
+  assert {
+    condition = nonsensitive(output.app_env) == {
+      api = {
+        AWS_ACCESS_KEY_ID     = "mock-key-id"
+        AWS_SECRET_ACCESS_KEY = "mock-key"
+        AWS_REGION            = "us-west-004"
+        AWS_ENDPOINT_URL_S3   = "https://s3.us-west-004.backblazeb2.com"
+        S3_BUCKET             = "freelunch-results"
+      }
+    }
+    error_message = "An app with a bucket gets its endpoint, region, name and keys; one without gets nothing."
+  }
+
+  assert {
+    condition     = output.targets["oci-main"].apps.api.bucket == "backblaze-b2-results" && output.targets["oci-main"].apps.web.bucket == null
+    error_message = "The deploy plan says which app has a bucket."
+  }
+}
+
+run "apps_need_a_bucket_a_stack_made" {
+  command = plan
+
+  variables {
+    storage_state_paths = ["tests/fixtures/storage.tfstate"]
+    apps                = { api = { host = "oci-main", compose = "compose.yaml", bucket = "cloudflare-results" } }
+  }
+
+  expect_failures = [output.targets]
 }

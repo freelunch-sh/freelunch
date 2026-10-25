@@ -87,6 +87,7 @@ attributes:
 | `size` | string | the plan each app gets, e.g. `nf-compute-20` |
 | `tunnel` | bool | whether `cloudflared` can run there, so Cloudflare Tunnel routes work |
 | `max_services` | number | how many services the free plan runs, apps and `cloudflared` together; null for no limit |
+| `volume_size` | number | MB of each volume `deploy` makes for an app's named volume; null when freelunch makes no volumes there |
 
 `hybrid/` aggregates them into its `platforms` output, apart from `hosts`, so SSH configs and
 Ansible inventories only list machines. Targets are named `<provider>-<name>` like hosts
@@ -118,6 +119,25 @@ host that is not in the inventory. On a platform, `cloudflared` is a service of 
 reaches an app by its service name, so a route there names the app (`app = "api"`).
 
 [`providers/cloudflare`](../providers/cloudflare/) is the first glue stack.
+
+## Storage contract
+
+A stack that makes buckets for apps (`backblaze-b2`, and `cloudflare` with R2) outputs
+`buckets`, a list of objects with these attributes:
+
+| Attribute | Type | Example |
+|---|---|---|
+| `provider` | string | `backblaze-b2` |
+| `name` | string | `results` (unique within the provider) |
+| `bucket` | string | the bucket's name at the provider, e.g. `shop-results` |
+| `endpoint` | string | the S3 endpoint, e.g. `https://s3.us-west-004.backblazeb2.com` |
+| `region` | string | the S3 region, e.g. `us-west-004`, or `auto` for R2 |
+
+and `bucket_keys`, a sensitive map from `<provider>-<name>` to `{ access_key_id,
+secret_access_key }`, a key that only reaches that bucket. `deploy/` reads both from every
+deployed stack that has them. An app names its bucket like a host, `bucket =
+"backblaze-b2-results"`, and gets its settings in its environment
+([which](../deploy/README.md#appstfvars)).
 
 ## Projects
 
@@ -174,12 +194,13 @@ starts `cloudflared` with the host's tunnel token, prunes unused images, and log
 registries again.
 
 On a container platform there is nothing to SSH to. `deploy/` reads each app's Compose file
-(one service: image, command, environment, ports, healthcheck) and stops on what the
-platform can't do, such as volumes or a build without an image. `deploy` then creates or
-updates a service per app through the provider's API, with the image pinned to the digest
-its tag points to, the env file as the service's environment, private ports, and the
-healthcheck as a readiness check, plus `cloudflared` as one more service with the tunnel
-token. It waits until each one runs.
+(one service: image, command, environment, ports, named volumes, healthcheck) and stops on
+what the platform can't do, such as a folder of the host or a build without an image.
+`deploy` then makes a volume per named volume, once, and creates or updates a service per
+app through the provider's API, with the image pinned to the digest its tag points to, the
+env file (and its bucket's settings) as the service's environment, private ports, its
+volumes, and the healthcheck as a readiness check, plus `cloudflared` as one more service
+with the tunnel token. It waits until each one runs.
 
 Secrets travel over SSH and land in root-only files, or in API request bodies over HTTPS,
 never on a command line. They never go into user data, which is readable from the instance

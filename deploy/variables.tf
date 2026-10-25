@@ -3,12 +3,15 @@ variable "apps" {
     Compose apps to run, keyed by app name. Each app goes to /opt/freelunch/apps/<name>/
     on its host, or becomes a service named <name> on a container platform. host is
     <provider>-<instance> from the inventory. compose and env_file are paths, relative to
-    config_dir unless absolute.
+    config_dir unless absolute. bucket is <provider>-<name> of a bucket a storage stack
+    makes (backblaze-b2-results, cloudflare-results); its S3 settings and keys go into the
+    app's environment.
   EOT
   type = map(object({
     host     = string
     compose  = string
     env_file = optional(string)
+    bucket   = optional(string)
   }))
   default = {}
 
@@ -54,6 +57,12 @@ variable "config_dir" {
 variable "inventory_state_path" {
   description = "State file of hybrid/."
   type        = string
+}
+
+variable "storage_state_paths" {
+  description = "State files of the stacks that make buckets (outputs buckets and bucket_keys)."
+  type        = list(string)
+  default     = []
 }
 
 variable "tunnel_state_path" {

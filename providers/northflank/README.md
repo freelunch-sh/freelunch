@@ -24,7 +24,7 @@ it when Oracle has no Arm capacity for you, or when you would rather not run a V
 | Resources | up to $20/month; nf-compute-20 is $5.40 and nf-compute-10 (cloudflared) $2.70 | by the plans above |
 | Projects | **1** (the [docs](https://northflank.com/docs/v1/application/getting-started/create-a-project) say one; the pricing page says 2, but a second one gets a 409) | ✅ doctor, plan and apply check that the team has room for the project |
 | Jobs, databases | 2 jobs, 1 database | not used yet |
-| Volumes | no free allowance | ✅ deploy stops at an app with volumes |
+| Volumes | the pricing page lists volumes on the Sandbox, billed at $0.11657 per GB a month, so the smallest (4 GB) is about $0.47 of the $20 | `volume_size` (4096 MB by default); not live-tested yet |
 
 Limits live in [`provider.yaml`](provider.yaml) under `limits:`. Free tiers change, so
 check the [pricing page](https://northflank.com/pricing) before relying on this.
@@ -37,6 +37,7 @@ these permissions, as Northflank names them:
 - Project > Projects > Manage: Create, Read, Delete
 - Project > Services > General: Create, Read, Update, Delete
 - Project > Secrets > Services: Update (each app's environment)
+- Project > Volumes > General: Create, Read, Update, Delete (only for apps with volumes)
 - Account > Cloud > Registries: Create, Read, Update, Delete (only for private images)
 
 Put it in `.freelunch/.env`, or name it in 1Password or the macOS keychain there:
@@ -92,7 +93,8 @@ the app's Compose file:
 | `environment`, plus the `env_file` from `apps.tfvars` | the runtime environment, encrypted at Northflank |
 | `ports`, `expose` | private ports, the container side (`127.0.0.1:8080:8080` is 8080) |
 | `healthcheck` | a readiness check (`start_period`, `interval`, `timeout` and `retries`, kept within what Northflank takes, and one success to pass); deploy waits until it passes |
-| `volumes`, `build` without `image`, `${VARIABLES}` in the image | stop the deploy with a message |
+| a named volume (`results:/var/lib/results`, or `type: volume`) | a volume `<app>-<volume>` of `volume_size` MB, mounted at the same paths, which keeps its data across deploys and restarts |
+| a folder of the host (`./data:/data`), a volume without a name, `:ro`, `external: true`, `tmpfs`, `build` without `image`, `${VARIABLES}` in the image | stop the deploy with a message |
 
 Everything else in the Compose file (restart policies, networks, security options) has no
 equivalent there and is left out. A registry under `registries` in `apps.tfvars` becomes a
@@ -119,8 +121,17 @@ in the description) and never takes over or deletes a project it didn't make.
   (a worker, say) doesn't fit on the free plan. Services you make in the dashboard count
   too; deploy says when there are any.
 - **Small plans.** 0.2 vCPU and 512 MB per service at most. Images are x86 (`linux/amd64`).
-- **No volumes.** A container's files are lost on every deploy and restart. Keep data in a
-  managed database (see *Managed databases* in the README).
+- **Keep data in a volume or a bucket.** A container's own files are lost on every deploy
+  and restart. A named volume in the Compose file keeps them: deploy makes it the first
+  time (`volume_size` MB, 4096 by default, Northflank's smallest), attaches it to the app's
+  service, and detaches it, data and all, when the Compose file drops it. Only `freelunch
+  destroy northflank` deletes it, with the data. A volume can grow (a bigger `volume_size`)
+  but never shrink. With a volume, the old container stops before the new one starts, so
+  a deploy has a few seconds of downtime. For data that should live off the platform, give
+  the app a bucket instead (`bucket` in apps.tfvars, from the
+  [backblaze-b2](../backblaze-b2/) stack or R2 in the [cloudflare](../cloudflare/README.md#r2-buckets) one).
+  Whether the free Sandbox takes volumes isn't live-tested yet; when Northflank turns one
+  down, deploy stops with its message before the service changes.
 - **deploy owns the services.** Changes made in the dashboard (ports, environment, plan) are
   replaced on the next deploy.
 - **Regions.** A project can't move, so a new `region` means `destroy` and `apply`.
@@ -134,9 +145,9 @@ in the description) and never takes over or deletes a project it didn't make.
 | Suite | Covers |
 |---|---|
 | `stack/tests/plan.tftest.hcl` | The free target, the project's name, plans outside the Sandbox blocked unless acknowledged |
-| `deploy/tests/deploy.tftest.hcl` | Compose files turned into services, and every case that stops a deploy |
+| `deploy/tests/deploy.tftest.hcl` | Compose files turned into services and volumes, and every case that stops a deploy |
 | `providers/cloudflare/stack/tests/plan.tftest.hcl` | Routes to a platform go to `<app>:<port>` and need `app` |
-| `tests/cli.sh` | apply and destroy against a fake Northflank API, the bodies deploy sends, waiting, failures, dry run, status and doctor |
+| `tests/cli.sh` | apply and destroy against a fake Northflank API, the bodies deploy sends, volumes, waiting, failures, dry run, status and doctor |
 
 ## Roadmap
 

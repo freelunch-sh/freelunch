@@ -149,8 +149,23 @@ release can change commands and the project layout.
 - The [platform contract](docs/architecture.md#platform-contract): `hybrid/` aggregates
   `platforms` next to `hosts`, the cloudflare stack routes to `<app>:<port>` on a platform,
   and `deploy/` reads each platform app's Compose file and stops on what the platform can't
-  do: volumes, a build without an image, Compose variables in the image, more services than
-  the free plan has, or a route to an app or port that isn't there.
+  do: a folder of the host, a build without an image, Compose variables in the image, more
+  services than the free plan has, or a route to an app or port that isn't there.
+- **Volumes on Northflank.** A named volume in an app's Compose file becomes a Northflank
+  volume, `<app>-<volume>` of `volume_size` MB (4096 by default, Northflank's smallest), so
+  what the app writes there survives deploys and restarts. deploy makes it once, attaches it
+  to the service, and detaches it when the Compose file drops it; only `destroy northflank`
+  deletes it, with its data. `status` lists the volumes. A bind mount, a volume without a
+  name, `:ro` and `external: true` stop the deploy with what to change. Not live-tested:
+  Northflank's pricing page lists volumes on the free Sandbox, and deploy stops with
+  Northflank's message if it turns one down.
+- **Buckets for apps.** The new [backblaze-b2](providers/backblaze-b2/) stack (10 GB free,
+  no card) and R2 in the cloudflare stack (`buckets`) make private buckets, each with a key
+  that only reaches it. `bucket = "backblaze-b2-results"` in apps.tfvars gives the app the
+  bucket's `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_ENDPOINT_URL_S3`
+  and `S3_BUCKET`, in its `.env` on a VM and its environment on a platform, under its own
+  env_file's values. The [storage contract](docs/architecture.md#storage-contract) is what
+  deploy reads. Not live-tested.
 - Catalog: Google Cloud Run and Scaleway Serverless Containers with their free tiers, and
   Railway's Free plan checked again, each with what stops it for now. The container
   platforms (Koyeb, Render, Railway and the rest) moved to the `platform` layer. The GCP

@@ -2168,6 +2168,12 @@ EOF
 # Northflank API token for the northflank stack (providers/northflank/README.md#api-token)
 NORTHFLANK_API_TOKEN=
 EOF
+    [[ " ${stacks[*]} " != *" backblaze-b2 "* ]] || cat <<'EOF'
+
+# Backblaze B2 application key for the backblaze-b2 stack (providers/backblaze-b2/README.md#application-key)
+B2_APPLICATION_KEY_ID=
+B2_APPLICATION_KEY=
+EOF
     cat <<'EOF'
 
 # Read-only registry token, when apps.tfvars lists registries
@@ -2369,17 +2375,29 @@ shq() { local s="${1//\'/\'\\\'\'}"; printf "'%s'" "$s"; } # quote for the remot
 
 b64() { base64 | tr -d '\n'; echo; }
 
-# deploy_plan: resolve apps.tfvars, the inventory and the tunnels with deploy/ into
-# $TMP/targets.json, platforms.json, registries.json and tunnel_tokens.json.
+# storage_states: the state files of deployed stacks that make buckets, as a JSON list
+storage_states() {
+  local p state
+  for p in $(all_providers); do
+    if [[ ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
+    state="$(config_dir "$p")/terraform.tfstate"
+    if jq -e '.outputs.buckets' "$state" >/dev/null 2>&1; then echo "$state"; fi
+  done | jq -Rsc 'split("\n") | map(select(length > 0))'
+}
+
+# deploy_plan: resolve apps.tfvars, the inventory, the tunnels and the buckets with deploy/
+# into $TMP/targets.json, platforms.json, registries.json, tunnel_tokens.json and
+# app_env.json.
 deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
   local apps_file="$1" tunnel_state="$2" args o
   args=(-state="$TMP/deploy.tfstate" -var "config_dir=$(state_root)" -var "inventory_state_path=$(hybrid_state)")
   if [[ -f "$apps_file" ]]; then args+=(-var-file="$apps_file"); fi
   if [[ -n "$tunnel_state" ]]; then args+=(-var "tunnel_state_path=$tunnel_state"); fi
+  args+=(-var "storage_state_paths=$(storage_states)")
   check_checkout_tfvars "$ROOT/deploy"
   TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" init -input=false >/dev/null || return 1
   TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" apply -input=false -auto-approve "${args[@]}" >/dev/null || return 1
-  for o in targets platforms registries tunnel_tokens; do
+  for o in targets platforms registries tunnel_tokens app_env; do
     TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" output -state="$TMP/deploy.tfstate" -json "$o" > "$TMP/$o.json" || return 1
   done
 }
@@ -2444,18 +2462,24 @@ EOF
     echo "printf '%s' $(shq "$token") | base64 -d | docker login $(shq "$server") -u $(shq "$username") --password-stdin >/dev/null"
   done < <(jq -r 'to_entries[] | [.key, .value.username, .value.password_env] | @tsv' "$TMP/registries.json")
 
-  while IFS=$'\t' read -r name compose env_file; do
+  # Fields split at \x1f, which unlike a tab keeps an empty env_file in its place.
+  while IFS=$'\x1f' read -r name compose env_file bucket; do
     [[ -n "$name" ]] || continue
     echo "put \"\$apps/$name/compose.yaml\" 0640 <<'FREELUNCH_EOF'"
     if [[ "$redact" == 1 ]]; then echo "<$compose>"; else b64 < "$compose"; fi
     echo "FREELUNCH_EOF"
-    if [[ -n "$env_file" ]]; then
+    # The bucket's settings come first, so the env_file can override them.
+    if [[ -n "$env_file$bucket" ]]; then
       echo "put \"\$apps/$name/.env\" 0600 <<'FREELUNCH_EOF'"
-      if [[ "$redact" == 1 ]]; then echo "<$env_file, redacted>"; else b64 < "$env_file"; fi
+      if [[ "$redact" == 1 ]]; then
+        echo "<${bucket:+the S3 settings of $bucket}${bucket:+${env_file:+, then }}${env_file}, redacted>"
+      else
+        { bucket_env "$name"; [[ -z "$env_file" ]] || cat "$env_file"; } | b64
+      fi
       echo "FREELUNCH_EOF"
     fi
     echo "up $name"
-  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // "")] | @tsv' "$targets")
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // "")] | join("\u001f")' "$targets")
 
   if [[ "$(jq -r --arg h "$host" '.[$h].tunnel' "$targets")" == "true" ]]; then
     echo "put \"\$apps/cloudflared/compose.yaml\" 0640 <<'FREELUNCH_EOF'"
@@ -2640,6 +2664,21 @@ env_json() {
   done < "$1" | jq -Rs 'split("\n") | .[:-1] | [range(0; length; 2) as $i | {(.[$i]): .[$i + 1]}] | add // {}'
 }
 
+# bucket_env <app>: the S3 settings of the app's bucket (bucket in apps.tfvars) as KEY=value
+# lines, or nothing
+bucket_env() {
+  jq -r --arg a "$1" '.[$a] // {} | to_entries[] | "\(.key)=\(.value)"' "$TMP/app_env.json"
+}
+
+# app_env_json <app> <env_file or "">: the app's environment as a JSON object, its bucket's
+# settings first and the env_file over them
+app_env_json() {
+  local file="$TMP/app_env.$1.json"
+  if [[ -n "$2" ]]; then env_json "$2" > "$file"; else echo '{}' > "$file"; fi
+  jq --arg a "$1" --slurpfile f "$file" '(.[$a] // {}) + $f[0]' "$TMP/app_env.json"
+  rm -f "$file"
+}
+
 # image_name <image>: the image without its tag or digest (ghcr.io/me/api:1.4.2 is
 # ghcr.io/me/api)
 image_name() {
@@ -2784,8 +2823,9 @@ northflank_down() {
   done
   northflank_forget_registries "$id"
   # Services go away in the background, and a project with services in it can't be
-  # deleted, so this tries for two minutes.
+  # deleted, so this tries for two minutes. Their volumes go too, with the data.
   for i in $(seq 1 24); do
+    northflank_delete_volumes "$id"
     code="$(nf DELETE "/projects/$id")"
     if nf_ok "$code" || [[ "$code" == 404 ]]; then log "northflank: deleted the project $id"; return 0; fi
     [[ "$code" != 401 && "$code" != 403 && $i -lt 24 ]] || break
@@ -2848,6 +2888,82 @@ northflank_registry() {
   rm -f "$TMP/registry.json"
   if ! nf_ok "$code" || [[ -z "$id" ]]; then die "northflank: can't save the login to $server ($code): $(nf_error)"; fi
   echo "$id"
+}
+
+# The volumes in $TMP/nf.json: Northflank's reference gives the list as data itself, and
+# its other lists sit under a key, so this takes either.
+NF_VOLUMES='(.data | if type == "array" then . else (.volumes // []) end)[]'
+
+# northflank_volume <project> <app> <volume ID> <mounts JSON> <size MB>: make the app's
+# volume, or bring its mounts and size up to date. It stays when the app goes, with its
+# data; only destroy deletes it.
+northflank_volume() {
+  local project="$1" app="$2" id="$3" mounts="$4" size="$5" code other now
+  code="$(nf GET "/projects/$project/volumes/$id")"
+  if [[ "$code" == 404 ]]; then
+    jq -n --arg id "$id" --argjson m "$mounts" --argjson size "$size" \
+      '{name: $id, mounts: [$m[] | {containerMountPath: .}], spec: {accessMode: "ReadWriteOnce", storageSize: $size}}' > "$TMP/volume.json"
+    code="$(nf POST "/projects/$project/volumes" "$TMP/volume.json")"
+    nf_ok "$code" || die "northflank: can't make the volume $id for $app ($code): $(nf_error)"
+    [[ "$(jq -r '.data.id // empty' "$TMP/nf.json")" == "$id" ]] || die "northflank: Northflank gave the volume of $app the ID $(jq -r '.data.id' "$TMP/nf.json"), not $id"
+    log "northflank: made the volume $id ($size MB) for $app"
+    return 0
+  fi
+  nf_ok "$code" || die "northflank: can't look up the volume $id ($code): $(nf_error)"
+  other="$(jq -r --arg a "$app" '[.data.attachedObjects[]? | select(.id != $a) | .id] | join(", ")' "$TMP/nf.json")"
+  [[ -z "$other" ]] || die "northflank: the volume $id is attached to $other, not $app. Detach it at app.northflank.com, or rename the volume in the Compose file"
+  now="$(jq -r '.data.spec.storageSize // 0' "$TMP/nf.json")"
+  if [[ "$now" -gt "$size" ]]; then
+    log "northflank: the volume $id stays at $now MB, since a volume can't shrink (volume_size is $size)"
+    size="$now"
+  fi
+  # The reference doesn't say whether a volume's mounts come back, so without them it
+  # sends them again.
+  if ! jq -e --argjson m "$mounts" --argjson size "$size" \
+    '(.data | has("mounts")) and ([.data.mounts[]?.containerMountPath] | sort) == ($m | sort) and .data.spec.storageSize == $size' "$TMP/nf.json" >/dev/null; then
+    jq -n --argjson m "$mounts" --argjson size "$size" '{mounts: [$m[] | {containerMountPath: .}], spec: {storageSize: $size}}' > "$TMP/volume.json"
+    code="$(nf POST "/projects/$project/volumes/$id" "$TMP/volume.json")"
+    nf_ok "$code" || die "northflank: can't update the volume $id ($code): $(nf_error)"
+    log "northflank: the volume $id is $size MB at $(jq -r 'join(", ")' <<< "$mounts")"
+  fi
+}
+
+# northflank_attach <project> <service> <volume ID...>: attach the service's volumes, and
+# detach the ones its Compose file no longer mounts. Their data stays.
+northflank_attach() {
+  local project="$1" service="$2" id code; shift 2
+  for id in "$@"; do
+    code="$(nf GET "/projects/$project/volumes/$id")"
+    nf_ok "$code" || die "northflank: can't look up the volume $id ($code): $(nf_error)"
+    jq -e --arg s "$service" 'any(.data.attachedObjects[]?; .id == $s)' "$TMP/nf.json" >/dev/null && continue
+    jq -n --arg s "$service" '{nfObject: {id: $s, type: "service"}}' > "$TMP/attach.json"
+    code="$(nf POST "/projects/$project/volumes/$id/attach" "$TMP/attach.json")"
+    nf_ok "$code" || die "northflank: can't attach the volume $id to $service ($code): $(nf_error)"
+    log "northflank: attached the volume $id to $service"
+  done
+  code="$(nf GET "/projects/$project/volumes?per_page=100")"
+  nf_ok "$code" || { log "northflank: can't list the volumes ($code): $(nf_error)"; return 0; }
+  for id in $(jq -r --arg s "$service" "$NF_VOLUMES"' | select(any(.attachedObjects[]?; .id == $s)) | .id | select(. as $v | $ARGS.positional | index($v) | not)' --args "$@" < "$TMP/nf.json"); do
+    jq -n --arg s "$service" '{nfObject: {id: $s, type: "service"}}' > "$TMP/attach.json"
+    code="$(nf POST "/projects/$project/volumes/$id/detach" "$TMP/attach.json")"
+    if nf_ok "$code"; then
+      log "northflank: detached the volume $id from $service, which no longer mounts it. Its data stays there until you delete it at app.northflank.com"
+    else
+      log "northflank: can't detach the volume $id from $service ($code): $(nf_error)"
+    fi
+  done
+}
+
+# northflank_delete_volumes <project>: delete the project's volumes and their data. One whose
+# service is still going away can't be deleted yet; it is left for the next try.
+northflank_delete_volumes() {
+  local project="$1" id code
+  code="$(nf GET "/projects/$project/volumes?per_page=100")"
+  nf_ok "$code" || return 0
+  for id in $(jq -r "$NF_VOLUMES"' | .id' "$TMP/nf.json"); do
+    code="$(nf DELETE "/projects/$project/volumes/$id")"
+    if nf_ok "$code"; then log "northflank: deleted the volume $id and its data"; fi
+  done
 }
 
 # northflank_body <name> <plan> <image path> <credentials ID or ""> <spec file> <env file>:
@@ -2971,10 +3087,11 @@ northflank_wait() {
 # northflank_deploy <target> <dry run 0|1>: create or update a service per app in the
 # target's project, and cloudflared when it has a tunnel, then wait until they all run
 northflank_deploy() {
-  local host="$1" dry_run="$2" project plan name compose env_file image server cred var digest path code url
-  local services=() creds="" others uid=""
+  local host="$1" dry_run="$2" project plan size name compose env_file bucket image server cred var digest path code url
+  local services=() volumes=() creds="" others uid="" volume mounts service
   project="$(jq -r --arg h "$host" '.[$h].id' "$TMP/platforms.json")"
   plan="$(jq -r --arg h "$host" '.[$h].size' "$TMP/platforms.json")"
+  size="$(jq -r --arg h "$host" '.[$h].volume_size // 0' "$TMP/platforms.json")"
   northflank_check "$host"
   if [[ "$dry_run" == 1 ]]; then
     log "$host: would send this to Northflank, project $project (dry run, secrets left out)"
@@ -2990,7 +3107,8 @@ northflank_deploy() {
     uid="$(jq -r '.data.uid // empty' "$TMP/nf.json")"
   fi
 
-  while IFS=$'\t' read -r name compose env_file; do
+  # Fields split at \x1f, which unlike a tab keeps an empty env_file in its place.
+  while IFS=$'\x1f' read -r name compose env_file bucket; do
     [[ -n "$name" ]] || continue
     jq --arg h "$host" --arg n "$name" '.[$h].services[$n]' "$TMP/platforms.json" > "$TMP/spec.json"
     image="$(jq -r '.image' "$TMP/spec.json")"
@@ -3013,20 +3131,37 @@ northflank_deploy() {
     var="$(jq -r --arg s "$server" '.[$s].password_env // empty' "$TMP/registries.json")"
     if [[ -n "$var" ]]; then digest="$(image_digest "$image" "$(jq -r --arg s "$server" '.[$s].username' "$TMP/registries.json")" "${!var:-}")"; else digest="$(image_digest "$image")"; fi
     if [[ -n "$digest" ]]; then path="$(image_name "$image")@$digest"; else path="$image"; log "$host: the registry doesn't say what $image points to, so Northflank pulls the tag again only when something else changes"; fi
-    if [[ -n "$env_file" ]]; then env_json "$env_file" > "$TMP/env.json"; else echo '{}' > "$TMP/env.json"; fi
+    app_env_json "$name" "$env_file" > "$TMP/env.json"
     northflank_body "$name" "$plan" "$path" "$cred" "$TMP/spec.json" "$TMP/env.json" > "$TMP/service.json"
     rm -f "$TMP/env.json"
+    volumes=()
+    while IFS=$'\t' read -r volume mounts; do
+      [[ -n "$volume" ]] || continue
+      volumes+=("$volume")
+      if [[ "$dry_run" == 1 ]]; then
+        echo "volume $volume: $size MB at $(jq -r 'join(", ")' <<< "$mounts"), made when missing and attached to $name"
+      else
+        northflank_volume "$project" "$name" "$volume" "$mounts" "$size"
+      fi
+    done < <(jq -r '.volumes[]? | [.id, (.mounts | tojson)] | @tsv' "$TMP/spec.json")
     if [[ "$dry_run" == 1 ]]; then
       echo "PUT /projects/$project/services/deployment"
       redact_body < "$TMP/service.json"
     else
+      # A new service starts with its volumes; one that runs gets them attached below.
+      if [[ ${#volumes[@]} -gt 0 && "$(nf GET "/projects/$project/services/$name")" == 404 ]]; then
+        jq '. + {createOptions: {volumesToAttach: $ARGS.positional}}' --args "${volumes[@]}" < "$TMP/service.json" > "$TMP/service.new"
+        mv "$TMP/service.new" "$TMP/service.json"
+      fi
       code="$(nf PUT "/projects/$project/services/deployment" "$TMP/service.json")"
       nf_ok "$code" || die "northflank: can't update the service $name ($code): $(nf_error)"
-      log "$host: $name: $image${digest:+ = $digest}"
-      services+=("$(jq -r --arg n "$name" '.data.id // $n' "$TMP/nf.json")")
+      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}"
+      service="$(jq -r --arg n "$name" '.data.id // $n' "$TMP/nf.json")"
+      services+=("$service")
+      northflank_attach "$project" "$service" ${volumes[@]+"${volumes[@]}"}
     fi
     rm -f "$TMP/service.json"
-  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // "")] | @tsv' "$TMP/targets.json")
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // "")] | join("\u001f")' "$TMP/targets.json")
 
   if [[ "$(jq -r --arg h "$host" '.[$h].tunnel' "$TMP/targets.json")" == "true" ]]; then
     ( umask 077; jq -r --arg h "$host" '.[$h]' "$TMP/tunnel_tokens.json" > "$TMP/tunnel.token" )
@@ -3082,6 +3217,9 @@ northflank_status() {
   for s in $expected; do
     [[ "$seen" == *" $s "* ]] || printf '  %-20s %s\n' "$s" "not deployed yet (freelunch deploy)"
   done
+  code="$(nf GET "/projects/$project/volumes?per_page=100")"
+  nf_ok "$code" || return 0
+  jq -r "$NF_VOLUMES"' | "  \(.id | . + " " * (20 - length)) volume, \(.spec.storageSize) MB, \([.attachedObjects[]?.id] | if length == 0 then "attached to nothing" else "mounted in " + join(", ") end)"' "$TMP/nf.json"
 }
 
 # --- domain ---------------------------------------------------------------------------
