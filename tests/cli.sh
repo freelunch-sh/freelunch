@@ -2131,11 +2131,11 @@ test_northflank_keeps_named_volumes() {
   printf '    volumes: ["results:/var/lib/results"]\nvolumes:\n  results: {}\n' >> "$p/compose.yaml"
   v="$p/nf/volumes/freelunch/api-results.json"
   out="$(GHCR_TOKEN=x TEST_NF_TOKEN='' nf_in "$p" deploy --dry-run 2>&1)"
-  contains "$out" "volume api-results: 4096 MB at /var/lib/results, made when missing and attached to api"
+  contains "$out" "volume api-results: 6144 MB at /var/lib/results, made when missing and attached to api"
   out="$(GHCR_TOKEN=x nf_in "$p" deploy 2>&1)"
-  contains "$out" "northflank: made the volume api-results (4096 MB) for api"
+  contains "$out" "northflank: made the volume api-results (6144 MB) for api"
   equals "$(jq -c '{mounts, spec, attachedObjects}' "$v")" \
-    '{"mounts":[{"containerMountPath":"/var/lib/results"}],"spec":{"accessMode":"ReadWriteOnce","storageSize":4096},"attachedObjects":[{"id":"api","type":"service"}]}'
+    '{"mounts":[{"containerMountPath":"/var/lib/results"}],"spec":{"accessMode":"ReadWriteOnce","storageSize":6144},"attachedObjects":[{"id":"api","type":"service"}]}'
   # The new service starts with it, so there is nothing to attach afterwards.
   equals "$(sent "$p" api | jq -c .createOptions)" '{"volumesToAttach":["api-results"]}'
   fails grep -q '^nf POST /projects/freelunch/volumes/api-results/attach' "$p/fake.log"
@@ -2146,7 +2146,7 @@ test_northflank_keeps_named_volumes() {
   equals "$(sent "$p" api | jq -c .createOptions)" null
   # status lists it.
   out="$(nf_in "$p" status)"
-  contains "$out" "  api-results          volume, 4096 MB, mounted in api"
+  contains "$out" "  api-results          volume, 6144 MB, mounted in api"
   # A service that runs and gets a volume has it attached.
   jq -c '.attachedObjects = []' "$v" > "$v.new" && mv "$v.new" "$v"
   out="$(GHCR_TOKEN=x nf_in "$p" deploy 2>&1)"
@@ -2172,13 +2172,13 @@ test_northflank_volume_errors_come_through() {
   fails grep -q '^nf PUT' "$p/fake.log"
   # A volume of the same name that another service uses stays where it is.
   mkdir -p "$p/nf/volumes/freelunch"
-  echo '{"name":"api-results","spec":{"storageSize":4096},"attachedObjects":[{"id":"worker","type":"service"}]}' > "$p/nf/volumes/freelunch/api-results.json"
+  echo '{"name":"api-results","spec":{"storageSize":6144},"attachedObjects":[{"id":"worker","type":"service"}]}' > "$p/nf/volumes/freelunch/api-results.json"
   if out="$(GHCR_TOKEN=x nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
   contains "$out" "northflank: the volume api-results is attached to worker, not api"
   # A bigger volume_size grows it; a smaller one can't shrink it.
   echo '{"name":"api-results","spec":{"storageSize":8192},"attachedObjects":[]}' > "$p/nf/volumes/freelunch/api-results.json"
   out="$(GHCR_TOKEN=x nf_in "$p" deploy 2>&1)"
-  contains "$out" "northflank: the volume api-results stays at 8192 MB, since a volume can't shrink (volume_size is 4096)"
+  contains "$out" "northflank: the volume api-results stays at 8192 MB, since a volume can't shrink (volume_size is 6144)"
   equals "$(jq -c .spec.storageSize "$p/nf/volumes/freelunch/api-results.json")" 8192
 }
 

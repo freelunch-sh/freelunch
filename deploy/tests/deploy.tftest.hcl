@@ -290,7 +290,7 @@ run "named_volumes_become_volumes_on_the_platform" {
   }
 
   assert {
-    condition     = output.platforms["northflank-main"].volume_size == 4096
+    condition     = output.platforms["northflank-main"].volume_size == 6144
     error_message = "The volume size comes from the platform stack."
   }
 }

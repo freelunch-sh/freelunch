@@ -12,11 +12,11 @@ run "free_sandbox_by_default" {
       region       = "europe-west"
       arch         = "amd64"
       size         = "nf-compute-20"
-      volume_size  = 4096
+      volume_size  = 6144
       tunnel       = true
       max_services = 2
     }
-    error_message = "The default target is one Northflank project on the biggest free plan, with two services and Northflank's smallest volumes."
+    error_message = "The default target is one Northflank project on the biggest free plan, with two services and the smallest volumes Northflank takes."
   }
 }
 
@@ -68,11 +68,11 @@ run "names_northflank_refuses_fail" {
   expect_failures = [var.name_prefix]
 }
 
-run "volumes_cant_be_smaller_than_northflanks_smallest" {
+run "volumes_under_6144_mb_are_refused" {
   command = plan
 
   variables {
-    volume_size = 1024
+    volume_size = 4096
   }
 
   expect_failures = [var.volume_size]

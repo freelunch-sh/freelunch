@@ -152,7 +152,7 @@ release can change commands and the project layout.
   do: a folder of the host, a build without an image, Compose variables in the image, more
   services than the free plan has, or a route to an app or port that isn't there.
 - **Volumes on Northflank.** A named volume in an app's Compose file becomes a Northflank
-  volume, `<app>-<volume>` of `volume_size` MB (4096 by default, Northflank's smallest), so
+  volume, `<app>-<volume>` of `volume_size` MB (6144 by default, the smallest Northflank takes), so
   what the app writes there survives deploys and restarts. deploy makes it once, attaches it
   to the service, and detaches it when the Compose file drops it; only `destroy northflank`
   deletes it, with its data. `status` lists the volumes. A bind mount, a volume without a
