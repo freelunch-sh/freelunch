@@ -27,13 +27,13 @@ variable "plan" {
 }
 
 variable "volume_size" {
-  description = "Size in MB of each volume freelunch deploy makes for an app's named volumes. Northflank's smallest is 4096; volumes can grow later but never shrink."
+  description = "Size in MB of each volume freelunch deploy makes for an app's named volumes. Northflank's default nvme storage class takes 6144 or more; volumes can grow later but never shrink."
   type        = number
-  default     = 4096
+  default     = 6144
 
   validation {
-    condition     = var.volume_size >= 4096 && floor(var.volume_size) == var.volume_size
-    error_message = "volume_size is a whole number of MB, 4096 (Northflank's smallest volume) or more."
+    condition     = var.volume_size >= 6144 && floor(var.volume_size) == var.volume_size
+    error_message = "volume_size is a whole number of MB, 6144 or more (Northflank refuses smaller volumes on its default nvme storage class)."
   }
 }
 
