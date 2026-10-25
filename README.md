@@ -90,7 +90,7 @@ the project pins; `freelunch ci init` writes the workflows:
 
 ```yaml
 - uses: actions/checkout@v7
-- uses: freelunch-sh/freelunch@v1.0.0
+- uses: freelunch-sh/freelunch@v0.1.0
   with:
     run: deploy
     bundle: ${{ secrets.FREELUNCH_BUNDLE }}
@@ -101,7 +101,7 @@ Without installing anything but Docker:
 ```bash
 docker run --rm -it -v "$PWD:/project" -v ~/.oci:/root/.oci:ro \
   -v ~/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro -e FREELUNCH_SSH_KEY=/root/.ssh/id_ed25519 \
-  ghcr.io/freelunch-sh/freelunch:1.0.0 deploy
+  ghcr.io/freelunch-sh/freelunch:0.1.0 deploy
 ```
 
 The full walkthrough, with private images, secrets and persistent data, is
@@ -215,9 +215,11 @@ freelunch/
 
 ## Roadmap
 
-Releases are small: every usable feature gets its own tag.
+Releases are small: every usable feature gets its own tag. Versions stay at 0.x until every
+part has been used against real accounts; 1.0 comes after that, and from then on a release
+doesn't break your project.
 
-- **v1.0 (next release), deploy your project from its own repo:** install freelunch once and pin its
+- **v0.1 (next release), deploy your project from its own repo:** install freelunch once and pin its
   version in each project (or use the versioned Docker image), keep config and state in that project, put its
   Docker image (public or from a private registry) on an always-free host (an Oracle VM, or
   Northflank's free plan when Oracle has no capacity), reach it at
@@ -227,7 +229,7 @@ Releases are small: every usable feature gets its own tag.
   the state in a store, a GitHub Action, and a wait for capacity in GitHub Actions
   ([docs/ci.md](docs/ci.md)).
 - **Next, in order:**
-  1. **Menus:** ready-made stacks in one command, starting with the v1.0 setup.
+  1. **Menus:** ready-made stacks in one command, starting with the v0.1 setup.
   2. **$0 guardrails:** a budget alert on every provider and a cost summary after each plan.
   3. **Health alerts** for hosts and apps.
   4. **Backups** to R2 or B2, with restore.

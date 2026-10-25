@@ -1,6 +1,6 @@
 # Deploy a container from your own repository
 
-This walks through the v1.0 setup: your project's backend image on an Always Free Oracle
+This walks through the v0.1 setup: your project's backend image on an Always Free Oracle
 Cloud VM, served at `https://api.example.com` through a Cloudflare Tunnel, and updated with
 `freelunch deploy` without replacing the VM. The only open port is SSH.
 
@@ -42,13 +42,13 @@ curl -fsSL https://raw.githubusercontent.com/freelunch-sh/freelunch/main/install
 ```
 
 It puts the latest release in `~/.local/share/freelunch/<version>` and the `freelunch`
-command in `~/.local/bin` (`| bash -s v1.0.0` installs that version instead). `init` then
+command in `~/.local/bin` (`| bash -s v0.1.0` installs that version instead). `init` then
 pins the project to it in `.freelunch/version`. Whenever freelunch runs in a project pinned
 to another version, it runs that one instead, downloaded the first time, so a teammate, a
 second machine and CI all run what the project pins. `freelunch version` says which that is.
 
 `freelunch upgrade` installs the latest release and moves the project's pin to it (or
-`freelunch upgrade v1.1.0`, `main`, a commit). Commit `.freelunch/version`, and run
+`freelunch upgrade v0.2.0`, `main`, a commit). Commit `.freelunch/version`, and run
 `freelunch plan all` to see what the new version changes. If it needs newer providers, see
 [Troubleshooting](#troubleshooting).
 
@@ -60,7 +60,7 @@ run downloads that version into the container first:
 alias freelunch='docker run --rm -it -v "$PWD:/project" \
   -v "$HOME/.oci:/root/.oci:ro" \
   -v "$HOME/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro" -e FREELUNCH_SSH_KEY=/root/.ssh/id_ed25519 \
-  ghcr.io/freelunch-sh/freelunch:1.0.0'
+  ghcr.io/freelunch-sh/freelunch:0.1.0'
 ```
 
 In `~/.oci/config`, write `key_file=~/.oci/<key>.pem` with a `~` so the path also works inside
@@ -516,7 +516,7 @@ modules to a release tag:
 
 ```hcl
 module "host" {
-  source = "github.com/freelunch-sh/freelunch//providers/oci/modules/docker-host?ref=v1.0.0"
+  source = "github.com/freelunch-sh/freelunch//providers/oci/modules/docker-host?ref=v0.1.0"
 
   tenancy_id        = var.tenancy_ocid
   region            = "eu-frankfurt-1"
@@ -525,7 +525,7 @@ module "host" {
 }
 
 module "tunnel" {
-  source = "github.com/freelunch-sh/freelunch//providers/cloudflare/modules/tunnel?ref=v1.0.0"
+  source = "github.com/freelunch-sh/freelunch//providers/cloudflare/modules/tunnel?ref=v0.1.0"
 
   account_id = var.cloudflare_account_id
   zone_id    = var.cloudflare_zone_id

@@ -88,7 +88,7 @@ Or use it as a module from your own root module, pinned to a release:
 
 ```hcl
 module "oci" {
-  source = "github.com/freelunch-sh/freelunch//providers/oci/modules/docker-host?ref=v1.0.0"
+  source = "github.com/freelunch-sh/freelunch//providers/oci/modules/docker-host?ref=v0.1.0"
 
   tenancy_id      = var.tenancy_ocid
   region          = "eu-frankfurt-1"

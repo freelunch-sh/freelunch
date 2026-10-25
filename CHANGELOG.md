@@ -2,11 +2,13 @@
 
 All notable changes to freelunch. Versions follow [semantic versioning](https://semver.org/):
 a minor release per usable feature, a major release only for breaking changes to the host
-contract, the CLI or the project layout.
+contract, the CLI or the project layout. Before 1.0, any minor release can break them.
 
 ## [Unreleased]
 
-The first release, planned as 1.0.0: deploy your project's container from its own repository.
+The first release, planned as 0.1.0: deploy your project's container from its own repository.
+Versions stay below 1.0 until every part has run against real accounts; until then a minor
+release can change commands and the project layout.
 
 ### Added
 

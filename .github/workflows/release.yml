@@ -2,9 +2,10 @@ name: release
 
 # A release is a CHANGELOG.md heading: rename `## [Unreleased]` to `## [1.2.0] - 2026-11-03`
 # (with a new empty `## [Unreleased]` above it) and merge that to main. This workflow then
-# tags v1.2.0, pushes the image to ghcr.io/<owner>/freelunch as 1.2.0, 1.2 and 1, and makes
-# the GitHub release with that section as its notes. A version that is tagged already is left
-# alone, so it runs on every change to CHANGELOG.md. Run it from the Actions tab to retry.
+# tags v1.2.0, pushes the image to ghcr.io/<owner>/freelunch as 1.2.0, 1.2 and 1 (no bare 0:
+# below 1.0 a minor release can break things), and makes the GitHub release with that section
+# as its notes. A version that is tagged already is left alone, so it runs on every change to
+# CHANGELOG.md. Run it from the Actions tab to retry.
 on:
   push:
     branches: [main]
@@ -83,7 +84,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}},value=${{ needs.version.outputs.tag }}
             type=semver,pattern={{major}}.{{minor}},value=${{ needs.version.outputs.tag }}
-            type=semver,pattern={{major}},value=${{ needs.version.outputs.tag }}
+            type=semver,pattern={{major}},value=${{ needs.version.outputs.tag }},enable=${{ !startsWith(needs.version.outputs.tag, 'v0.') }}
       - uses: docker/build-push-action@v7
         with:
           context: .
