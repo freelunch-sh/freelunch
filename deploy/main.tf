@@ -235,6 +235,24 @@ locals {
     if t.kind == "platform" && try(local.platforms[h].max_services, null) != null && (t.tunnel ? length(t.apps) + 1 : length(t.apps)) > try(local.platforms[h].max_services, 0)
   ])
 
+  # What a platform target costs a month at its stack's prices: a service per app, cloudflared,
+  # and each named volume at volume_size, billed per GB.
+  costs = {
+    for h, t in local.targets : h => {
+      services   = length(t.apps) * local.platforms[h].pricing.service + (t.tunnel ? local.platforms[h].pricing.tunnel : 0)
+      volume_gb  = sum(concat([0], [for name, a in t.apps : length(try(local.volumes[name], []))])) * try(local.platforms[h].volume_size, 0) / 1024
+      budget     = local.platforms[h].pricing.budget
+      per_volume = local.platforms[h].pricing.volume_gb
+    } if t.kind == "platform" && try(local.platforms[h].pricing.service, null) != null
+  }
+
+  over_budget = sort([
+    for h, c in local.costs : format(
+      "%s would cost about $%.2f a month (services $%.2f, %g GB of volumes $%.2f), and its free plan covers $%g",
+      h, c.services + c.volume_gb * c.per_volume, c.services, c.volume_gb, c.volume_gb * c.per_volume, c.budget
+    ) if c.budget != null && c.services + c.volume_gb * c.per_volume > c.budget
+  ])
+
   # A route to a platform goes to <app>:<port>, so that app has to run there and listen on
   # that port.
   route_problems = sort(compact([

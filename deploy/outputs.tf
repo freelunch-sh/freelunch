@@ -19,7 +19,7 @@ output "targets" {
 }
 
 output "platforms" {
-  description = "Deploy plan per container platform target: the provider's ID for it (the Northflank project), region, plan and volume size, and a service per app from its Compose file."
+  description = "Deploy plan per container platform target: the provider's ID for it (the Northflank project), region, plan and volume size, what it costs a month and what the free plan covers, and a service per app from its Compose file."
   value = {
     for h, t in local.targets : h => {
       provider    = local.platforms[h].provider
@@ -27,6 +27,8 @@ output "platforms" {
       region      = local.platforms[h].region
       size        = local.platforms[h].size
       volume_size = try(local.platforms[h].volume_size, null)
+      cost        = try(local.costs[h].services + local.costs[h].volume_gb * local.costs[h].per_volume, null)
+      budget      = try(local.costs[h].budget, null)
       services    = { for name, a in t.apps : name => try(local.specs[name], null) }
     } if t.kind == "platform"
   }
@@ -39,6 +41,11 @@ output "platforms" {
   precondition {
     condition     = length(local.too_many) == 0
     error_message = "${join(". ", local.too_many)}. Move an app to another target, or allow paid services with acknowledge_billable_resources = true in that stack."
+  }
+
+  precondition {
+    condition     = length(local.over_budget) == 0
+    error_message = "${join(". ", local.over_budget)}. Use fewer or smaller volumes (volume_size in that stack), or allow paid resources with acknowledge_billable_resources = true in that stack."
   }
 
   precondition {
