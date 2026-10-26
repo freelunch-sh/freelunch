@@ -53,7 +53,7 @@ on a platform they are the service's environment, under the `env_file`'s values.
 | Output | Description |
 |---|---|
 | `targets` | Host → `{ kind, provider, address, user, arch, apps = { name → { compose, env_file, bucket } }, tunnel, urls }`, with absolute paths. `kind` is `host` or `platform`; a platform has no address or user, and `arch` is null for a host outside the inventory |
-| `platforms` | Platform target → `{ provider, id, region, size, volume_size, services = { app → { image, command, entrypoint, environment, ports, volumes, healthcheck } } }`, read from each app's Compose file. `volumes` lists each named volume as `{ id = "<app>-<volume>", mounts = [paths] }` |
+| `platforms` | Platform target → `{ provider, id, region, size, volume_size, cost, budget, services = { app → { image, command, entrypoint, environment, ports, volumes, healthcheck } } }`, read from each app's Compose file. `volumes` lists each named volume as `{ id = "<app>-<volume>", mounts = [paths] }`. `cost` is the estimate in dollars a month from the stack's `pricing`, and `budget` what the free plan covers; both null without prices |
 | `app_env` | App → the S3 settings and keys of its bucket (sensitive) |
 | `tunnel_tokens` | Host → cloudflared token (sensitive) |
 | `registries` | As given |
@@ -73,7 +73,8 @@ The plan fails, before anything is copied, when:
   `build`), uses Compose variables in its image, or leaves an environment variable without
   a value; it mounts a folder of the host (`./data:/data`), a volume without a name, a
   read-only or external volume, or a `tmpfs`, or has volumes on a platform that keeps none; an app's name isn't one the platform takes; the apps and
-  `cloudflared` need more services than the free plan has; or a route goes to an app that
+  `cloudflared` need more services than the free plan has; the services and volumes would
+  cost more a month than the free plan covers; or a route goes to an app that
   doesn't run there, or to a port its Compose file doesn't list.
 
 A tunnel whose host is gone from the inventory is skipped, so it doesn't block deploys to

@@ -158,7 +158,12 @@ release can change commands and the project layout.
   deletes it, with its data. `status` lists the volumes. A bind mount, a volume without a
   name, `:ro` and `external: true` stop the deploy with what to change. Not live-tested:
   Northflank's pricing page lists volumes on the free Sandbox, and deploy stops with
-  Northflank's message if it turns one down.
+  Northflank's message if it turns one down. A bigger `volume_size` grows the volumes on the
+  next deploy; they never shrink.
+- **Cost estimate on Northflank.** deploy adds up what the target costs a month at
+  Northflank's prices (the services, cloudflared and every volume at `volume_size`), says it,
+  and stops when it's more than the Sandbox's $20, unless the stack has
+  `acknowledge_billable_resources = true`. The prices live in the provider's `provider.yaml`.
 - **Buckets for apps.** The new [backblaze-b2](providers/backblaze-b2/) stack (10 GB free,
   no card) and R2 in the cloudflare stack (`buckets`) make private buckets, each with a key
   that only reaches it. `bucket = "backblaze-b2-results"` in apps.tfvars gives the app the

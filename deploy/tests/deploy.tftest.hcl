@@ -293,6 +293,40 @@ run "named_volumes_become_volumes_on_the_platform" {
     condition     = output.platforms["northflank-main"].volume_size == 6144
     error_message = "The volume size comes from the platform stack."
   }
+
+  assert {
+    condition     = abs(output.platforms["northflank-main"].cost - (5.4 + 12 * 0.11657)) < 0.001 && output.platforms["northflank-main"].budget == 20
+    error_message = "The app's service and two 6 GB volumes cost about $6.80 a month, of the $20 the free plan covers."
+  }
+}
+
+run "volumes_have_to_fit_in_the_free_plan" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid-big-volumes.tfstate"
+    tunnel_state_path    = null
+    apps                 = { api = { host = "northflank-main", compose = "named-volumes.yaml" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
+run "platforms_without_prices_have_no_estimate" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid-no-volumes.tfstate"
+    tunnel_state_path    = null
+    apps                 = { api = { host = "northflank-main", compose = "api.yaml" } }
+  }
+
+  assert {
+    condition     = output.platforms["northflank-main"].cost == null && output.platforms["northflank-main"].budget == null
+    error_message = "A platform stack that gives no prices gets no estimate and no check."
+  }
 }
 
 run "platforms_dont_have_the_hosts_folders" {

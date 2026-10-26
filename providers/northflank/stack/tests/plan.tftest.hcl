@@ -15,6 +15,7 @@ run "free_sandbox_by_default" {
       volume_size  = 6144
       tunnel       = true
       max_services = 2
+      pricing      = { budget = 20, service = 5.4, tunnel = 2.7, volume_gb = 0.11657 }
     }
     error_message = "The default target is one Northflank project on the biggest free plan, with two services and the smallest volumes Northflank takes."
   }
@@ -53,7 +54,7 @@ run "acknowledged_plans_lift_the_limits" {
   }
 
   assert {
-    condition     = output.platforms[0].size == "nf-compute-50" && output.platforms[0].max_services == null
+    condition     = output.platforms[0].size == "nf-compute-50" && output.platforms[0].max_services == null && output.platforms[0].pricing.budget == null
     error_message = "With acknowledge_billable_resources, any plan and any number of services are allowed."
   }
 }

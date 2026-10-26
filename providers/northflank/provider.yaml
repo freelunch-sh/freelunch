@@ -32,3 +32,8 @@ limits:
   # The docs say a Sandbox team gets one project. The pricing page says 2, but the live test
   # of 2026-10-24 got a 409 for a second one.
   max_projects: 1
+  # Dollars a month, for deploy's estimate: the Sandbox's resources, each plan, and a GB of
+  # volume. deploy stops when the services and volumes would cost more than the credit.
+  monthly_credit: 20
+  plan_prices: { nf-compute-10: 2.70, nf-compute-20: 5.40 }
+  volume_gb_price: 0.11657

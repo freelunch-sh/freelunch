@@ -3087,12 +3087,18 @@ northflank_wait() {
 # northflank_deploy <target> <dry run 0|1>: create or update a service per app in the
 # target's project, and cloudflared when it has a tunnel, then wait until they all run
 northflank_deploy() {
-  local host="$1" dry_run="$2" project plan size name compose env_file bucket image server cred var digest path code url
+  local host="$1" dry_run="$2" project plan size cost budget name compose env_file bucket image server cred var digest path code url
   local services=() volumes=() creds="" others uid="" volume mounts service
   project="$(jq -r --arg h "$host" '.[$h].id' "$TMP/platforms.json")"
   plan="$(jq -r --arg h "$host" '.[$h].size' "$TMP/platforms.json")"
   size="$(jq -r --arg h "$host" '.[$h].volume_size // 0' "$TMP/platforms.json")"
   northflank_check "$host"
+  cost="$(jq -r --arg h "$host" '.[$h].cost // empty' "$TMP/platforms.json")"
+  budget="$(jq -r --arg h "$host" '.[$h].budget // empty' "$TMP/platforms.json")"
+  if [[ -n "$cost" ]]; then
+    if [[ -n "$budget" ]]; then log "$host: about \$$(LC_ALL=C printf '%.2f' "$cost") a month of the \$$budget the free plan covers"
+    else log "$host: about \$$(LC_ALL=C printf '%.2f' "$cost") a month, with paid resources allowed"; fi
+  fi
   if [[ "$dry_run" == 1 ]]; then
     log "$host: would send this to Northflank, project $project (dry run, secrets left out)"
   else

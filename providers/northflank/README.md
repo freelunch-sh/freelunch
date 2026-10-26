@@ -115,6 +115,62 @@ the region and the project, and whether the team has room for it, and `freelunch
 saved registry logins and the project. freelunch marks what it makes (`Managed by freelunch`
 in the description) and never takes over or deletes a project it didn't make.
 
+## Volumes
+
+Each named volume in an app's Compose file becomes one Northflank volume, `<app>-<volume>`,
+of `volume_size` MB. One size covers every volume on the target: two volumes at 20480 are
+40 GB. The default is 6144, the smallest Northflank's default storage class (nvme) takes, and
+the stack refuses less.
+
+To give the volumes more room, raise `volume_size` in `.freelunch/northflank/terraform.tfvars`
+and deploy again:
+
+```sh
+# .freelunch/northflank/terraform.tfvars: volume_size = 20480
+freelunch apply northflank    # the new size goes to deploy
+freelunch deploy              # grows each volume that is smaller; new ones start at it
+```
+
+deploy compares each volume with `volume_size`, asks Northflank to grow the smaller ones, and
+logs the new size. The data stays. `freelunch status` lists each volume with its size.
+
+- **Volumes never shrink.** With a smaller `volume_size`, a volume stays at its size and
+  deploy says so. The only way down is `freelunch destroy northflank`, which deletes the
+  volumes and their data, and deploying again.
+- **Storage comes out of the $20.** The Sandbox has no separate free storage: volumes are
+  billed at $0.11657 per GB a month from the same $20 as the services. With the app on
+  nf-compute-20 ($5.40) and cloudflared on nf-compute-10 ($2.70), about $11.90 is left, or
+  roughly 100 GB of volumes all together. deploy works this out before it sends anything
+  ([Cost estimate](#cost-estimate)).
+- **Not live-tested.** Making and growing volumes is tested against a fake API only.
+  Whether Northflank grows a volume while it's attached, or needs the service restarted,
+  isn't known yet.
+
+## Cost estimate
+
+Every deploy adds up what the target costs a month at Northflank's prices, and says it:
+
+```
+==> northflank-main: about $8.80 a month of the $20 the free plan covers
+```
+
+That's $5.40 for each app on nf-compute-20, $2.70 for cloudflared on nf-compute-10, and
+$0.11657 per GB a month for each volume at `volume_size`. When the total is more than the
+Sandbox's $20, deploy (and `--dry-run`) stops before it changes anything:
+
+```
+northflank-main would cost about $26.38 a month (services $5.40, 180 GB of volumes $20.98),
+and its free plan covers $20. Use fewer or smaller volumes (volume_size in that stack), or
+allow paid resources with acknowledge_billable_resources = true in that stack.
+```
+
+With `acknowledge_billable_resources = true` deploy still says the estimate and doesn't
+stop. The prices are under `limits:` in [`provider.yaml`](provider.yaml), from Northflank's
+pricing page and plans API; when Northflank changes them, that file is the one to change. It
+is an estimate: it counts the volumes in the Compose files at `volume_size`, so a volume that
+stayed bigger after `volume_size` went down, a detached volume that still holds data, and
+services made in the dashboard aren't in it.
+
 ## Caveats
 
 - **Two services.** With the tunnel, your app and cloudflared use both, so a second app
@@ -126,7 +182,7 @@ in the description) and never takes over or deletes a project it didn't make.
   time (`volume_size` MB, 6144 by default, the smallest Northflank takes), attaches it to the app's
   service, and detaches it, data and all, when the Compose file drops it. Only `freelunch
   destroy northflank` deletes it, with the data. A volume can grow (a bigger `volume_size`)
-  but never shrink. With a volume, the old container stops before the new one starts, so
+  but never shrink ([Volumes](#volumes)). With a volume, the old container stops before the new one starts, so
   a deploy has a few seconds of downtime. For data that should live off the platform, give
   the app a bucket instead (`bucket` in apps.tfvars, from the
   [backblaze-b2](../backblaze-b2/) stack or R2 in the [cloudflare](../cloudflare/README.md#r2-buckets) one).
