@@ -2134,6 +2134,7 @@ test_northflank_keeps_named_volumes() {
   contains "$out" "volume api-results: 6144 MB at /var/lib/results, made when missing and attached to api"
   out="$(GHCR_TOKEN=x nf_in "$p" deploy 2>&1)"
   contains "$out" "northflank: made the volume api-results (6144 MB) for api"
+  contains "$out" "northflank-main: about \$8.80 a month of the \$20 the free plan covers"
   equals "$(jq -c '{mounts, spec, attachedObjects}' "$v")" \
     '{"mounts":[{"containerMountPath":"/var/lib/results"}],"spec":{"accessMode":"ReadWriteOnce","storageSize":6144},"attachedObjects":[{"id":"api","type":"service"}]}'
   # The new service starts with it, so there is nothing to attach afterwards.

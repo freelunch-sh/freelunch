@@ -302,6 +302,14 @@ On a container platform there is no host folder. A named volume (`data:/data`, l
 `volumes:` at the top of the Compose file) works on both: Docker keeps it on a VM, and on
 Northflank `deploy` makes a volume for it.
 
+On Northflank each volume is `volume_size` MB, 6144 (6 GB) by default and at least. For more
+room, raise it in `.freelunch/northflank/terraform.tfvars`, then run `freelunch apply
+northflank` and `freelunch deploy`: deploy grows each smaller volume and keeps its data. A
+volume never shrinks, and its storage is paid from the Sandbox's $20 a month, which leaves
+roughly 100 GB for all volumes together beside the two services. Each deploy says what the
+target costs a month and stops when that's more than the $20. The
+[Northflank page](../providers/northflank/README.md#volumes) has the details.
+
 ### Keep data in a bucket
 
 A bucket keeps an app's files off the machine it runs on, so they survive a new VM or a

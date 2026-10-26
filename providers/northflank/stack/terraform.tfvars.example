@@ -11,5 +11,6 @@ plan = "nf-compute-20"
 
 # Size in MB of each volume deploy makes for a named volume in an app's Compose file.
 # 6144 is the smallest Northflank takes, about $0.70 a month of the Sandbox's $20. Volumes grow
-# when this grows, and never shrink.
+# when this grows (apply northflank, then deploy), and never shrink. All volumes together
+# fit in about 100 GB beside the two services; deploy stops when they'd cost more than $20.
 # volume_size = 6144
