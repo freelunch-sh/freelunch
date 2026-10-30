@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export SCW_SECRET_KEY (or put it in .freelunch/.env).
+
+# The Scaleway project that holds the namespace (console > Project settings).
+project_id = "00000000-0000-0000-0000-000000000000"
+
+region = "fr-par"
+
+# Every app is a container of this size. The free grant is 400,000 GB-s and 200,000 vCPU-s
+# a month: one 128 MB container fits on all month (min_scale = 1); bigger ones fit when they
+# scale to zero between requests.
+# memory_mb = 128
+# min_scale = 0
+# max_scale = 1

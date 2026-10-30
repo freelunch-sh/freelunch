@@ -88,6 +88,7 @@ attributes:
 | `tunnel` | bool | whether `cloudflared` can run there, so Cloudflare Tunnel routes work |
 | `max_services` | number | how many services the free plan runs, apps and `cloudflared` together; null for no limit |
 | `volume_size` | number | MB of each volume `deploy` makes for an app's named volume; null when freelunch makes no volumes there |
+| `settings` | object | what only this platform needs, e.g. Cloud Run's label and instance size. Optional |
 | `pricing` | object | dollars a month for `deploy`'s estimate: `budget` (what the free plan covers; null once paid resources are allowed), `service` (an app on this plan), `tunnel` (`cloudflared`) and `volume_gb` (a GB of volume). Optional; without it there is no estimate |
 
 `hybrid/` aggregates them into its `platforms` output, apart from `hosts`, so SSH configs and
