@@ -163,6 +163,11 @@ release can change commands and the project layout.
   Scaleway can't pull private images from elsewhere. The plan fails an
   always-on size the grant doesn't cover. Signs in with `SCW_SECRET_KEY`. Not yet run
   against a real account.
+- **Oracle Kubernetes Engine (OKE)** as a stack: a Basic cluster, which has no control-plane
+  fee, with a node pool on Always Free Arm (`VM.Standard.A1.Flex`) in a network of its own.
+  The plan fails a pool above the free Arm allowance (2 OCPUs and 12 GB on new accounts),
+  which the `oci` stack shares. It outputs a `kubeconfig_command`; `deploy` doesn't run apps
+  on it yet, so use `kubectl` or Helm. Not yet run against a real account.
 - The [platform contract](docs/architecture.md#platform-contract): `hybrid/` aggregates
   `platforms` next to `hosts`, the cloudflare stack routes to `<app>:<port>` on a platform,
   and `deploy/` reads each platform app's Compose file and stops on what the platform can't
