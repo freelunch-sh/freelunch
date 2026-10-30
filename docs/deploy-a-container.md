@@ -30,6 +30,25 @@ shows the same setup on Northflank's free plan or a GCP micro VM.
   image needs a `linux/arm64` build. No image yet? `freelunch init --image-workflow` adds a
   GitHub Actions workflow that builds it for your hosts and pushes it to GHCR.
 
+## The short way: `freelunch setup`
+
+Steps 2 to 4 below, done once by a wizard. It asks which clouds the app may run on, most
+preferred first, and a domain on Cloudflare (or none). It reads what the clouds' own config
+has, so it only asks for the rest: the OCI tenancy and home region from `~/.oci/config`, your
+SSH public key, the gcloud project, the Azure subscription. It writes `.freelunch/` with
+`targets` in `apps.tfvars`, fills the tfvars, creates `.env` (mode 600) with the tokens you
+type in, lists what is still to fill in, and runs `freelunch doctor`:
+
+```bash
+freelunch setup                                  # asks
+freelunch setup --targets oci,northflank --domain myapp.example.org   # or answer with flags
+freelunch setup --ci                             # also the state store, the workflow and the secret
+```
+
+Run it again to change the order or add a cloud; what is filled in stays. After it,
+`freelunch up` deploys, and with `--ci` a push to `main` does. The steps below are what
+`setup` does, for when you want to know or do it by hand.
+
 ## 1. Install freelunch
 
 Pick one. The CLI is the same either way.
@@ -375,6 +394,67 @@ Service tokens
   backend        expires on 2027-10-23 14:02, in 365 days
 ```
 
+## Deploy wherever there is room: `freelunch up`
+
+Steps 3 to 6 are what `freelunch up` does in one command, and it picks the target for you.
+List the stacks you have set up, in the order you prefer them, or leave the list out to use
+every host and platform stack with a `terraform.tfvars`, Oracle first:
+
+```hcl
+# .freelunch/apps.tfvars
+targets = ["oci", "northflank"]
+
+apps = {
+  api = { compose = "../compose.yaml", env_file = "api.env" }   # no host: it goes where up puts it
+}
+```
+
+```hcl
+# .freelunch/cloudflare/terraform.tfvars
+routes = { "api.example.com" = { app = "api", port = 8080 } }   # no host either
+```
+
+```bash
+freelunch up --dry-run     # which target it would use, changing nothing
+freelunch up
+```
+
+`up` goes through the targets in order. For each one it either finds it deployed already, or
+makes it, and when the stack has no room it goes on to the next:
+
+| What the target says | What `up` does |
+|---|---|
+| Out of host capacity (OCI), after trying each availability domain | goes on to the next target |
+| The Northflank team has no room for another project | goes on to the next target |
+| Anything else: a refused sign-in, a bad tfvars, a quota you set | stops and says why; no other target stands in for it |
+
+The first target that runs the project, or has room to make it, wins. Then `up` points the
+Cloudflare tunnel and DNS record at it (a target that can't hold a tunnel, such as Cloud Run,
+serves the app at its own address instead), pins the host's SSH keys from its console (OCI;
+a host that hasn't printed them yet is waited for, `FREELUNCH_TRUST_TIMEOUT` seconds, 600 by
+default), and runs `deploy`. It asks nothing, so a push can run it, and running it again is
+safe: a target that is deployed is not made again.
+
+Every run tries the targets above the one that runs the app first. While Oracle has no room,
+that costs a failed attempt per availability domain before the app is updated on Northflank;
+once Oracle has room, the app moves there on that run, and `up` names the target it left
+(`northflank still runs the app, unused now`). It doesn't delete it: `freelunch destroy
+northflank` does.
+
+An app that mounts a volume (a `volumes:` entry in its Compose file) is the exception: its
+data doesn't move, so `up` leaves it on the target that runs it and doesn't try the targets
+above. `freelunch up --move` tries them anyway and leaves the data behind.
+
+A quota counts as no room too: AWS's `VcpuLimitExceeded`, GCP's `QUOTA_EXCEEDED`, Azure's
+`QuotaExceeded`, a 429 from Cloud Run or Scaleway's `quota_exceeded`. `up` says which, and
+goes on. For a VM, `up` pins its keys from the OCI console before deploying; on your machine
+a host whose keys can't be read in time is deployed to by trusting the first key it sees, in
+CI it isn't.
+
+The exit status of a stack that has no room is 75, so `freelunch apply oci` can tell a
+script apart from other failures. `FREELUNCH_UP_ADS` sets how many availability domains `up`
+tries on OCI (3).
+
 ## 7. Ship a new version
 
 Change the image tag in `compose.yaml` (`ghcr.io/you/api:1.4.3`), then:
@@ -404,8 +484,9 @@ If Cloudflare refuses to delete a tunnel that still has a connection, run
 
 ## Switch to another provider
 
-Oracle's free Arm capacity can stay short for days. The same project runs elsewhere: the
-app, its Compose file and the Cloudflare zone stay as they are, and only the name of the
+Oracle's free Arm capacity can stay short for days. [`freelunch up`](#deploy-wherever-there-is-room-freelunch-up)
+moves on to the next target by itself. To do it by hand, or to pin an app to one target,
+the app, its Compose file and the Cloudflare zone stay as they are, and only the name of the
 target changes in `apps.tfvars` and the routes.
 
 | Target | Free | Card | What to know |

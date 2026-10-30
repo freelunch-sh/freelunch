@@ -21,17 +21,19 @@ locals {
   # On a container platform (Northflank), cloudflared is a service of its own and reaches
   # each app by its service name, which is the app's name in apps.tfvars.
   platforms     = { for p in try(data.terraform_remote_state.inventory[0].outputs.platforms, []) : "${p.provider}-${p.name}" => p }
-  unknown_hosts = sort(tolist(setsubtract([for r in var.routes : r.host], concat(local.inventory_hosts, keys(local.platforms)))))
+  unknown_hosts = sort(tolist(setsubtract(values(local.route_host), concat(local.inventory_hosts, keys(local.platforms)))))
   outside_zone  = [for h in keys(var.routes) : h if h != var.zone && !endswith(h, ".${var.zone}")]
-  no_app        = sort([for h, r in var.routes : h if contains(keys(local.platforms), r.host) && r.app == null])
-  no_tunnel     = sort([for h, r in var.routes : "${h} (${r.host})" if !try(local.platforms[r.host].tunnel, true)])
+  no_app        = sort([for h, r in var.routes : h if contains(keys(local.platforms), local.route_host[h]) && r.app == null])
+  no_tunnel     = sort([for h, r in var.routes : "${h} (${local.route_host[h]})" if !try(local.platforms[local.route_host[h]].tunnel, true)])
+
+  route_host = { for h, r in var.routes : h => try(coalesce(r.host, var.default_host), "no host") }
 
   routes = {
     for h, r in var.routes : h => {
-      host   = r.host
+      host   = local.route_host[h]
       port   = r.port
       scheme = r.scheme
-      origin = contains(keys(local.platforms), r.host) ? coalesce(r.app, "localhost") : "localhost"
+      origin = contains(keys(local.platforms), local.route_host[h]) ? coalesce(r.app, "localhost") : "localhost"
       access = r.access
     }
   }

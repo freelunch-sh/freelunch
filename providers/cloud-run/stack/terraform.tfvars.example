@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: gcloud auth application-default login (or export CLOUD_RUN_ACCESS_TOKEN).
+
+# The Google Cloud project that runs the services; it needs a billing account.
+project_id = "my-gcp-project"
+
+# Where the services run.
+region = "us-central1"
+
+# Each app is a service of this size. Cloud Run bills the time a request is being served, and
+# the free grant is 180,000 vCPU-seconds and 360,000 GiB-seconds a month.
+# cpu           = "1"
+# memory        = "512Mi"
+# max_instances = 1

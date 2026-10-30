@@ -19,7 +19,8 @@ variable "routes" {
   description = <<-EOT
     Public hostname -> inventory host and local port, e.g.
     { "api.example.com" = { host = "oci-main", port = 8080 } }.
-    host is <provider>-<instance> from `freelunch inventory`. On a container
+    host is <provider>-<instance> from `freelunch inventory`, or default_host when left
+    out (freelunch sets it to the target freelunch up chose). On a container
     platform such as northflank-main, add app = "<name>", the app in apps.tfvars
     that serves the hostname, and port is the port its container listens on. Add
     access = { emails = ["you@example.com"] } to require an email login, or
@@ -27,7 +28,7 @@ variable "routes" {
     token through.
   EOT
   type = map(object({
-    host   = string
+    host   = optional(string)
     port   = number
     app    = optional(string)
     scheme = optional(string, "http")
@@ -42,6 +43,12 @@ variable "routes" {
     condition     = alltrue([for r in var.routes : r.app == null || can(regex("^[a-z0-9][a-z0-9_-]*$", coalesce(r.app, "x")))])
     error_message = "app is the name of an app in apps.tfvars, e.g. api."
   }
+}
+
+variable "default_host" {
+  description = "Host of the routes that name none: <provider>-<instance>. bin/freelunch sets it to the first deployed target of the project."
+  type        = string
+  default     = null
 }
 
 variable "service_token_duration" {

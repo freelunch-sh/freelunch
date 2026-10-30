@@ -1,0 +1,18 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: the same as the oci stack (~/.oci/config).
+
+region       = "eu-frankfurt-1"      # your tenancy's home region
+tenancy_ocid = "ocid1.tenancy.oc1..replace-me"
+
+ssh_public_key = "ssh-ed25519 AAAA... you@laptop"
+
+# The Kubernetes API listens on 6443. Use your own IP.
+# api_source_cidrs = ["203.0.113.7/32"]
+
+# Worker nodes are Always Free Arm instances, and share the tenancy's free cores with the
+# oci stack: 2 OCPUs and 12 GB on new accounts since June 2026, 4 and 24 on older ones.
+# node_count      = 1
+# node_ocpus      = 2
+# node_memory_gbs = 12
+# free_a1_ocpus      = 2    # set 4 and 24 if your tenancy still has them
+# free_a1_memory_gbs = 12

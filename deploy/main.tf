@@ -35,9 +35,12 @@ locals {
   # Reachable targets: everything in the inventory, plus overrides that give an address.
   known = setunion(keys(local.inventory), keys(local.platforms), [for h, o in var.hosts : h if o.address != null])
 
+  # An app without a host goes where freelunch up put the project (default_host).
+  app_host = { for name, a in var.apps : name => try(coalesce(a.host, var.default_host), "no host") }
+
   apps = {
     for name, a in var.apps : name => {
-      host     = a.host
+      host     = local.app_host[name]
       compose  = abspath(startswith(pathexpand(a.compose), "/") ? pathexpand(a.compose) : "${var.config_dir}/${a.compose}")
       env_file = a.env_file == null ? null : abspath(startswith(pathexpand(a.env_file), "/") ? pathexpand(a.env_file) : "${var.config_dir}/${a.env_file}")
       bucket   = a.bucket
@@ -62,12 +65,12 @@ locals {
     } if a.bucket != null && !contains(local.unknown_buckets, "${name} (bucket ${a.bucket})")
   }
 
-  app_hosts = distinct([for a in var.apps : a.host])
+  app_hosts = distinct(values(local.app_host))
   # A tunnel whose host is gone (destroyed, renamed) is skipped rather than blocking deploys elsewhere.
   tunnel_hosts = [for h in keys(local.tunnels) : h if contains(local.known, h)]
   target_hosts = sort(distinct(concat(local.app_hosts, local.tunnel_hosts)))
 
-  unknown_hosts = sort([for name, a in var.apps : "${name} (host ${a.host})" if !contains(local.known, a.host)])
+  unknown_hosts = sort([for name, a in var.apps : "${name} (${local.app_host[name] == "no host" ? "no host, and no target is deployed to default to: freelunch up makes one" : "host ${local.app_host[name]}"})" if !contains(local.known, local.app_host[name])])
   missing_files = sort(compact(flatten([
     for a in local.apps : [
       fileexists(a.compose) ? "" : a.compose,

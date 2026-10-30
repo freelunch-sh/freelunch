@@ -27,9 +27,11 @@ output "platforms" {
       region      = local.platforms[h].region
       size        = local.platforms[h].size
       volume_size = try(local.platforms[h].volume_size, null)
-      cost        = try(local.costs[h].services + local.costs[h].volume_gb * local.costs[h].per_volume, null)
-      budget      = try(local.costs[h].budget, null)
-      services    = { for name, a in t.apps : name => try(local.specs[name], null) }
+      # What only this platform needs (Cloud Run's label and instance size, say).
+      settings = try(local.platforms[h].settings, {})
+      cost          = try(local.costs[h].services + local.costs[h].volume_gb * local.costs[h].per_volume, null)
+      budget        = try(local.costs[h].budget, null)
+      services      = { for name, a in t.apps : name => try(local.specs[name], null) }
     } if t.kind == "platform"
   }
 

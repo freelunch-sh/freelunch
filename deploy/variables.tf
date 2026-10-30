@@ -2,13 +2,14 @@ variable "apps" {
   description = <<-EOT
     Compose apps to run, keyed by app name. Each app goes to /opt/freelunch/apps/<name>/
     on its host, or becomes a service named <name> on a container platform. host is
-    <provider>-<instance> from the inventory. compose and env_file are paths, relative to
+    <provider>-<instance> from the inventory; without it the app goes to default_host,
+    the target freelunch up chose. compose and env_file are paths, relative to
     config_dir unless absolute. bucket is <provider>-<name> of a bucket a storage stack
     makes (backblaze-b2-results, cloudflare-results); its S3 settings and keys go into the
     app's environment.
   EOT
   type = map(object({
-    host     = string
+    host     = optional(string)
     compose  = string
     env_file = optional(string)
     bucket   = optional(string)
@@ -47,6 +48,12 @@ variable "hosts" {
     user    = optional(string)
   }))
   default = {}
+}
+
+variable "default_host" {
+  description = "Where apps without a host go: <provider>-<instance>. bin/freelunch sets it to the first deployed target of the project (targets in apps.tfvars)."
+  type        = string
+  default     = null
 }
 
 variable "config_dir" {

@@ -12,6 +12,25 @@ release can change commands and the project layout.
 
 ### Added
 
+- **`freelunch setup`: the one-time wizard.** Asks where the app may run (most preferred
+  first) and for a domain, reads the OCI tenancy and home region, the SSH key, the gcloud
+  project and the Azure subscription from their own config, asks only for the rest, writes
+  `.freelunch/` with `targets` in `apps.tfvars`, creates `.env` with the tokens typed in,
+  lists what is still to fill in and runs `doctor`. `--ci` also makes the state store,
+  writes the workflow and sets the secret. Flags answer when there is no terminal.
+- **`freelunch up`: deploy wherever there is room.** One command, safe to run on every push:
+  it goes through the project's `targets` (`apps.tfvars`; every configured host and platform
+  stack, Oracle first, when left out), uses the first that runs the project or has room to
+  make it, and skips one that is out of capacity (OCI, after each availability domain) or
+  has no room for another project (Northflank's free team). Any other failure stops it. It
+  then points the Cloudflare tunnel at that target (not for one that can't hold a tunnel,
+  such as Cloud Run), pins an OCI host's keys from its console, and deploys. Apps and routes
+  without a `host` go to the target `up` chose (`default_host` in the deploy module and the
+  cloudflare stack); `init` now writes them that way, and `ci init`'s workflow runs `up` on
+  every push to `main`. A stack with no room exits with status 75. Every host cloud's out-of-capacity wording counts
+  (OCI, AWS, GCP, Azure), and so do quotas, Cloud Run's and Scaleway's included. An app that
+  mounts a volume stays on the target that runs it unless `up --move` leaves the data behind,
+  and a CI run refuses to trust a host key it couldn't pin.
 - **Install once, pin per project.** `install.sh` (`curl -fsSL
   https://raw.githubusercontent.com/freelunch-sh/freelunch/main/install.sh | bash`) installs
   the latest release as the `freelunch` command, and `init` pins the project to it in
@@ -146,6 +165,28 @@ release can change commands and the project layout.
   (the field and why), with the request's secrets left out. Moving an app from a VM is changing its target in
   `apps.tfvars` and its route, which names the app on a platform (`app = "api"`); the
   walkthrough's new "Switch to another provider" shows it for Northflank and GCP.
+- **Google Cloud Run** as the second container platform. `freelunch apply cloud-run`
+  checks the project and turns the Cloud Run API on; `deploy` makes a service per app through
+  the Admin API (image pinned to its digest, entrypoint and command, environment, the first
+  port), scaled to zero, billed per request, one instance at most and public at its `run.app`
+  URL, so it stays inside the free grant of 180,000 vCPU-seconds and 2M requests a month.
+  Services are labelled so `status` and `destroy` touch only what freelunch made. Cloud Run
+  pulls only from Google's registries, so `deploy` copies other images, public or private,
+  into a private Artifact Registry repository. No Cloudflare Tunnel or volumes there. Signs in with `gcloud` or
+  `CLOUD_RUN_ACCESS_TOKEN`. Not yet run against a real account.
+- **Scaleway Serverless Containers** as the third container platform, the one free tier that
+  can stay on: 400,000 GB-s and 200,000 vCPU-s a month cover a 128 MB container that never
+  stops. `apply scaleway` makes the namespace, `deploy` a public HTTPS container per app
+  (the environment as secret variables), `destroy` deletes both. An image from a registry
+  with a login in `apps.tfvars` is copied to a private Scaleway registry first, since
+  Scaleway can't pull private images from elsewhere. The plan fails an
+  always-on size the grant doesn't cover. Signs in with `SCW_SECRET_KEY`. Not yet run
+  against a real account.
+- **Oracle Kubernetes Engine (OKE)** as a stack: a Basic cluster, which has no control-plane
+  fee, with a node pool on Always Free Arm (`VM.Standard.A1.Flex`) in a network of its own.
+  The plan fails a pool above the free Arm allowance (2 OCPUs and 12 GB on new accounts),
+  which the `oci` stack shares. It outputs a `kubeconfig_command`; `deploy` doesn't run apps
+  on it yet, so use `kubectl` or Helm. Not yet run against a real account.
 - The [platform contract](docs/architecture.md#platform-contract): `hybrid/` aggregates
   `platforms` next to `hosts`, the cloudflare stack routes to `<app>:<port>` on a platform,
   and `deploy/` reads each platform app's Compose file and stops on what the platform can't
