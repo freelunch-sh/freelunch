@@ -1,0 +1,19 @@
+# freelunch provider metadata: the source of truth for the README checklist (bin/freelunch catalog).
+name: oke
+display_name: "Oracle Kubernetes Engine (OKE)"
+category: containers
+status: ready
+layer: service
+terraform_provider: "oracle/oci"
+iac: official
+free_tier_type: always-free
+free_tier: "Basic cluster with no control-plane fee; worker nodes on the Always Free Arm cores (2 OCPUs and 12 GB since June 2026 on new accounts, 4 and 24 on older ones), shared with the oci stack's VMs; 200 GB block storage, 1 flexible load balancer"
+card_required: "yes"
+url: "https://www.oracle.com/cloud/free/"
+last_verified: "2026-10-30"
+notes: "Only Basic clusters are free; Enhanced ones are billed. The nodes are ordinary Always Free A1 instances, so the cores come out of the same allowance as the oci stack's VMs and the same capacity shortage applies (out-of-host-capacity). The stack makes its own network and fails the plan when the nodes use more Arm cores than free_a1_ocpus. freelunch makes the cluster but does not deploy apps to it: use kubectl or Helm with the kubeconfig command it prints. Not yet run against a real tenancy."
+sources:
+  - "github.com/nce/oci-free-cloud-k8s (always-free Kubernetes on Oracle Cloud, checked 2026-10-30)"
+  - "mrplanb.com/datacenter/free-vps-tiers (Oracle halved the Arm free tier to 2 OCPUs and 12 GB on 2026-06-15, checked 2026-10-30)"
+  - "registry.terraform.io (oci_containerengine_cluster, oci_containerengine_node_pool, checked 2026-10-30)"
+inspire: []

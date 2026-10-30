@@ -146,6 +146,23 @@ release can change commands and the project layout.
   (the field and why), with the request's secrets left out. Moving an app from a VM is changing its target in
   `apps.tfvars` and its route, which names the app on a platform (`app = "api"`); the
   walkthrough's new "Switch to another provider" shows it for Northflank and GCP.
+- **Google Cloud Run** as the second container platform. `freelunch apply cloud-run`
+  checks the project and turns the Cloud Run API on; `deploy` makes a service per app through
+  the Admin API (image pinned to its digest, entrypoint and command, environment, the first
+  port), scaled to zero, billed per request, one instance at most and public at its `run.app`
+  URL, so it stays inside the free grant of 180,000 vCPU-seconds and 2M requests a month.
+  Services are labelled so `status` and `destroy` touch only what freelunch made. Cloud Run
+  pulls only from Google's registries, so `deploy` copies other images, public or private,
+  into a private Artifact Registry repository. No Cloudflare Tunnel or volumes there. Signs in with `gcloud` or
+  `CLOUD_RUN_ACCESS_TOKEN`. Not yet run against a real account.
+- **Scaleway Serverless Containers** as the third container platform, the one free tier that
+  can stay on: 400,000 GB-s and 200,000 vCPU-s a month cover a 128 MB container that never
+  stops. `apply scaleway` makes the namespace, `deploy` a public HTTPS container per app
+  (the environment as secret variables), `destroy` deletes both. An image from a registry
+  with a login in `apps.tfvars` is copied to a private Scaleway registry first, since
+  Scaleway can't pull private images from elsewhere. The plan fails an
+  always-on size the grant doesn't cover. Signs in with `SCW_SECRET_KEY`. Not yet run
+  against a real account.
 - The [platform contract](docs/architecture.md#platform-contract): `hybrid/` aggregates
   `platforms` next to `hosts`, the cloudflare stack routes to `<app>:<port>` on a platform,
   and `deploy/` reads each platform app's Compose file and stops on what the platform can't

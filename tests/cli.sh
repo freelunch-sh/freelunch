@@ -51,6 +51,7 @@ case "$1 ${2:-}" in
   # One container per app, stopped when the app is in FAKE_STOPPED.
   "compose ps")
     if [[ " ${FAKE_STOPPED:-} " == *" $(basename "$PWD") "* ]]; then echo "$(basename "$PWD")|exited|"; else echo "$(basename "$PWD")|running|healthy"; fi ;;
+  "push "*)    echo "latest: digest: sha256:abc123def456 size: 1234" ;;
   "image inspect") echo "${last%%:*}@sha256:digest-of-$(basename "${last%%:*}")" ;;
 esac
 exit 0
@@ -349,7 +350,8 @@ while [[ $# -gt 0 ]]; do
     -o)      out="$2"; shift ;;
     -w)      write="$2"; shift ;;
     -u)      basic="$2"; shift ;;
-    -H)      [[ "$2" != "Authorization: Bearer "* ]] || auth="${2#Authorization: Bearer }"; shift ;;
+    -H)      [[ "$2" != "Authorization: Bearer "* ]] || auth="${2#Authorization: Bearer }"
+             [[ "$2" != "X-Auth-Token: "* ]] || auth="${2#X-Auth-Token: }"; shift ;;
     --data-urlencode) query+=("$2"); shift ;;
     --max-time) shift ;;
     -*)      ;;
@@ -556,6 +558,113 @@ case "$url" in
         respond 200 '{"data":{}}' ;;
       *) respond 404 '{"error":{"status":404,"message":"No such endpoint"}}' ;;
     esac ;;
+  https://run.googleapis.com/v2/*)
+    path="${url#https://run.googleapis.com/v2}"
+    cr="${FAKE_CR:?}"
+    mkdir -p "$cr/services"
+    echo "cr $method $path token=$auth" >> "$FAKE_LOG"
+    if [[ "$auth" != "${FAKE_CR_TOKEN:-cr-token}" ]]; then respond 401 '{"error":{"code":401,"message":"Request had invalid authentication credentials."}}'; exit 0; fi
+    service="${path##*/}"
+    service="${service%%\?*}"
+    case "$method $path" in
+      "GET /projects/"*/locations/*/services\?*)
+        if [[ -n "${FAKE_CR_API_OFF:-}" && ! -f "$cr/api-on" ]]; then
+          respond 403 '{"error":{"code":403,"message":"Cloud Run Admin API has not been used in project","details":[{"reason":"SERVICE_DISABLED"}]}}'; exit 0
+        fi
+        respond 200 "$(for f in "$cr/services"/*.json; do [[ -f "$f" ]] && cat "$f"; done | jq -sc '{services: .}')" ;;
+      "GET /projects/"*/locations/*/services/*)
+        if [[ -f "$cr/services/$service.json" ]]; then respond 200 "$(cat "$cr/services/$service.json")"
+        else respond 404 '{"error":{"code":404,"message":"Resource not found"}}'; fi ;;
+      "POST /projects/"*/locations/*/services\?serviceId=*)
+        project="${path#/projects/}"; project="${project%%/*}"
+        service="${path##*serviceId=}"
+        jq -c --arg n "projects/$project/locations/us-central1/services/$service" --arg u "https://$service-abc123-uc.a.run.app" \
+          '. + {name: $n, uri: $u, terminalCondition: {state: "CONDITION_SUCCEEDED"}}' <<< "$data" > "$cr/services/$service.json"
+        printf '%s\n' "$data" > "$cr/sent-$service.json"
+        respond 200 '{"name":"projects/p/locations/l/operations/op1","done":true}' ;;
+      "PATCH /projects/"*/locations/*/services/*)
+        jq -c --argjson d "$data" '. * $d' "$cr/services/$service.json" > "$cr/services/$service.new" && mv "$cr/services/$service.new" "$cr/services/$service.json"
+        printf '%s\n' "$data" > "$cr/sent-$service.json"
+        respond 200 '{"name":"projects/p/locations/l/operations/op2","done":true}' ;;
+      "DELETE /projects/"*/locations/*/services/*)
+        rm -f "$cr/services/$service.json"
+        respond 200 '{"name":"projects/p/locations/l/operations/op3","done":true}' ;;
+      *) respond 404 '{"error":{"code":404,"message":"No such endpoint"}}' ;;
+    esac ;;
+  https://api.scaleway.com/containers/v1/regions/*)
+    path="${url#https://api.scaleway.com/containers/v1/regions/}"
+    region="${path%%/*}"; path="/${path#*/}"
+    sw="${FAKE_SW:?}"
+    mkdir -p "$sw/namespaces" "$sw/containers"
+    echo "sw $method $path token=$auth" >> "$FAKE_LOG"
+    if [[ "$auth" != "${FAKE_SW_TOKEN:-sw-key}" ]]; then respond 403 '{"message":"denied authentication"}'; exit 0; fi
+    id="${path##*/}"; id="${id%%\?*}"
+    case "$method $path" in
+      "GET /namespaces?"*)
+        name="${path##*name=}"
+        respond 200 "$(for f in "$sw/namespaces"/*.json; do [[ -f "$f" ]] && cat "$f"; done | jq -sc --arg n "$name" '{namespaces: [.[] | select(.name == $n)]}')" ;;
+      "POST /namespaces")
+        id="ns-$(jq -r .name <<< "$data")"
+        jq -c --arg id "$id" '. + {id: $id, status: "ready"}' <<< "$data" > "$sw/namespaces/$id.json"
+        respond 200 "$(cat "$sw/namespaces/$id.json")" ;;
+      "DELETE /namespaces/"*)
+        if ls "$sw/containers"/*.json >/dev/null 2>&1; then respond 412 '{"message":"namespace is not empty"}'
+        else rm -f "$sw/namespaces/$id.json"; respond 200 '{}'; fi ;;
+      "GET /containers?"*)
+        ns="${path#*namespace_id=}"; ns="${ns%%&*}"
+        respond 200 "$(for f in "$sw/containers"/*.json; do [[ -f "$f" ]] && cat "$f"; done | jq -sc --arg ns "$ns" '{containers: [.[] | select(.namespace_id == $ns)]}')" ;;
+      "GET /containers/"*)
+        if [[ -f "$sw/containers/$id.json" ]]; then respond 200 "$(cat "$sw/containers/$id.json")"; else respond 404 '{"message":"container not found"}'; fi ;;
+      "POST /containers")
+        id="c-$(jq -r .name <<< "$data")"
+        jq -c --arg id "$id" '. + {id: $id, status: "ready", public_endpoint: ("https://" + .name + "-fake.functions.fnc.fr-par.scw.cloud")}' <<< "$data" > "$sw/containers/$id.json"
+        printf '%s\n' "$data" > "$sw/sent-${id#c-}.json"
+        respond 200 "$(cat "$sw/containers/$id.json")" ;;
+      "PATCH /containers/"*)
+        jq -c --argjson d "$data" '. * $d' "$sw/containers/$id.json" > "$sw/containers/$id.new" && mv "$sw/containers/$id.new" "$sw/containers/$id.json"
+        printf '%s\n' "$data" > "$sw/sent-${id#c-}.json"
+        respond 200 "$(cat "$sw/containers/$id.json")" ;;
+      "DELETE /containers/"*) rm -f "$sw/containers/$id.json"; respond 200 '{}' ;;
+      *) respond 404 '{"message":"no such route"}' ;;
+    esac ;;
+  https://artifactregistry.googleapis.com/v1/*)
+    path="${url#https://artifactregistry.googleapis.com/v1}"
+    cr="${FAKE_CR:?}"
+    echo "ar $method $path token=$auth" >> "$FAKE_LOG"
+    if [[ "$auth" != "${FAKE_CR_TOKEN:-cr-token}" ]]; then respond 401 '{"error":{"code":401,"message":"bad token"}}'; exit 0; fi
+    repo="${path##*/}"; repo="${repo%%\?*}"
+    case "$method $path" in
+      "GET "*/repositories/*)
+        if [[ -f "$cr/repo-$repo.json" ]]; then respond 200 "$(cat "$cr/repo-$repo.json")"; else respond 404 '{"error":{"code":404,"message":"repo not found"}}'; fi ;;
+      "POST "*/repositories\?repositoryId=*)
+        repo="${path##*repositoryId=}"
+        jq -c --arg n "projects/p/locations/l/repositories/$repo" '. + {name: $n}' <<< "$data" > "$cr/repo-$repo.json"
+        respond 200 '{"name":"operations/ar1","done":true}' ;;
+      "DELETE "*/repositories/*) rm -f "$cr/repo-$repo.json"; respond 200 '{"name":"operations/ar2","done":true}' ;;
+      *) respond 404 '{"error":{"code":404,"message":"no such route"}}' ;;
+    esac ;;
+  https://api.scaleway.com/registry/v1/regions/*)
+    path="${url#https://api.scaleway.com/registry/v1/regions/}"
+    region="${path%%/*}"; path="/${path#*/}"
+    sw="${FAKE_SW:?}"
+    mkdir -p "$sw/registries"
+    echo "swr $method $path token=$auth" >> "$FAKE_LOG"
+    if [[ "$auth" != "${FAKE_SW_TOKEN:-sw-key}" ]]; then respond 403 '{"message":"denied authentication"}'; exit 0; fi
+    case "$method $path" in
+      "GET /namespaces?"*)
+        name="${path##*name=}"
+        respond 200 "$(for f in "$sw/registries"/*.json; do [[ -f "$f" ]] && cat "$f"; done | jq -sc --arg n "$name" '{namespaces: [.[] | select(.name == $n)]}')" ;;
+      "POST /namespaces")
+        id="rns-$(jq -r .name <<< "$data")"
+        jq -c --arg id "$id" --arg r "$region" '. + {id: $id, endpoint: ("rg." + $r + ".scw.cloud/" + .name)}' <<< "$data" > "$sw/registries/$id.json"
+        respond 200 "$(cat "$sw/registries/$id.json")" ;;
+      "DELETE /namespaces/"*) rm -f "$sw/registries/${path##*/}.json"; respond 200 '{}' ;;
+      *) respond 404 '{"message":"no such route"}' ;;
+    esac ;;
+  https://serviceusage.googleapis.com/v1/*)
+    echo "cr $method ${url#https://serviceusage.googleapis.com/v1}" >> "$FAKE_LOG"
+    touch "${FAKE_CR:?}/api-on"
+    respond 200 '{"name":"operations/enable1","done":true}' ;;
   */token)
     echo "$url${basic:+ basic=$basic}${query[*]:+ ${query[*]}}" >> "$FAKE_LOG.registry"
     [[ -z "${FAKE_REGISTRY_DOWN:-}" ]] || exit 7
@@ -2062,6 +2171,184 @@ test_deploy_puts_each_app_on_northflank() {
   echo '{"name":"old-api"}' > "$p/nf/services/freelunch/old-api.json"
   out="$(GHCR_TOKEN=ghp_new-token nf_in "$p" deploy 2>&1)"
   contains "$out" "the project also runs old-api, which apps.tfvars doesn't list"
+}
+
+# cr_in <dir> <command> [args...]: run the CLI against the fake Cloud Run API and registry
+cr_in() {
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/nf-bin:$WORK/bin:$PATH" FAKE_LOG="$dir/fake.log" FAKE_CR="$dir/cr" \
+    CLOUD_RUN_ACCESS_TOKEN="${TEST_CR_TOKEN-cr-token}" "$CLI" "$@")
+}
+
+# A project with one public app on Cloud Run, the cloud-run stack set up for my-gcp-project.
+cr_project() { # cr_project <dir>
+  mkdir -p "$1/cr"
+  cat > "$1/compose.yaml" <<'YAML'
+services:
+  api:
+    image: ghcr.io/me/api:1.0.0
+    entrypoint: ["/bin/api"]
+    command: ["serve", "--name", "my api"]
+    ports: ["8080:8080"]
+    environment:
+      LOG_LEVEL: info
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+YAML
+  (cd "$1" && "$CLI" init --name sunbird cloud-run) >/dev/null 2>&1
+  printf 'project_id = "my-gcp-project"\nregion = "us-central1"\nname_prefix = "sunbird"\n' > "$1/.freelunch/cloud-run/terraform.tfvars"
+  printf 'API_SECRET=s3cret-value\n' > "$1/.freelunch/api.env"
+  printf 'apps = {\n  api = { host = "cloud-run-main", compose = "../compose.yaml", env_file = "api.env" }\n}\n' > "$1/.freelunch/apps.tfvars"
+}
+
+test_cloud_run_applies_deploys_and_destroys() {
+  local p="$WORK/cr-all" out body digest
+  cr_project "$p"
+  out="$(FREELUNCH_AUTO_APPROVE=1 FAKE_CR_API_OFF=1 cr_in "$p" apply cloud-run 2>&1)"
+  # The API was off, so apply turned it on.
+  grep -qx 'cr POST /projects/my-gcp-project/services/run.googleapis.com:enable' "$p/fake.log"
+  contains "$out" "cloud-run: project my-gcp-project in us-central1"
+  equals "$(jq -c '.outputs.platforms.value | map("\(.provider)-\(.name)")' "$p/.freelunch/hybrid/terraform.tfstate")" '["cloud-run-main"]'
+  out="$(cr_in "$p" deploy 2>&1)"
+  digest="$(sed -n 's/^.*api: ghcr.io\/me\/api:1.0.0 = //p' <<< "$out")"
+  [[ "$digest" == sha256:* ]] || { echo "no digest in: $out"; return 1; }
+  # The body: pinned to the digest, labelled, scaling to zero and public, with the command
+  # split into words, the env file and the Compose environment.
+  body="$(cat "$p/cr/sent-api.json")"
+  # Cloud Run pulls only from Google's registries, so even this public image was copied.
+  equals "$(jq -r .template.containers[0].image <<< "$body")" "us-central1-docker.pkg.dev/my-gcp-project/sunbird/api@$digest"
+  fails grep -q 'stdin: .*ghp' "$p/fake.log"
+  equals "$(jq -c '.labels' <<< "$body")" '{"freelunch":"managed","freelunch-project":"sunbird"}'
+  equals "$(jq -c '{invokerIamDisabled, scaling: .template.scaling}' <<< "$body")" '{"invokerIamDisabled":true,"scaling":{"minInstanceCount":0,"maxInstanceCount":1}}'
+  equals "$(jq -c '.template.containers[0] | {command, args, ports, resources}' <<< "$body")" \
+    '{"command":["/bin/api"],"args":["serve","--name","my api"],"ports":[{"containerPort":8080}],"resources":{"limits":{"cpu":"1","memory":"512Mi"},"cpuIdle":true}}'
+  equals "$(jq -c '.template.containers[0].env' <<< "$body")" '[{"name":"API_SECRET","value":"s3cret-value"},{"name":"LOG_LEVEL","value":"info"}]'
+  contains "$out" "cloud-run-main: api is running"
+  contains "$out" "cloud-run-main: api: https://api-abc123-uc.a.run.app"
+  contains "$out" "Cloud Run can't run a healthcheck command"
+  lacks "$(cat "$p/fake.log")" "s3cret-value"
+  # A second deploy updates the same service.
+  out="$(cr_in "$p" deploy 2>&1)"
+  grep -q '^cr PATCH /projects/my-gcp-project/locations/us-central1/services/api ' "$p/fake.log"
+  equals "$(grep -c '^cr POST /projects/my-gcp-project/locations/us-central1/services?serviceId=api ' "$p/fake.log")" 1
+  # status asks Cloud Run.
+  out="$(cr_in "$p" status 2>&1)"
+  contains "$out" "api                  serving at https://api-abc123-uc.a.run.app"
+  # destroy deletes the services it made, and leaves other ones.
+  echo '{"name":"projects/my-gcp-project/locations/us-central1/services/other","labels":{}}' > "$p/cr/services/other.json"
+  out="$(FREELUNCH_AUTO_APPROVE=1 cr_in "$p" destroy cloud-run 2>&1)"
+  contains "$out" "cloud-run: deleted the service api"
+  absent "$p/cr/services/api.json"
+  exists "$p/cr/services/other.json"
+}
+
+test_cloud_run_refuses_what_it_cannot_run() {
+  local p="$WORK/cr-refuse" out
+  cr_project "$p"
+  sed -i.bak 's/    ports: \["8080:8080"\]/    expose: []/' "$p/compose.yaml"
+  FREELUNCH_AUTO_APPROVE=1 cr_in "$p" apply cloud-run >/dev/null 2>&1
+  if out="$(cr_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "its Compose file lists none under ports or expose"
+  fails test -e "$p/cr/sent-api.json"
+  if out="$(TEST_CR_TOKEN=wrong cr_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+}
+
+sw_in() { # sw_in <dir> <command> [args...]: run the CLI against the fake Scaleway API and registry
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/nf-bin:$WORK/bin:$PATH" FAKE_LOG="$dir/fake.log" FAKE_SW="$dir/sw" SCW_SECRET_KEY="${TEST_SW_KEY-sw-key}" "$CLI" "$@")
+}
+
+test_scaleway_applies_deploys_and_destroys() {
+  local p="$WORK/sw-all" out body digest
+  mkdir -p "$p/sw"
+  cat > "$p/compose.yaml" <<'YAML'
+services:
+  api:
+    image: ghcr.io/me/api:1.0.0
+    command: ["serve", "--name", "my api"]
+    ports: ["8080:8080"]
+    environment:
+      LOG_LEVEL: info
+YAML
+  (cd "$p" && "$CLI" init --name sunbird scaleway) >/dev/null 2>&1
+  printf 'project_id = "11111111-2222-3333-4444-555555555555"\nname_prefix = "sunbird"\nmin_scale = 1\n' > "$p/.freelunch/scaleway/terraform.tfvars"
+  printf 'API_SECRET=s3cret-value\n' > "$p/.freelunch/api.env"
+  printf 'apps = {\n  api = { host = "scaleway-main", compose = "../compose.yaml", env_file = "api.env" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  out="$(FREELUNCH_AUTO_APPROVE=1 sw_in "$p" apply scaleway 2>&1)"
+  contains "$out" "scaleway: namespace sunbird in fr-par"
+  exists "$p/sw/namespaces/ns-sunbird.json"
+  out="$(sw_in "$p" deploy 2>&1)"
+  digest="$(sed -n 's/^.*api: ghcr.io\/me\/api:1.0.0 = //p' <<< "$out")"
+  [[ "$digest" == sha256:* ]] || { echo "no digest in: $out"; return 1; }
+  body="$(cat "$p/sw/sent-api.json")"
+  equals "$(jq -c '{namespace_id, image, port, privacy, min_scale, max_scale, memory_limit_bytes, mvcpu_limit, command, args}' <<< "$body")" \
+    "{\"namespace_id\":\"ns-sunbird\",\"image\":\"ghcr.io/me/api@$digest\",\"port\":8080,\"privacy\":\"public\",\"min_scale\":1,\"max_scale\":1,\"memory_limit_bytes\":134217728,\"mvcpu_limit\":70,\"command\":[],\"args\":[\"serve\",\"--name\",\"my api\"]}"
+  equals "$(jq -c .secret_environment_variables <<< "$body")" '{"API_SECRET":"s3cret-value","LOG_LEVEL":"info"}'
+  contains "$out" "scaleway-main: api is running"
+  contains "$out" "scaleway-main: api: https://api-fake.functions.fnc.fr-par.scw.cloud"
+  lacks "$(cat "$p/fake.log")" "s3cret-value"
+  # A second deploy updates the same container.
+  out="$(sw_in "$p" deploy 2>&1)"
+  grep -q '^sw PATCH /containers/c-api ' "$p/fake.log"
+  equals "$(grep -c '^sw POST /containers ' "$p/fake.log")" 1
+  out="$(sw_in "$p" status 2>&1)"
+  contains "$out" "api                  serving at https://api-fake.functions.fnc.fr-par.scw.cloud"
+  if out="$(TEST_SW_KEY='' sw_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "SCW_SECRET_KEY is not set"
+  out="$(FREELUNCH_AUTO_APPROVE=1 sw_in "$p" destroy scaleway 2>&1)"
+  contains "$out" "scaleway: deleted the container c-api"
+  contains "$out" "scaleway: deleted the namespace sunbird"
+  absent "$p/sw/containers/c-api.json"
+  absent "$p/sw/namespaces/ns-sunbird.json"
+}
+
+test_cloud_run_copies_a_private_image() {
+  local p="$WORK/cr-private" out
+  cr_project "$p"
+  printf 'apps = {\n  api = { host = "cloud-run-main", compose = "../compose.yaml", env_file = "api.env" }\n}\nregistries = {\n  "ghcr.io" = { username = "me", password_env = "GHCR_TOKEN" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  FREELUNCH_AUTO_APPROVE=1 FAKE_CR_API_OFF=1 cr_in "$p" apply cloud-run >/dev/null 2>&1
+  # A dry run says what it would copy, and touches nothing.
+  out="$(GHCR_TOKEN=ghp_test-token FAKE_PRIVATE=me/api cr_in "$p" deploy --dry-run 2>&1)"
+  contains "$out" "would copy ghcr.io/me/api:1.0.0 to Cloud Run's private registry"
+  fails grep -q '^docker push' "$p/fake.log"
+  # The login is wrong, so nothing is copied.
+  if out="$(GHCR_TOKEN=wrong FAKE_PRIVATE=me/api cr_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  fails grep -q '^docker push' "$p/fake.log"
+  out="$(GHCR_TOKEN=ghp_test-token FAKE_PRIVATE=me/api cr_in "$p" deploy 2>&1)"
+  contains "$out" "copying ghcr.io/me/api:1.0.0 to Cloud Run's private registry"
+  exists "$p/cr/repo-sunbird.json"
+  equals "$(jq -c .labels "$p/cr/repo-sunbird.json")" '{"freelunch":"managed","freelunch-project":"sunbird"}'
+  grep -q '^docker pull --platform linux/amd64 ghcr.io/me/api@sha256:' "$p/fake.log"
+  grep -q '^docker tag ghcr.io/me/api@sha256:[0-9a-f]* us-central1-docker.pkg.dev/my-gcp-project/sunbird/api:latest' "$p/fake.log"
+  grep -q '^docker push us-central1-docker.pkg.dev/my-gcp-project/sunbird/api:latest' "$p/fake.log"
+  grep -q '^docker login us-central1-docker.pkg.dev -u oauth2accesstoken --password-stdin' "$p/fake.log"
+  # The service runs the copy, never the private image.
+  equals "$(jq -r .template.containers[0].image "$p/cr/sent-api.json")" "us-central1-docker.pkg.dev/my-gcp-project/sunbird/api@sha256:abc123def456"
+  # The login goes into a config of its own, which is gone again.
+  contains "$(cat "$p/fake.log")" "stdin: ghp_test-token"
+  # destroy deletes the repository with the services.
+  out="$(FREELUNCH_AUTO_APPROVE=1 cr_in "$p" destroy cloud-run 2>&1)"
+  contains "$out" "deleted the Artifact Registry repository sunbird"
+  absent "$p/cr/repo-sunbird.json"
+}
+
+test_scaleway_copies_a_private_image() {
+  local p="$WORK/sw-private" out
+  mkdir -p "$p/sw"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["8080:8080"]\n' > "$p/compose.yaml"
+  (cd "$p" && "$CLI" init --name sunbird scaleway) >/dev/null 2>&1
+  printf 'project_id = "11111111-2222-3333-4444-555555555555"\nname_prefix = "sunbird"\n' > "$p/.freelunch/scaleway/terraform.tfvars"
+  printf 'apps = {\n  api = { host = "scaleway-main", compose = "../compose.yaml" }\n}\nregistries = {\n  "ghcr.io" = { username = "me", password_env = "GHCR_TOKEN" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  FREELUNCH_AUTO_APPROVE=1 sw_in "$p" apply scaleway >/dev/null 2>&1
+  out="$(GHCR_TOKEN=ghp_test-token FAKE_PRIVATE=me/api sw_in "$p" deploy 2>&1)"
+  contains "$out" "copying ghcr.io/me/api:1.0.0 to Scaleway's private registry"
+  equals "$(jq -c '{is_public, description}' "$p/sw/registries/rns-sunbird.json")" '{"is_public":false,"description":"Managed by freelunch"}'
+  grep -q '^docker login rg.fr-par.scw.cloud -u nologin --password-stdin' "$p/fake.log"
+  grep -q '^docker push rg.fr-par.scw.cloud/sunbird/api:latest' "$p/fake.log"
+  equals "$(jq -r .image "$p/sw/sent-api.json")" "rg.fr-par.scw.cloud/sunbird/api@sha256:abc123def456"
+  out="$(FREELUNCH_AUTO_APPROVE=1 sw_in "$p" destroy scaleway 2>&1)"
+  contains "$out" "scaleway: deleted the registry namespace sunbird"
+  absent "$p/sw/registries/rns-sunbird.json"
 }
 
 test_deploy_to_northflank_fails_loudly() {
