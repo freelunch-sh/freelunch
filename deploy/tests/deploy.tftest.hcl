@@ -537,3 +537,41 @@ run "apps_need_a_bucket_a_stack_made" {
 
   expect_failures = [output.targets]
 }
+
+run "an_app_without_a_host_goes_to_the_default_host" {
+  command = plan
+
+  variables {
+    default_host = "oci-main"
+    apps         = { api = { compose = "compose.yaml", env_file = "api.env" } }
+  }
+
+  assert {
+    condition     = keys(output.targets) == ["oci-main"] && keys(output.targets["oci-main"].apps) == ["api"]
+    error_message = "An app that names no host runs on default_host."
+  }
+}
+
+run "a_named_host_beats_the_default_host" {
+  command = plan
+
+  variables {
+    default_host = "oci-other"
+    apps         = { api = { host = "oci-main", compose = "compose.yaml" } }
+  }
+
+  assert {
+    condition     = keys(output.targets) == ["oci-main"]
+    error_message = "default_host only fills in for apps that name no host."
+  }
+}
+
+run "an_app_without_a_host_and_no_default_fails" {
+  command = plan
+
+  variables {
+    apps = { api = { compose = "compose.yaml" } }
+  }
+
+  expect_failures = [output.targets]
+}

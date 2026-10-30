@@ -7,7 +7,8 @@ name_prefix = "backend-app"
 
 zone = "example.com"   # a domain already on your Cloudflare account
 
-# https://api.example.com -> port 8080 on the OCI host, where compose.yaml publishes the app.
+# https://api.example.com -> port 8080, where compose.yaml publishes the app, on whichever
+# target freelunch up put it. Add host = "oci-main" to pin the route to one.
 routes = {
-  "api.example.com" = { host = "oci-main", port = 8080 }
+  "api.example.com" = { app = "api", port = 8080 }
 }

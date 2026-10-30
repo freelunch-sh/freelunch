@@ -568,6 +568,7 @@ case "$url" in
     service="${service%%\?*}"
     case "$method $path" in
       "GET /projects/"*/locations/*/services\?*)
+        if [[ -n "${FAKE_CR_QUOTA:-}" ]]; then respond 429 '{"error":{"code":429,"message":"Quota exceeded for quota metric Cloud Run Admin API requests","status":"RESOURCE_EXHAUSTED"}}'; exit 0; fi
         if [[ -n "${FAKE_CR_API_OFF:-}" && ! -f "$cr/api-on" ]]; then
           respond 403 '{"error":{"code":403,"message":"Cloud Run Admin API has not been used in project","details":[{"reason":"SERVICE_DISABLED"}]}}'; exit 0
         fi
@@ -604,6 +605,7 @@ case "$url" in
         name="${path##*name=}"
         respond 200 "$(for f in "$sw/namespaces"/*.json; do [[ -f "$f" ]] && cat "$f"; done | jq -sc --arg n "$name" '{namespaces: [.[] | select(.name == $n)]}')" ;;
       "POST /namespaces")
+        if [[ -n "${FAKE_SW_QUOTA:-}" ]]; then respond 403 '{"message":"quota_exceeded: the project has reached its limit of namespaces"}'; exit 0; fi
         id="ns-$(jq -r .name <<< "$data")"
         jq -c --arg id "$id" '. + {id: $id, status: "ready"}' <<< "$data" > "$sw/namespaces/$id.json"
         respond 200 "$(cat "$sw/namespaces/$id.json")" ;;
@@ -655,6 +657,7 @@ case "$url" in
         name="${path##*name=}"
         respond 200 "$(for f in "$sw/registries"/*.json; do [[ -f "$f" ]] && cat "$f"; done | jq -sc --arg n "$name" '{namespaces: [.[] | select(.name == $n)]}')" ;;
       "POST /namespaces")
+        if [[ -n "${FAKE_SW_QUOTA:-}" ]]; then respond 403 '{"message":"quota_exceeded: the project has reached its limit of namespaces"}'; exit 0; fi
         id="rns-$(jq -r .name <<< "$data")"
         jq -c --arg id "$id" --arg r "$region" '. + {id: $id, endpoint: ("rg." + $r + ".scw.cloud/" + .name)}' <<< "$data" > "$sw/registries/$id.json"
         respond 200 "$(cat "$sw/registries/$id.json")" ;;
@@ -697,6 +700,53 @@ esac
 EOF
 chmod +x "$WORK/bin/curl"
 cp "$WORK/bin/curl" "$WORK/doh-bin/curl"
+
+# For freelunch up: the stacks' tofu/terraform runs are faked and the deploy and hybrid
+# modules are the real ones. FAKE_UP says how each stack's applies end, one outcome per
+# apply in order: "oci=capacity,capacity,ok northflank=ok". ok writes the stack's fixture
+# state (a deployed target); capacity and auth fail the way OCI says. The last outcome
+# repeats. The cloudflare stack's state routes to the host it got as default_host.
+cat > "$WORK/bin/up-tf" <<'EOF'
+#!/usr/bin/env bash
+dir="${1#-chdir=}"
+if [[ "$1" == "version" || "$(basename "$dir")" == deploy || "$(basename "$dir")" == hybrid ]]; then exec "$REAL_TF" "$@"; fi
+echo "TF_DATA_DIR=${TF_DATA_DIR:-} $*" >> "$FAKE_LOG"
+stack="$(basename "$(dirname "$dir")")"
+case "${2:-}" in
+  init) echo "# lock" > "$dir/.terraform.lock.hcl" ;;
+  apply)
+    state="" default=""
+    for a; do
+      [[ "$a" != -state=* ]] || state="${a#-state=}"
+      [[ "$a" != -var=default_host=* ]] || default="${a#-var=default_host=}"
+    done
+    n=$(( $(cat "$FAKE_LOG.$stack.n" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$FAKE_LOG.$stack.n"
+    outcomes=""
+    for o in ${FAKE_UP:-}; do [[ "${o%%=*}" != "$stack" ]] || outcomes="${o#*=}"; done
+    IFS=, read -ra ends <<< "$outcomes"
+    end="${ends[n-1]:-${ends[${#ends[@]}-1]:-ok}}"
+    case "$end" in
+      capacity) echo "│ Error: 500-InternalError, Out of host capacity."; exit 1 ;;
+      auth)     echo "│ Error: 401-NotAuthenticated, The required information to complete authentication was not provided or was incorrect."; exit 1 ;;
+      aws)      echo "│ Error: creating EC2 Instance: operation error EC2: RunInstances, api error InsufficientInstanceCapacity: We currently do not have sufficient t4g.small capacity in the Availability Zone you requested."; exit 1 ;;
+      gcp)      echo "│ Error: Error waiting for instance to create: The zone 'projects/p/zones/us-central1-a' does not have enough resources available to fulfill the request. (ZONE_RESOURCE_POOL_EXHAUSTED)"; exit 1 ;;
+      azure)    echo "│ Error: creating Linux Virtual Machine: unexpected status 409 (409 Conflict) with error: ZonalAllocationFailed: Allocation failed. We do not have sufficient capacity for the requested VM size in this zone."; exit 1 ;;
+      quota)    echo "│ Error: creating EC2 Instance: operation error EC2: RunInstances, api error VcpuLimitExceeded: You have requested more vCPU capacity than your current vCPU limit of 0 allows."; exit 1 ;;
+    esac
+    case "$stack:$default" in
+      oci:*)                   fixture="$UP_FIXTURES/hybrid/tests/fixtures/oci.tfstate" ;;
+      northflank:*)            fixture="$UP_FIXTURES/hybrid/tests/fixtures/northflank.tfstate" ;;
+      cloudflare:northflank-*) fixture="$UP_FIXTURES/deploy/tests/fixtures/platform/cloudflare.tfstate" ;;
+      cloudflare:*)            fixture="$UP_FIXTURES/deploy/tests/fixtures/cloudflare.tfstate" ;;
+    esac
+    [[ -z "$state" ]] || cp "$fixture" "$state" ;;
+esac
+exit 0
+EOF
+chmod +x "$WORK/bin/up-tf"
+# The OCI CLI of the wait tests, without their curl, which would stand in for every service
+mkdir -p "$WORK/up-bin" && ln -s "$WORK/wait-bin/oci" "$WORK/up-bin/oci"
 
 # Helpers -------------------------------------------------------------------------------
 
@@ -929,6 +979,58 @@ run_test() { # run_test <name>: run test_<name> in a subshell with errexit on
   fi
 }
 
+# A copy of the CLI with the real deploy and hybrid modules and the oci, northflank and
+# cloudflare stacks' code, for freelunch up: it writes lock files next to the stack code.
+up_checkout() { # up_checkout <dir>
+  local dir="$1" s
+  mkdir -p "$dir/bin" "$dir/deploy" "$dir/hybrid" "$dir/providers/cloudflare/apps"
+  cp "$CLI" "$dir/bin/"
+  cp "$ROOT"/deploy/*.tf "$dir/deploy/"
+  cp "$ROOT"/hybrid/*.tf "$dir/hybrid/"
+  cp -R "$ROOT/providers/cloudflare/apps/." "$dir/providers/cloudflare/apps/"
+  # koyeb is catalogued only: a provider with no stack
+  mkdir -p "$dir/providers/koyeb" && cp "$ROOT/providers/koyeb/provider.yaml" "$dir/providers/koyeb/"
+  for s in oci northflank cloudflare; do
+    mkdir -p "$dir/providers/$s/stack"
+    cp "$ROOT/providers/$s/provider.yaml" "$dir/providers/$s/"
+    cp "$ROOT/providers/$s/stack/"*.tf "$ROOT/providers/$s/stack/"*.example "$dir/providers/$s/stack/"
+  done
+}
+
+# up_project <dir> [targets...]: a project that runs one app on OCI, Northflank or whichever
+# has room, behind api.example.com. Its apps and route name no host. Nothing is deployed
+# yet; the fake Northflank has the project it would make.
+up_project() {
+  local dir="$1" targets="" t; shift
+  for t in "$@"; do targets="${targets:+$targets, }\"$t\""; done
+  nf_project "$dir"
+  rm -f "$dir/.freelunch/oci/terraform.tfstate" "$dir/.freelunch/northflank/terraform.tfstate" "$dir/.freelunch/cloudflare/terraform.tfstate"
+  (cd "$dir" && "$CLI" init --name freelunch oci >/dev/null 2>&1)
+  cp "$ROOT/providers/oci/stack/project.tfvars.example" "$dir/.freelunch/oci/terraform.tfvars"
+  cat > "$dir/.freelunch/apps.tfvars" <<EOF2
+${targets:+targets = [$targets]}
+apps = {
+  api = { compose = "../compose.yaml", env_file = "api.env" }
+}
+registries = {
+  "ghcr.io" = { username = "me", password_env = "GHCR_TOKEN" }
+}
+EOF2
+  printf 'zone   = "example.com"\nroutes = { "api.example.com" = { app = "api", port = 8080 } }\n' > "$dir/.freelunch/cloudflare/terraform.tfvars"
+  up_checkout "$dir-checkout"
+}
+
+# up_in <dir> [args...]: run freelunch up in an up_project, with FAKE_UP saying how the
+# stacks' applies end. The OCI console has the host key unless FAKE_CONSOLE_KEYS is empty.
+up_in() {
+  local dir="$1"; shift
+  (cd "$dir" && HOME="$dir/home" PATH="$WORK/up-bin:$WORK/nf-bin:$WORK/bin:$PATH" FAKE_LOG="$dir/fake.log" FAKE_NF="$dir/nf" \
+    FREELUNCH_TF="$WORK/bin/up-tf" UP_FIXTURES="$ROOT" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_ROOT="$dir/host" \
+    FAKE_CONSOLE_KEYS="${FAKE_CONSOLE_KEYS-$(cut -d' ' -f1,2 "$WORK/hostkey.pub")}" FAKE_SCANNED="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")" \
+    FREELUNCH_TRUST_TIMEOUT="${FREELUNCH_TRUST_TIMEOUT:-0}" GHCR_TOKEN=ghp_test-token \
+    NORTHFLANK_API_TOKEN="nf-token" CLOUDFLARE_API_TOKEN="" "$dir-checkout/bin/freelunch" up "$@")
+}
+
 # Tests ---------------------------------------------------------------------------------
 
 test_init_writes_the_project_folder() {
@@ -942,7 +1044,7 @@ test_init_writes_the_project_folder() {
   grep -qx '\*/terraform.tfstate' "$p/.freelunch/.gitignore"
   grep -qx '\*.env' "$p/.freelunch/.gitignore"
   grep -q '^  shop-api = {' "$p/.freelunch/apps.tfvars"
-  grep -q 'host    = "oci-main"' "$p/.freelunch/apps.tfvars"
+  grep -q '# host = "oci-main"' "$p/.freelunch/apps.tfvars"
   grep -q 'compose = "../docker-compose.yml"' "$p/.freelunch/apps.tfvars"
   cmp "$p/.freelunch/.gitignore" "$ROOT/examples/backend-app/.freelunch/.gitignore"
   cmp "$p/.freelunch/.env.example" "$ROOT/examples/backend-app/.freelunch/.env.example"
@@ -2077,15 +2179,16 @@ test_init_sets_up_a_platform() {
   grep -qx 'region = "europe-west"' "$p/.freelunch/northflank/terraform.tfvars.example"
   # The app becomes a Northflank service, so its name has no underscores.
   grep -q '^  my-app = {' "$p/.freelunch/apps.tfvars"
-  grep -q 'host    = "northflank-main"' "$p/.freelunch/apps.tfvars"
+  grep -q '# host = "northflank-main"' "$p/.freelunch/apps.tfvars"
   fails grep -q 'hosts = {' "$p/.freelunch/apps.tfvars"
-  grep -qF '"api.example.com" = { host = "northflank-main", app = "my-app", port = 8080 }' "$p/.freelunch/cloudflare/terraform.tfvars.example"
+  grep -qF '"api.example.com" = { app = "my-app", port = 8080 }' "$p/.freelunch/cloudflare/terraform.tfvars.example"
   grep -qx 'NORTHFLANK_API_TOKEN=' "$p/.freelunch/.env.example"
   contains "$out" "freelunch apply northflank, then freelunch apply cloudflare"
   contains "$out" "providers/northflank/README.md#api-token"
-  # Other hosts get the routes too, without app.
+  # Every project's routes name the app and no host, so they follow the app to the target.
   mkdir -p "$WORK/init-nf/gcp" && (cd "$WORK/init-nf/gcp" && "$CLI" init gcp cloudflare) >/dev/null 2>&1
-  grep -qF '"api.example.com" = { host = "gcp-main", port = 8080 }' "$WORK/init-nf/gcp/.freelunch/cloudflare/terraform.tfvars.example"
+  grep -qF '"api.example.com" = { app = "gcp", port = 8080 }' "$WORK/init-nf/gcp/.freelunch/cloudflare/terraform.tfvars.example"
+  grep -q '# host = "gcp-main"' "$WORK/init-nf/gcp/.freelunch/apps.tfvars"
   fails grep -q NORTHFLANK "$WORK/init-nf/gcp/.freelunch/.env.example"
 }
 
@@ -3012,7 +3115,8 @@ test_ci_init_writes_the_workflows() {
   grep -q '      - uses: freelunch-sh/freelunch@' "$wait"
   grep -qx "          tool: $(basename "$REAL_TF")" "$wait"
   grep -q '  actions: write' "$wait"
-  grep -q "          run: \${{ inputs.run || 'deploy' }}" "$p/.github/workflows/freelunch.yml"
+  grep -q "          run: \${{ inputs.run || 'up' }}" "$p/.github/workflows/freelunch.yml"
+  grep -qx '    branches: \[main\]' "$p/.github/workflows/freelunch.yml"
   fails grep -q '^  workflow_run:' "$p/.github/workflows/freelunch.yml"
   contains "$out" "freelunch state init oci (or r2, b2, gitlab)"
   if command -v actionlint >/dev/null; then actionlint "$wait" "$p/.github/workflows/freelunch.yml"; fi
@@ -3025,6 +3129,7 @@ test_ci_init_writes_the_workflows() {
   FAKE_VISIBILITY=PUBLIC ci_in "$p" ci init >/dev/null 2>&1
   grep -q '    - cron: "4,19,34,49 \* \* \* \*" # every quarter of an hour' "$wait"
   grep -q '    workflows: \[image\]' "$p/.github/workflows/freelunch.yml"
+  fails grep -q '^  push:' "$p/.github/workflows/freelunch.yml"
   # GitLab
   ci_in "$p" ci init gitlab >/dev/null 2>&1
   grep -q '    - /opt/freelunch/bin/freelunch ci restore' "$p/.gitlab-ci.yml"
@@ -3270,6 +3375,352 @@ test_install_script() {
   equals "$(cat "$p/home/v1.10.0/.version")" "v1.10.0"
   versions_in "$p" bash "$ROOT/install.sh" v1.9.0 >/dev/null 2>&1
   test -f "$p/home/v1.9.0/bin/freelunch"
+}
+
+# freelunch up --------------------------------------------------------------------------
+
+# The first target out of capacity is skipped, OCI after every availability domain, and the
+# app lands on the next one, where the route and the app, both without a host, follow it.
+test_up_goes_to_the_next_target_when_one_has_no_room() {
+  local p="$WORK/up-fallback" out
+  up_project "$p" oci northflank
+  out="$(FAKE_UP="oci=capacity northflank=ok" up_in "$p" 2>&1)"
+  contains "$out" "up: targets, in order: oci northflank"
+  contains "$out" "up: oci has no room, on to the next target"
+  contains "$out" "up: no room at oci; using northflank"
+  equals "$(grep -o 'availability_domain_offset=[0-9]*' "$p/fake.log" | tr '\n' ' ')" \
+    "availability_domain_offset=0 availability_domain_offset=1 availability_domain_offset=2 "
+  grep -q 'providers/northflank/stack apply .*-auto-approve' "$p/fake.log"
+  grep -q 'providers/cloudflare/stack apply .*-var=default_host=northflank-main' "$p/fake.log"
+  exists "$p/nf/services/freelunch/api.json"
+  exists "$p/nf/services/freelunch/cloudflared.json"
+  contains "$out" "northflank-main: https://api.example.com"
+  # A VM's host keys are for VMs.
+  lacks "$(cat "$p/fake.log")" "console-history"
+}
+
+# A host that has room is used, its keys are pinned from the console and the app goes there.
+test_up_makes_the_first_target_and_deploys_to_it() {
+  local p="$WORK/up-first" out key
+  up_project "$p" oci northflank
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  out="$(FAKE_UP="oci=ok" up_in "$p" 2>&1)"
+  contains "$out" "up: making oci"
+  equals "$(grep -o 'availability_domain_offset=[0-9]*' "$p/fake.log" | tr '\n' ' ')" "availability_domain_offset=0 "
+  grep -q 'providers/cloudflare/stack apply .*-var=default_host=oci-main' "$p/fake.log"
+  grep -qxF "203.0.113.10 $key" "$p/.freelunch/known_hosts"
+  grep -q '^docker compose .*up' "$p/fake.log"
+  contains "$out" "oci-main: https://api.example.com"
+  fails grep -q 'providers/northflank/stack' "$p/fake.log"
+  # Once more: oci is deployed, so it is used as it is. Nothing is applied but the glue.
+  : > "$p/fake.log"
+  rm -f "$p/fake.log.oci.n"
+  out="$(FAKE_UP="oci=capacity" up_in "$p" 2>&1)"
+  contains "$out" "up: oci is deployed"
+  lacks "$out" "up: making"
+  fails grep -q 'providers/oci/stack apply' "$p/fake.log"
+}
+
+# Only a lack of room moves on; a refused sign-in is the user's to fix, and no other target
+# should quietly stand in for it.
+test_up_stops_on_an_error_that_is_not_about_room() {
+  local p="$WORK/up-auth" out
+  up_project "$p" oci northflank
+  if out="$(FAKE_UP="oci=auth northflank=ok" up_in "$p" 2>&1)"; then echo "up should have failed"; return 1; fi
+  contains "$out" "401-NotAuthenticated"
+  lacks "$out" "on to the next target"
+  fails grep -q 'providers/northflank/stack' "$p/fake.log"
+  absent "$p/nf/services/freelunch/api.json"
+}
+
+# With no room anywhere, nothing is deployed, and every reason is listed.
+test_up_says_when_no_target_has_room() {
+  local p="$WORK/up-none" out
+  up_project "$p" oci northflank
+  rm "$p/nf/projects/freelunch.json"
+  if out="$(FAKE_UP="oci=capacity northflank=ok" FAKE_NF_FOREIGN=blog up_in "$p" 2>&1)"; then echo "up should have failed"; return 1; fi
+  contains "$out" "  oci: out of host capacity"
+  contains "$out" "  northflank: Northflank won't make the project freelunch: the free Sandbox has room for 1 project, and the team has blog"
+  contains "$out" "up: no target has room right now (above). Nothing was deployed"
+  absent "$p/nf/services/freelunch/api.json"
+  fails grep -q 'providers/cloudflare/stack' "$p/fake.log"
+}
+
+# When the preferred target has room again, the app moves there on the next run, and the
+# one it left is named, not removed.
+test_up_moves_to_the_preferred_target_when_it_has_room() {
+  local p="$WORK/up-prefer" out
+  up_project "$p" oci northflank
+  FAKE_UP="oci=capacity northflank=ok" up_in "$p" >/dev/null 2>&1
+  exists "$p/nf/services/freelunch/api.json"
+  out="$(FAKE_UP="oci=ok" up_in "$p" 2>&1)"
+  contains "$out" "up: making oci"
+  grep -q 'providers/cloudflare/stack apply .*-var=default_host=oci-main' "$p/fake.log"
+  contains "$out" "oci-main: https://api.example.com"
+  contains "$out" "up: northflank still runs the app, unused now. freelunch destroy northflank removes them"
+  exists "$p/nf/services/freelunch/api.json"
+}
+
+# While the preferred target is full, the target that runs the app is kept up to date.
+test_up_keeps_a_fallback_up_to_date() {
+  local p="$WORK/up-keep" out
+  up_project "$p" oci northflank
+  FAKE_UP="oci=capacity northflank=ok" up_in "$p" >/dev/null 2>&1
+  out="$(FAKE_UP="oci=capacity" up_in "$p" 2>&1)"
+  contains "$out" "up: oci has no room, on to the next target"
+  contains "$out" "up: northflank is deployed"
+  contains "$out" "northflank-main: api is running"
+  equals "$(grep -c 'providers/northflank/stack apply' "$p/fake.log")" 1
+}
+
+test_up_dry_run_changes_nothing() {
+  local p="$WORK/up-dry" out
+  up_project "$p" oci northflank
+  out="$(up_in "$p" --dry-run 2>&1)"
+  contains "$out" "up: would make oci"
+  contains "$out" "up: would make northflank"
+  contains "$out" "up: would deploy to the first of oci northflank that has room"
+  absent "$p/fake.log"
+  FAKE_UP="oci=capacity northflank=ok" up_in "$p" >/dev/null 2>&1
+  : > "$p/fake.log"
+  out="$(up_in "$p" --dry-run 2>&1)"
+  contains "$out" "up: would make oci"
+  contains "$out" "up: northflank is deployed"
+  contains "$out" "up: would deploy to northflank"
+  fails grep -q 'apply' "$p/fake.log"
+}
+
+# Without targets, every host or platform stack the project has configured is one, OCI first.
+test_up_without_targets_takes_every_configured_stack() {
+  local p="$WORK/up-auto" out
+  up_project "$p"
+  out="$(up_in "$p" --dry-run 2>&1)"
+  contains "$out" "up: targets, in order: oci northflank"
+  rm "$p/.freelunch/oci/terraform.tfvars"
+  out="$(up_in "$p" --dry-run 2>&1)"
+  contains "$out" "up: targets, in order: northflank"
+  rm "$p/.freelunch/northflank/terraform.tfvars"
+  if out="$(up_in "$p" --dry-run 2>&1)"; then echo "up should have failed"; return 1; fi
+  contains "$out" "up: nothing to deploy to: no host or container platform has a terraform.tfvars in .freelunch"
+}
+
+test_up_checks_the_targets_it_is_given() {
+  local p="$WORK/up-bad" out
+  up_project "$p" nowhere
+  if out="$(up_in "$p" --dry-run 2>&1)"; then echo "up should have failed"; return 1; fi
+  contains "$out" "targets in apps.tfvars: 'nowhere' is not a provider (freelunch list shows them)"
+  up_project "$p" cloudflare
+  if out="$(up_in "$p" --dry-run 2>&1)"; then echo "up should have failed"; return 1; fi
+  contains "$out" "targets in apps.tfvars: cloudflare is a glue stack, not a host or a container platform"
+  up_project "$p" oci koyeb
+  if out="$(up_in "$p" --dry-run 2>&1)"; then echo "up should have failed"; return 1; fi
+  contains "$out" "targets in apps.tfvars: koyeb has no stack yet (status: planned)"
+  up_project "$p" oci northflank
+  rm "$p/.freelunch/northflank/terraform.tfvars"
+  if out="$(up_in "$p" --dry-run 2>&1)"; then echo "up should have failed"; return 1; fi
+  contains "$out" "targets in apps.tfvars: northflank has no .freelunch/northflank/terraform.tfvars"
+  if out="$(up_in "$p" --nope 2>&1)"; then echo "up should have failed"; return 1; fi
+  contains "$out" "up: unknown argument --nope"
+}
+
+# A host that says nothing in the console yet is waited for, then deployed to the way deploy
+# always did.
+test_up_waits_for_the_host_keys_and_then_trusts_the_first_key() {
+  local p="$WORK/up-keys" out
+  up_project "$p" oci
+  out="$(FAKE_UP="oci=ok" FAKE_CONSOLE_KEYS="" FREELUNCH_TRUST_TIMEOUT=0 up_in "$p" 2>&1)"
+  contains "$out" "up: oci-main: its console has no host keys yet, so deploy trusts the key it sees first"
+  contains "$out" "oci-main: https://api.example.com"
+  fails grep -q '^203.0.113.10 ' "$p/.freelunch/known_hosts"
+}
+
+# The status of a target with no room is its own, for scripts too.
+test_apply_without_room_exits_with_its_own_status() {
+  local p="$WORK/no-room-status" rc=0
+  capacity_project "$p"
+  FAKE_APPLY="capacity" apply_in "$p" oci >/dev/null 2>&1 || rc=$?
+  equals "$rc" 75
+  rc=0
+  FAKE_APPLY="capacity auth" apply_in "$p" oci >/dev/null 2>&1 || rc=$?
+  equals "$rc" 1
+}
+
+# A target that can't hold a tunnel serves the app at its own address, so the Cloudflare
+# stack, which routes through tunnels, is left alone.
+test_up_leaves_cloudflare_alone_for_a_target_without_a_tunnel() {
+  local p="$WORK/up-cr" out
+  cr_project "$p"
+  (cd "$p" && "$CLI" init cloudflare) >/dev/null 2>&1
+  printf 'zone = "example.com"\nroutes = {}\n' > "$p/.freelunch/cloudflare/terraform.tfvars"
+  sed -i.bak 's/host    = "cloud-run-main", //; s/{ host = "cloud-run-main", /{ /' "$p/.freelunch/apps.tfvars" && rm "$p/.freelunch/apps.tfvars.bak"
+  FREELUNCH_AUTO_APPROVE=1 cr_in "$p" apply cloud-run >/dev/null 2>&1
+  out="$(cr_in "$p" up 2>&1)"
+  contains "$out" "up: cloud-run is deployed"
+  contains "$out" "up: cloud-run-main serves the app at its own address and can't hold a Cloudflare tunnel, so the routes stay as they are"
+  lacks "$out" "apply cloudflare"
+  grep -q '^cr ' "$p/fake.log"
+}
+
+# Every cloud says it has no machine for you in its own words, and each is room enough to go on.
+test_up_goes_on_when_any_cloud_has_no_capacity() {
+  local p="$WORK/up-clouds" out kind
+  for kind in aws gcp azure; do
+    up_project "$p" oci northflank
+    out="$(FAKE_UP="oci=$kind northflank=ok" up_in "$p" 2>&1)"
+    contains "$out" "up: oci has no room, on to the next target"
+    exists "$p/nf/services/freelunch/api.json"
+    rm -rf "$p" "$p-checkout"
+  done
+}
+
+# A quota is no room either, but waiting for capacity won't change it, and it says so.
+test_up_goes_on_when_a_quota_is_used_up() {
+  local p="$WORK/up-quota" out
+  up_project "$p" oci northflank
+  out="$(FAKE_UP="oci=quota northflank=ok" up_in "$p" 2>&1)"
+  contains "$out" "up: oci has no room, on to the next target"
+  contains "$out" "oci: the account's quota leaves no room for the host: VcpuLimitExceeded. Raise the quota, or free up what uses it"
+  exists "$p/nf/services/freelunch/api.json"
+}
+
+# The platforms' quotas: Cloud Run's request quota and Scaleway's namespace limit.
+test_platform_quotas_are_no_room() {
+  local p="$WORK/quota-cr" rc=0 out
+  cr_project "$p"
+  out="$(FREELUNCH_AUTO_APPROVE=1 FAKE_CR_QUOTA=1 cr_in "$p" apply cloud-run 2>&1)" || rc=$?
+  equals "$rc" 75
+  contains "$out" "cloud-run: no quota left in my-gcp-project (429): Quota exceeded"
+  p="$WORK/quota-sw" rc=0
+  mkdir -p "$p/sw" && printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["8080:8080"]\n' > "$p/compose.yaml"
+  (cd "$p" && "$CLI" init --name sunbird scaleway) >/dev/null 2>&1
+  printf 'project_id = "11111111-2222-3333-4444-555555555555"\nname_prefix = "sunbird"\n' > "$p/.freelunch/scaleway/terraform.tfvars"
+  out="$(FREELUNCH_AUTO_APPROVE=1 FAKE_SW_QUOTA=1 sw_in "$p" apply scaleway 2>&1)" || rc=$?
+  equals "$rc" 75
+  contains "$out" "scaleway: no quota left for the namespace sunbird in fr-par (403): quota_exceeded"
+}
+
+# An app with a volume keeps to the target that runs it: its data doesn't move, so a target
+# above it isn't tried until --move says the data may be left behind.
+test_up_keeps_an_app_with_data_where_it_is() {
+  local p="$WORK/up-data" out
+  up_project "$p" oci northflank
+  FAKE_UP="oci=capacity northflank=ok" up_in "$p" >/dev/null 2>&1
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["127.0.0.1:8080:8080"]\n    volumes: ["results:/var/lib/results"]\nvolumes:\n  results:\n' > "$p/compose.yaml"
+  : > "$p/fake.log"; rm -f "$p/fake.log.oci.n"
+  out="$(FAKE_UP="oci=ok" up_in "$p" 2>&1)" || { echo "$out"; return 1; }
+  contains "$out" "up: the app keeps data in a volume, which stays on northflank, so oci aren't tried (freelunch up --move leaves the data behind and tries them)"
+  lacks "$out" "up: making oci"
+  fails grep -q 'providers/oci/stack apply' "$p/fake.log"
+  out="$(FAKE_UP="oci=ok" up_in "$p" --move 2>&1)"
+  contains "$out" "up: --move: the data in the app's volumes stays on northflank"
+  contains "$out" "up: making oci"
+  contains "$out" "up: northflank still runs the app, unused now"
+}
+
+# A CI run has nobody to look at a host key, so it doesn't trust the first one it sees.
+test_up_in_ci_wont_trust_an_unpinned_host() {
+  local p="$WORK/up-ci" out
+  up_project "$p" oci
+  if out="$(CI=true FAKE_UP="oci=ok" FAKE_CONSOLE_KEYS="" up_in "$p" 2>&1)"; then echo "up should have failed"; return 1; fi
+  contains "$out" "up: oci-main: its console has no host keys yet. A CI run doesn't trust the first key it sees: run freelunch trust oci-main on your machine"
+  fails grep -q '^docker compose' "$p/fake.log"
+}
+
+# setup_in <dir> [args...]: run setup in a project folder with a home of its own: an OCI
+# config and an SSH key, unless TEST_NO_HOME is set, and none of the credentials in this shell
+setup_in() {
+  local dir="$1"; shift
+  mkdir -p "$dir/home/.ssh" "$dir/home/.oci"
+  if [[ -z "${TEST_NO_HOME:-}" ]]; then
+    printf '[DEFAULT]\nuser=ocid1.user.oc1..me\nfingerprint=aa:bb\nkey_file=~/.oci/key.pem\ntenancy=ocid1.tenancy.oc1..mytenancy\nregion=uk-london-1\n' > "$dir/home/.oci/config"
+    [[ -f "$dir/home/.ssh/id_ed25519.pub" ]] || ssh-keygen -q -t ed25519 -N '' -C me@laptop -f "$dir/home/.ssh/id_ed25519"
+  fi
+  (cd "$dir" && env -u CLOUDFLARE_API_TOKEN -u NORTHFLANK_API_TOKEN -u SCW_SECRET_KEY HOME="$dir/home" PATH="$WORK/bin:$PATH" "$CLI" setup "$@")
+}
+
+# setup finds what the clouds' own config has and writes the project; what it can't find is
+# listed, not guessed.
+test_setup_writes_the_project_from_what_it_finds() {
+  local p="$WORK/setup-flags" out
+  mkdir -p "$p" && touch "$p/compose.yaml"
+  out="$(setup_in "$p" --targets oci,northflank --domain example.org --no-doctor 2>&1)"
+  grep -qx 'targets = \["oci", "northflank"\]' "$p/.freelunch/apps.tfvars"
+  grep -qx 'tenancy_ocid = "ocid1.tenancy.oc1..mytenancy"  # grep tenancy ~/.oci/config' "$p/.freelunch/oci/terraform.tfvars"
+  grep -q '^region *= "uk-london-1"' "$p/.freelunch/oci/terraform.tfvars"
+  grep -qF "$(cut -d' ' -f1,2 "$p/home/.ssh/id_ed25519.pub")" "$p/.freelunch/oci/terraform.tfvars"
+  fails grep -q 'AAAA\.\.\. you@laptop' "$p/.freelunch/oci/terraform.tfvars"
+  exists "$p/.freelunch/northflank/terraform.tfvars"
+  grep -q '^zone *= "example.org"' "$p/.freelunch/cloudflare/terraform.tfvars"
+  grep -qF '"api.example.org" = { app = "' "$p/.freelunch/cloudflare/terraform.tfvars"
+  fails grep -q '\.example\.com' "$p/.freelunch/cloudflare/terraform.tfvars"
+  equals "$(ls -l "$p/.freelunch/.env" | cut -c1-10)" "-rw-------"
+  contains "$out" "setup: targets oci northflank, domain example.org"
+  contains "$out" ".freelunch/.env: NORTHFLANK_API_TOKEN (Northflank API token)"
+  contains "$out" ".freelunch/.env: CLOUDFLARE_API_TOKEN (Cloudflare API token)"
+  lacks "$out" "tenancy_ocid"
+  # A token that .env has is not asked for.
+  sed -i.bak 's/^NORTHFLANK_API_TOKEN=.*/NORTHFLANK_API_TOKEN=x/' "$p/.freelunch/.env" && rm "$p/.freelunch/.env.bak"
+  out="$(setup_in "$p" --no-doctor 2>&1)"
+  lacks "$out" "NORTHFLANK_API_TOKEN"
+}
+
+# With a terminal, it asks: the clouds in order, the domain, then what it couldn't find.
+test_setup_asks_for_what_it_cant_find() {
+  local p="$WORK/setup-ask" out
+  mkdir -p "$p" && touch "$p/compose.yaml"
+  out="$(printf '3 1\n\nnf-secret\nocid1.tenancy.oc1..typed\n' | TEST_NO_HOME=1 FREELUNCH_INTERACTIVE=1 setup_in "$p" --no-doctor 2>&1)"
+  contains "$out" "Where may your app run?"
+  contains "$out" "3) northflank  Northflank"
+  grep -qx 'targets = \["northflank", "oci"\]' "$p/.freelunch/apps.tfvars"
+  grep -qx 'NORTHFLANK_API_TOKEN=nf-secret' "$p/.freelunch/.env"
+  grep -q 'tenancy_ocid = "ocid1.tenancy.oc1..typed"' "$p/.freelunch/oci/terraform.tfvars"
+  absent "$p/.freelunch/cloudflare"
+  # No SSH key on this machine: said, not made up.
+  contains "$out" "oci/terraform.tfvars: an SSH public key (ssh-keygen -t ed25519 makes one)"
+  lacks "$out" "nf-secret"
+}
+
+# Running it again keeps the answers, and asks nothing.
+test_setup_again_keeps_the_answers() {
+  local p="$WORK/setup-again" out
+  mkdir -p "$p" && touch "$p/compose.yaml"
+  setup_in "$p" --targets northflank,oci --no-doctor >/dev/null 2>&1
+  sed -i.bak 's/^region .*/region = "europe-west"   # mine/' "$p/.freelunch/northflank/terraform.tfvars" && rm "$p/.freelunch/northflank/terraform.tfvars.bak"
+  out="$(printf 'never asked\n' | FREELUNCH_INTERACTIVE=1 setup_in "$p" --no-doctor 2>&1)"
+  grep -qx 'targets = \["northflank", "oci"\]' "$p/.freelunch/apps.tfvars"
+  grep -qx 'region = "europe-west"   # mine' "$p/.freelunch/northflank/terraform.tfvars"
+  lacks "$out" "Where may your app run?"
+  # The order can change.
+  setup_in "$p" --targets oci,northflank --no-doctor >/dev/null 2>&1
+  grep -qx 'targets = \["oci", "northflank"\]' "$p/.freelunch/apps.tfvars"
+  equals "$(grep -c '^targets' "$p/.freelunch/apps.tfvars")" 1
+}
+
+test_setup_says_what_is_wrong() {
+  local p="$WORK/setup-bad" out
+  mkdir -p "$p"
+  if out="$(setup_in "$p" 2>&1 < /dev/null)"; then echo "setup should have failed"; return 1; fi
+  contains "$out" "setup: nothing to ask the questions of: pass --targets oci,cloud-run"
+  if out="$(setup_in "$p" --targets nowhere 2>&1)"; then echo "setup should have failed"; return 1; fi
+  contains "$out" "setup: 'nowhere' is not a target (oci cloud-run northflank scaleway gcp aws azure)"
+  if out="$(setup_in "$p" --targets oci --nope 2>&1)"; then echo "setup should have failed"; return 1; fi
+  contains "$out" "setup: unknown argument --nope"
+  # CI needs everything filled in first.
+  if out="$(TEST_NO_HOME=1 setup_in "$p" --targets northflank --ci --no-doctor 2>&1)"; then echo "setup should have failed"; return 1; fi
+  contains "$out" "setup: fill in what is listed above, then run freelunch setup --ci again to set up CI"
+  # And a place for the state, which only an OCI target can make by itself.
+  sed -i.bak 's/^NORTHFLANK_API_TOKEN=.*/NORTHFLANK_API_TOKEN=x/' "$p/.freelunch/.env" && rm "$p/.freelunch/.env.bak"
+  if out="$(TEST_NO_HOME=1 setup_in "$p" --ci --no-doctor 2>&1)"; then echo "setup should have failed"; return 1; fi
+  contains "$out" "setup: CI needs the project's state somewhere it can reach: freelunch state init r2 (or b2, gitlab)"
+}
+
+# What setup writes is what up reads.
+test_setup_then_up_dry_run() {
+  local p="$WORK/setup-up" out
+  mkdir -p "$p" && touch "$p/compose.yaml"
+  setup_in "$p" --targets northflank,oci --no-doctor >/dev/null 2>&1
+  out="$(cd "$p" && HOME="$p/home" "$CLI" up --dry-run 2>&1)"
+  contains "$out" "up: targets, in order: northflank oci"
 }
 
 # tests/cli.sh <pattern>: only the tests whose name matches the pattern (grep -E)

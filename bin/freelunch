@@ -18,6 +18,11 @@ SOURCE="${FREELUNCH_SOURCE:-https://github.com/freelunch-sh/freelunch}"
 TF="${FREELUNCH_TF:-$(command -v tofu || command -v terraform || true)}"
 SSH="${FREELUNCH_SSH:-ssh}"
 INIT_STACKS=(oci cloudflare)
+# targets = "auto" tries these first, in this order: the free tiers that keep an app up for
+# nothing, with the most room first. Any other host or platform stack the project has
+# configured follows.
+AUTO_ORDER=(oci cloud-run northflank scaleway gcp aws azure)
+NO_ROOM=75 # the exit status of a target with no room (EX_TEMPFAIL): freelunch up goes on to the next
 
 PROJECT=""      # the project's .freelunch folder; empty in home mode (config and state live in this checkout)
 TMP=""          # scratch folder removed on exit (deploy keeps tunnel tokens there)
@@ -36,6 +41,9 @@ on_exit() {
 }
 
 die() { DIED="$*"; echo "freelunch: $*" >&2; exit 1; }
+# no_room: die for a target that has no room for the project. The status tells freelunch up to
+# try the next target; any other failure stops it.
+no_room() { DIED="$*"; echo "freelunch: $*" >&2; exit "$NO_ROOM"; }
 log() { echo "==> $*" >&2; }
 rel() { echo "${1#"$PWD"/}"; }
 strip_colors() { sed "s/$(printf '\033')\[[0-9;]*m//g"; }
@@ -52,11 +60,26 @@ Project:
                           name its other stacks have, or the folder's name. --image-workflow
                           adds a GitHub Actions workflow that builds the image for the hosts
                           and pushes it to ghcr.io
+  up [--dry-run] [--move] Deploy wherever there is room: take the first target (targets in
+                          apps.tfvars, or every configured host and platform stack) that runs
+                          the project or can make it, skipping one that is out of capacity or
+                          quota, then point Cloudflare at it, pin the host keys and deploy.
+                          Apps and routes without a host go to that target. It asks nothing,
+                          so a push can run it, and running it again is safe. --dry-run says which
+                          target it would use. An app with a volume stays on the target that runs it;
+                          --move lets a target above it take the app, data left behind
   deploy [target...]      Check that each image has a build for its host, copy Compose apps and
                           their env to the hosts over SSH, start them and wait until they are
                           healthy. On a container platform (northflank) each app becomes a
                           service through its API instead. Targets: all (default), a provider
                           (oci) or a host (oci-main). --dry-run prints what it would do
+  setup [--targets a,b] [--domain d] [--name n] [--ci]
+                          The one-time wizard: asks where the app may run (most preferred
+                          first), finds what it can in the clouds' own config (OCI tenancy and
+                          region, SSH key, gcloud project, Azure subscription), asks for the
+                          rest, writes .freelunch/ with the targets in apps.tfvars, and runs
+                          doctor. --ci also sets up the state store, the workflow and the
+                          secret, so a push deploys. With no terminal, flags answer
   version                 This freelunch's version, and the one the project pins
   upgrade [version]       Install a release (the latest by default, or v1.2.0, main or a commit)
                           as the freelunch on this machine, and pin the project to it
@@ -417,7 +440,14 @@ project_args() { # project_args <provider>
   echo "-var-file=$PROJECT/$1/terraform.tfvars"
   echo "-state=$PROJECT/$1/terraform.tfstate"
   # Glue stacks read the hybrid inventory (docs/architecture.md#glue-contract).
-  if [[ "$(meta "$1" layer)" == "glue" ]]; then echo "-var=inventory_state_path=$(hybrid_state)"; fi
+  if [[ "$(meta "$1" layer)" == "glue" ]]; then
+    echo "-var=inventory_state_path=$(hybrid_state)"
+    # Routes without a host go where the project runs (freelunch up).
+    if grep -qs 'variable "default_host"' "$(stack_dir "$1")"/*.tf; then
+      local default; default="$(default_host)"
+      [[ -z "$default" ]] || echo "-var=default_host=$default"
+    fi
+  fi
 }
 
 # --- tofu/terraform -------------------------------------------------------------------
@@ -993,7 +1023,10 @@ oci_hints() {
 # beforehand (plan --out, then apply --plan). Each retry plans again and applies that plan
 # only if it destroys nothing and, after a reviewed plan, makes no change the reviewed plan
 # doesn't. So a change made while it waits can't do anything that nobody approved.
-CAPACITY_ERRORS='out of (host )?capacity|TooManyRequests'
+# What each cloud says when it has no machine of that size to give: OCI, AWS, GCP and Azure
+CAPACITY_ERRORS='out of (host )?capacity|TooManyRequests|InsufficientInstanceCapacity|InsufficientCapacity|ZONE_RESOURCE_POOL_EXHAUSTED|does not have enough resources available|ZonalAllocationFailed|AllocationFailed|OverconstrainedAllocationRequest|SkuNotAvailable'
+# And when the account's own limit stops a free machine: no room either, but waiting won't help
+QUOTA_ERRORS='VcpuLimitExceeded|InstanceLimitExceeded|QUOTA_EXCEEDED|Quota .* exceeded|QuotaExceeded|quota_exceeded|RESOURCE_EXHAUSTED'
 # How a request fails when the network does, in Go's words (the providers are Go programs)
 NET_FAILURES='(read: )?operation timed out|i/o timeout|TLS handshake timeout|context deadline exceeded|connection reset by peer|connection refused|broken pipe|unexpected EOF|no such host|network is unreachable|no route to host'
 MAX_CAPACITY_DELAY=1800 # backing off from rate limits stops here; a session token lasts an hour
@@ -1331,9 +1364,12 @@ apply_host() {
   if apply_once "$p" "$saved" "$@" 2>&1 | keep "$TMP/$p.out"; then return 0; fi
   again="freelunch apply $p${saved:+ --plan $(rel "$saved")} --wait-for-capacity"
   case "$(retry_reason "$TMP/$p.out")" in
-    capacity) die "$p: out of host capacity. $again tries again until the host exists" ;;
-    busy)     die "$p: too many requests. $again waits and tries again" ;;
+    capacity) no_room "$p: out of host capacity. $again tries again until the host exists" ;;
+    busy)     no_room "$p: too many requests. $again waits and tries again" ;;
   esac
+  if grep -Eq "$QUOTA_ERRORS" "$TMP/$p.out"; then
+    no_room "$p: the account's quota leaves no room for the host: $(grep -Eo "$QUOTA_ERRORS" "$TMP/$p.out" | head -1). Raise the quota, or free up what uses it"
+  fi
   oci_hints "$TMP/$p.out"
   exit 1
 }
@@ -2038,10 +2074,17 @@ EOF
 }
 
 # route_example <stack> <target> <app> <platform 0|1>: a stack's example as it is, except
-# that the cloudflare one routes to the project's target, and names the app on a platform
+# that the cloudflare one routes the app to wherever freelunch up put the project, with the
+# app named for a platform (where every app is a service of its own)
 route_example() {
-  if [[ "$1" != "cloudflare" || -z "$2" || "$2" == "oci-main" ]]; then cat; return 0; fi
-  if [[ "$4" == 1 ]]; then sed "s/{ host = \"oci-main\", port/{ host = \"$2\", app = \"$3\", port/"; else sed "s/host = \"oci-main\"/host = \"$2\"/"; fi
+  if [[ "$1" != "cloudflare" ]]; then cat; return 0; fi
+  awk -v app="$3" '
+    /^routes = \{/ {
+      print "# A route without a host goes where freelunch up put the project. Name one to pin it:"
+      print "# { host = \"oci-main\", port = 8080 }."
+    }
+    { sub(/\{ host = "oci-main", port = 8080 \}$/, "{ app = \"" app "\", port = 8080 }") }
+    { print }'
 }
 
 cmd_init() {
@@ -2127,13 +2170,18 @@ cmd_init() {
     # environment of the app's service, next to what the compose file sets."
   {
     cat <<EOF
-# Apps that \`freelunch deploy\` runs on your hosts. Paths are relative to this folder.
-# Host names are <provider>-<instance>; \`freelunch inventory\` lists them.
+# Apps that \`freelunch up\` and \`freelunch deploy\` run. Paths are relative to this folder.
+
+# Where they may run, in order: \`freelunch up\` takes the first that runs the project already
+# or has room to make it, and goes on to the next when one is out of capacity. Leave it out
+# to use every stack you have set up, Oracle first.
+# targets = ["oci", "northflank"]
 
 apps = {
   $app = {
-    host    = "${host:-oci-main}"
     compose = "../$compose"
+    # Pin the app to one target instead (<provider>-<instance>; \`freelunch inventory\` lists them):
+    # host = "${host:-oci-main}"
 
     # Secrets for the app. $secrets
     # Keep it in this folder: *.env files are git-ignored.
@@ -2214,8 +2262,10 @@ EOF
 Next steps:
   1. In .freelunch/<stack>/, copy terraform.tfvars.example to terraform.tfvars and fill it in
   2. cp .freelunch/.env.example .freelunch/.env and set the credentials
-  3. $applies
-  4. freelunch deploy
+  3. freelunch up
+     It makes the first target that has room (a stack that is out of capacity is skipped),
+     points Cloudflare at it and deploys. Step by step instead: $applies, then
+     freelunch deploy
 EOF
   # API key profiles have a user= line; session profiles don't, and a session ends hours after signing in.
   if [[ " ${stacks[*]} " == *" oci "* ]] && ! grep -qs '^user[[:space:]]*=' "$HOME/.oci/config"; then
@@ -2391,11 +2441,13 @@ storage_states() {
 # into $TMP/targets.json, platforms.json, registries.json, tunnel_tokens.json and
 # app_env.json.
 deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
-  local apps_file="$1" tunnel_state="$2" args o
+  local apps_file="$1" tunnel_state="$2" args o default
   args=(-state="$TMP/deploy.tfstate" -var "config_dir=$(state_root)" -var "inventory_state_path=$(hybrid_state)")
   if [[ -f "$apps_file" ]]; then args+=(-var-file="$apps_file"); fi
   if [[ -n "$tunnel_state" ]]; then args+=(-var "tunnel_state_path=$tunnel_state"); fi
   args+=(-var "storage_state_paths=$(storage_states)")
+  default="$(default_host)"
+  if [[ -n "$default" ]]; then args+=(-var "default_host=$default"); fi
   check_checkout_tfvars "$ROOT/deploy"
   TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" init -input=false >/dev/null || return 1
   TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" apply -input=false -auto-approve "${args[@]}" >/dev/null || return 1
@@ -2600,6 +2652,484 @@ cmd_deploy() {
   for h in "${hosts[@]}"; do
     if [[ "$(jq -r --arg h "$h" '.[$h].kind' "$TMP/targets.json")" == "platform" ]]; then deploy_platform "$h" "$dry_run"; else deploy_host "$h" "$dry_run"; fi
   done
+}
+
+# --- setup: the one-time wizard ----------------------------------------------------------
+
+# freelunch setup does what init, the tfvars examples, .env and the checks ask you to do by
+# hand, once: it asks where the app may run, finds what it can in the cloud CLIs' own config
+# (the OCI tenancy and home region, the SSH key, the gcloud project, the Azure subscription),
+# asks for the rest, writes .freelunch/, and ends with doctor. Answers come from flags or
+# from the terminal; with neither, a value stays as the example has it and is listed as
+# still to fill in. Run it again to change answers: what is filled in stays.
+
+# interactive: whether to ask. A terminal does; FREELUNCH_INTERACTIVE=1 reads answers from a pipe.
+interactive() { [[ -t 0 || "${FREELUNCH_INTERACTIVE:-0}" == "1" ]]; }
+
+# ask <question> [default]: the answer, or the default on an empty one
+ask() {
+  local answer=""
+  printf '%s%s ' "$1" "${2:+ [$2]}" >&2
+  IFS= read -r answer || true
+  echo "${answer:-${2:-}}"
+}
+
+# ask_secret <question>: an answer that isn't shown
+ask_secret() {
+  local answer=""
+  printf '%s ' "$1" >&2
+  if [[ -t 0 ]]; then IFS= read -rs answer || true; echo >&2; else IFS= read -r answer || true; fi
+  echo "$answer"
+}
+
+# ini_value <file> <section> <key>: a value of an INI file such as ~/.oci/config
+ini_value() {
+  awk -F= -v sec="$2" -v key="$3" '
+    /^\[/ { inside = ($0 == "[" sec "]"); next }
+    inside { k = $1; sub(/^[ \t]+/, "", k); sub(/[ \t]+$/, "", k); if (k == key) { v = substr($0, index($0, "=") + 1); sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v); print v; exit } }' "$1" 2>/dev/null || true
+}
+
+# set_tfvar <file> <name> <value>: set a string variable on its one line, comment kept
+set_tfvar() {
+  local file="$1" name="$2" value="$3" escaped
+  escaped="$(printf '%s' "$value" | sed -e 's/[\\&|]/\\&/g')"
+  sed -E "s|^([[:space:]]*${name}[[:space:]]*=[[:space:]]*)\"[^\"]*\"|\\1\"$escaped\"|" "$file" > "$file.new" && mv "$file.new" "$file"
+}
+
+# placeholder? <file> <name>: whether the variable still has the example's value
+placeholder() {
+  local v; v="$(tfvar "$1" "$2")"
+  case "$v" in
+    ""|"my-gcp-project"|"my-project-123456"|"ocid1.tenancy.oc1..aaaaaaaa..."|*"00000000-0000-0000-0000-000000000000") return 0 ;;
+  esac
+  return 1
+}
+
+# ssh_keys: the public keys of this machine, one per line
+ssh_keys() {
+  local f
+  if [[ -n "${FREELUNCH_SSH_KEY:-}" && -f "${FREELUNCH_SSH_KEY}.pub" ]]; then cat "${FREELUNCH_SSH_KEY}.pub"; return 0; fi
+  for f in id_ed25519 id_ecdsa id_rsa; do
+    if [[ -f "$HOME/.ssh/$f.pub" ]]; then cat "$HOME/.ssh/$f.pub"; return 0; fi
+  done
+}
+
+# fill_ssh_keys <file>: the example's placeholder key becomes this machine's
+fill_ssh_keys() {
+  local file="$1" key
+  grep -q 'AAAA\.\.\. you@laptop' "$file" || return 0
+  key="$(ssh_keys | head -1)"
+  [[ -n "$key" ]] || return 1
+  awk -v key="$key" '/AAAA\.\.\. you@laptop/ { print "  \"" key "\","; next } { print }' "$file" > "$file.new" && mv "$file.new" "$file"
+}
+
+# setup_value <detected> <question>: the value that was found, or an answer; nothing when
+# there is nobody to ask
+setup_value() {
+  if [[ -n "$1" ]]; then echo "$1"; return 0; fi
+  if interactive; then ask "$2"; fi
+}
+
+# setup_stack <provider> <name prefix>: terraform.tfvars from the example, with what can be
+# found filled in. Prints what is still to fill in.
+setup_stack() {
+  local s="$1" file value profile
+  file="$(config_dir "$s")/terraform.tfvars"
+  [[ -f "$file" ]] || cp "$(config_dir "$s")/terraform.tfvars.example" "$file"
+  case "$s" in
+    oci)
+      local cfg="$HOME/.oci/config"
+      profile=DEFAULT
+      if [[ -f "$cfg" ]] && ! grep -q '^\[DEFAULT\]' "$cfg" && grep -q '^\[freelunch\]' "$cfg"; then profile=freelunch; fi
+      if placeholder "$file" tenancy_ocid; then
+        value="$(setup_value "$(ini_value "$cfg" "$profile" tenancy)" "OCI tenancy OCID (grep tenancy ~/.oci/config):")"
+        [[ -z "$value" ]] || set_tfvar "$file" tenancy_ocid "$value"
+      fi
+      if grep -q '^region *= *"eu-frankfurt-1"' "$file"; then
+        value="$(ini_value "$cfg" "$profile" region)"
+        [[ -z "$value" ]] || set_tfvar "$file" region "$value"
+      fi
+      if [[ "$profile" != DEFAULT ]] && ! grep -q '^oci_config_profile' "$file"; then echo "oci_config_profile = \"$profile\"" >> "$file"; fi ;;
+    gcp|cloud-run)
+      if placeholder "$file" project_id; then
+        value="$(setup_value "$(command -v gcloud >/dev/null && gcloud config get-value project 2>/dev/null || true)" "Google Cloud project ID (gcloud projects list):")"
+        [[ -z "$value" ]] || set_tfvar "$file" project_id "$value"
+      fi ;;
+    scaleway)
+      if placeholder "$file" project_id; then
+        value="$(setup_value "${SCW_DEFAULT_PROJECT_ID:-}" "Scaleway project ID (console.scaleway.com > Project settings):")"
+        [[ -z "$value" ]] || set_tfvar "$file" project_id "$value"
+      fi ;;
+    azure)
+      if placeholder "$file" subscription_id; then
+        value="$(setup_value "$(command -v az >/dev/null && az account show --query id -o tsv 2>/dev/null || true)" "Azure subscription ID (az account show):")"
+        [[ -z "$value" ]] || set_tfvar "$file" subscription_id "$value"
+      fi ;;
+  esac
+  fill_ssh_keys "$file" || echo "$(rel "$file"): an SSH public key (ssh-keygen -t ed25519 makes one)"
+  if placeholder "$file" tenancy_ocid && [[ "$s" == oci ]]; then echo "$(rel "$file"): tenancy_ocid"; fi
+  if [[ "$s" =~ ^(gcp|cloud-run|scaleway)$ ]] && placeholder "$file" project_id; then echo "$(rel "$file"): project_id"; fi
+  if [[ "$s" == azure ]] && placeholder "$file" subscription_id; then echo "$(rel "$file"): subscription_id"; fi
+  return 0
+}
+
+# setup_token <name> <what>: put a credential in .env unless the shell or .env has it
+setup_token() {
+  local name="$1" what="$2" value
+  if [[ -n "${!name:-}" ]]; then return 0; fi
+  if grep -qE "^$name=." "$PROJECT/.env" 2>/dev/null; then return 0; fi
+  value=""
+  if interactive; then value="$(ask_secret "$what ($name, Enter to add it to .freelunch/.env later):")"; fi
+  if [[ -z "$value" ]]; then echo ".freelunch/.env: $name ($what)"; return 0; fi
+  if grep -q "^$name=" "$PROJECT/.env"; then
+    sed -E "s|^$name=.*|$name=$(printf '%s' "$value" | sed -e 's/[\\&|]/\\&/g')|" "$PROJECT/.env" > "$PROJECT/.env.new" && mv "$PROJECT/.env.new" "$PROJECT/.env"
+  else
+    printf '%s=%s\n' "$name" "$value" >> "$PROJECT/.env"
+  fi
+  chmod 600 "$PROJECT/.env"
+}
+
+cmd_setup() {
+  command -v jq >/dev/null || die "jq is required for 'setup'"
+  local name="" domain="" targets_arg="" ci=0 skip_doctor=0 a
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)    [[ $# -gt 1 ]] || die "setup: --name takes a name"; name="$2"; shift ;;
+      --domain)  [[ $# -gt 1 ]] || die "setup: --domain takes a domain on Cloudflare"; domain="$2"; shift ;;
+      --targets) [[ $# -gt 1 ]] || die "setup: --targets takes the providers, comma-separated, most preferred first"; targets_arg="$2"; shift ;;
+      --ci)      ci=1 ;;
+      --no-doctor) skip_doctor=1 ;;
+      *)         die "setup: unknown argument $1 (setup takes --targets, --domain, --name, --ci and --no-doctor)" ;;
+    esac
+    shift
+  done
+
+  # 1. Where the app may run
+  local choices=() p i=0 picked t
+  for p in "${AUTO_ORDER[@]}"; do
+    [[ "$(meta "$p" status)" == "ready" && -d "$(stack_dir "$p")" ]] || continue
+    case "$(meta "$p" layer)" in host|platform) ;; *) continue ;; esac
+    choices+=("$p")
+  done
+  local targets=()
+  if [[ -n "$targets_arg" ]]; then
+    IFS=, read -ra picked <<< "$targets_arg"
+    for t in "${picked[@]}"; do
+      [[ " ${choices[*]} " == *" $t "* ]] || die "setup: '$t' is not a target (${choices[*]})"
+      targets+=("$t")
+    done
+  elif [[ -n "$PROJECT" ]] && [[ -n "$(project_targets)" ]]; then
+    while IFS= read -r t; do [[ -z "$t" ]] || targets+=("$t"); done < <(project_targets)
+  elif interactive; then
+    echo "Where may your app run? Pick the clouds you have an account at, most preferred first." >&2
+    for p in "${choices[@]}"; do
+      i=$((i + 1))
+      printf '  %d) %-11s %s: %.60s\n' "$i" "$p" "$(meta "$p" display_name)" "$(meta "$p" free_tier)" >&2
+    done
+    read -ra picked <<< "$(ask "Numbers, like \"1 2\":" "1")"
+    for t in "${picked[@]}"; do
+      [[ "$t" =~ ^[0-9]+$ && "$t" -ge 1 && "$t" -le ${#choices[@]} ]] || die "setup: $t is not one of the numbers above"
+      targets+=("${choices[$((t - 1))]}")
+    done
+  else
+    die "setup: nothing to ask the questions of: pass --targets ${choices[0]},${choices[1]} (${choices[*]}), most preferred first"
+  fi
+  [[ ${#targets[@]} -gt 0 ]] || die "setup: pick at least one target"
+
+  # 2. The domain
+  if [[ -z "$domain" && -n "$PROJECT" && -f "$PROJECT/cloudflare/terraform.tfvars" ]]; then domain="$(tfvar "$PROJECT/cloudflare/terraform.tfvars" zone)"; fi
+  if [[ -z "$domain" ]] && interactive; then
+    domain="$(ask "Domain on Cloudflare for the app (Enter to skip; freelunch domain suggest finds free ones):")"
+  fi
+  local stacks=("${targets[@]}")
+  [[ -z "$domain" ]] || stacks+=(cloudflare)
+
+  # 3. The project folder
+  local init_args=()
+  [[ -z "$name" ]] || init_args+=(--name "$name")
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  ( cmd_init ${init_args[@]+"${init_args[@]}"} "${stacks[@]}" ) 2> "$TMP/init.err" || { cat "$TMP/init.err" >&2; exit 1; }
+  find_project
+  [[ -n "$PROJECT" ]] || die "setup: init made no .freelunch folder"
+  [[ -f "$PROJECT/.env" ]] || (umask 077 && cp "$PROJECT/.env.example" "$PROJECT/.env")
+  load_env_file "$PROJECT/.env"
+
+  # targets in apps.tfvars: the order the answers gave
+  local list=""
+  for t in "${targets[@]}"; do list="${list:+$list, }\"$t\""; done
+  if grep -qE '^[[:space:]]*targets[[:space:]]*=' "$PROJECT/apps.tfvars"; then
+    sed -E "s|^[[:space:]]*targets[[:space:]]*=.*|targets = [$list]|" "$PROJECT/apps.tfvars" > "$PROJECT/apps.tfvars.new"
+  else
+    sed -E "s|^# targets = .*|targets = [$list]|" "$PROJECT/apps.tfvars" > "$PROJECT/apps.tfvars.new"
+  fi
+  mv "$PROJECT/apps.tfvars.new" "$PROJECT/apps.tfvars"
+
+  # 4. What each stack needs
+  local todo=() line
+  for t in "${targets[@]}"; do
+    while IFS= read -r line; do [[ -z "$line" ]] || todo+=("$line"); done < <(setup_stack "$t")
+    case "$t" in
+      northflank) while IFS= read -r line; do [[ -z "$line" ]] || todo+=("$line"); done < <(setup_token NORTHFLANK_API_TOKEN "Northflank API token") ;;
+      scaleway)   while IFS= read -r line; do [[ -z "$line" ]] || todo+=("$line"); done < <(setup_token SCW_SECRET_KEY "Scaleway secret key") ;;
+    esac
+  done
+  if [[ -n "$domain" ]]; then
+    local cf="$PROJECT/cloudflare/terraform.tfvars"
+    [[ -f "$cf" ]] || cp "$PROJECT/cloudflare/terraform.tfvars.example" "$cf"
+    # The example's routes are at example.com, which becomes the domain.
+    sed "s|\.example\.com|.$domain|g" "$cf" > "$cf.new" && mv "$cf.new" "$cf"
+    set_tfvar "$cf" zone "$domain"
+    while IFS= read -r line; do [[ -z "$line" ]] || todo+=("$line"); done < <(setup_token CLOUDFLARE_API_TOKEN "Cloudflare API token")
+  fi
+
+  log "setup: targets ${targets[*]}${domain:+, domain $domain}, in $(rel "$PROJECT")"
+  if [[ ${#todo[@]} -gt 0 ]]; then
+    echo >&2
+    echo "Still to fill in:" >&2
+    printf '  %s\n' "${todo[@]}" >&2
+  fi
+  if [[ $skip_doctor -eq 0 ]]; then
+    echo >&2
+    ( cmd_doctor ) || true
+  fi
+  if [[ $ci -eq 1 ]]; then
+    [[ ${#todo[@]} -eq 0 ]] || die "setup: fill in what is listed above, then run freelunch setup --ci again to set up CI"
+    setup_ci "${targets[0]}"
+  fi
+  echo >&2
+  echo "Next: freelunch up    (or push, once CI is set up: freelunch setup --ci)" >&2
+}
+
+# setup_ci <first target>: a state store, the workflow and the secret, which a push needs
+setup_ci() {
+  if [[ -z "$(state_config)" ]]; then
+    if [[ "$1" == oci ]]; then cmd_state init oci
+    else die "setup: CI needs the project's state somewhere it can reach: freelunch state init r2 (or b2, gitlab), fill in what it says, then run freelunch setup --ci again"; fi
+  fi
+  cmd_state push
+  cmd_ci init github
+  cmd_ci secrets
+}
+
+# --- up: deploy wherever there is room -------------------------------------------------
+
+# freelunch up is the one command a push runs. It goes through the project's targets in order
+# and takes the first one that runs the project already or has room to make it: a target
+# that is out of capacity (OCI) or quota (a full Northflank team) is skipped, anything else
+# stops it. Then it points Cloudflare at that target, pins the host's keys and deploys. The
+# targets come from apps.tfvars (targets = ["oci", "cloud-run"]); without them every host
+# or platform stack with a terraform.tfvars is one, in AUTO_ORDER. An app or route without
+# a host goes to the first target that is deployed (default_host).
+
+# project_targets: the stacks apps.tfvars lists in targets = [...], in order, one per line
+project_targets() {
+  local file; file="$(state_root)/apps.tfvars"
+  [[ -f "$file" ]] || return 0
+  sed 's/#.*//' "$file" | tr '\n' ' ' \
+    | sed -nE 's/.*(^|[[:space:]])targets[[:space:]]*=[[:space:]]*\[([^]]*)\].*/\2/p' | { grep -o '"[^"]*"' || true; } | tr -d '"'
+}
+
+# up_targets: the targets in the order up tries them. A name apps.tfvars lists that isn't a
+# stack with a terraform.tfvars is an error; auto takes whatever is configured.
+up_targets() {
+  local t p listed=() seen=" "
+  while IFS= read -r t; do [[ -z "$t" ]] || listed+=("$t"); done < <(project_targets)
+  for t in ${listed[@]+"${listed[@]}"}; do
+    [[ -f "$PROVIDERS_DIR/$t/provider.yaml" ]] || die "targets in apps.tfvars: '$t' is not a provider (freelunch list shows them)"
+    case "$(meta "$t" layer)" in
+      host|platform) ;;
+      *) die "targets in apps.tfvars: $t is a $(meta "$t" layer) stack, not a host or a container platform" ;;
+    esac
+    [[ -d "$(stack_dir "$t")" ]] || die "targets in apps.tfvars: $t has no stack yet (status: $(meta "$t" status))"
+    is_configured "$t" || die "targets in apps.tfvars: $t has no $(rel "$(config_dir "$t")")/terraform.tfvars (freelunch init $t writes an example)"
+    [[ "$seen" != *" $t "* ]] || continue
+    seen="$seen$t "
+    echo "$t"
+  done
+  [[ ${#listed[@]} -eq 0 ]] || return 0
+  for p in "${AUTO_ORDER[@]}" $(all_providers); do
+    [[ "$seen" != *" $p "* ]] || continue
+    case "$(meta "$p" layer)" in host|platform) ;; *) continue ;; esac
+    [[ "$(meta "$p" status)" == "ready" && -d "$(stack_dir "$p")" ]] || continue
+    is_configured "$p" || continue
+    seen="$seen$p "
+    echo "$p"
+  done
+}
+
+# target_host <provider>: the host or platform a deployed stack made, <provider>-<instance>
+target_host() {
+  jq -r '(.outputs.hosts.value[0] // .outputs.platforms.value[0] // empty) | "\(.provider)-\(.name)"' "$(config_dir "$1")/terraform.tfstate" 2>/dev/null || true
+}
+
+# default_host: where an app or route without a host goes: the first target in order that
+# is deployed. Nothing when none is, or when the targets are wrong (up says so).
+default_host() {
+  local t h
+  for t in $(up_targets 2>/dev/null || true); do
+    is_deployed "$t" || continue
+    h="$(target_host "$t")"
+    if [[ -n "$h" ]]; then echo "$h"; return 0; fi
+  done
+}
+
+# up_keeps_data: whether an app of the project mounts a volume, which stays on the target it
+# was made on. A Compose file that lists volumes: is enough to say so.
+up_keeps_data() {
+  local app compose
+  while IFS=$'\t' read -r app compose; do
+    [[ -n "$compose" ]] || continue
+    [[ "$compose" == /* ]] || compose="$(state_root)/$compose"
+    if grep -Eq '^[[:space:]]*volumes:' "$compose" 2>/dev/null; then return 0; fi
+  done < <(tfvars_map "$(state_root)/apps.tfvars" apps compose)
+  return 1
+}
+
+# up_apply <provider>: apply a host or platform stack for up, in every availability domain
+# when the stack rotates them. Exits with NO_ROOM when none has room.
+up_apply() {
+  local t="$1" ads=1 i rc=0 extra=()
+  if grep -qs 'variable "availability_domain_offset"' "$(stack_dir "$t")"/*.tf; then
+    ads="${FREELUNCH_UP_ADS:-3}"
+    [[ "$ads" =~ ^[1-9][0-9]*$ ]] || die "FREELUNCH_UP_ADS is a number of availability domains, not '$ads'"
+  fi
+  for ((i = 0; i < ads; i++)); do
+    extra=()
+    if [[ $ads -gt 1 ]]; then
+      log "up: $t: availability domain $((i + 1)) of $ads"
+      extra=(-- -var="availability_domain_offset=$i")
+    fi
+    rc=0
+    ( cmd_lifecycle apply "$t" ${extra[@]+"${extra[@]}"} ) || rc=$?
+    [[ $rc -eq "$NO_ROOM" ]] || return "$rc"
+  done
+  return "$NO_ROOM"
+}
+
+# up_trust <host>: pin an OCI host's SSH keys from its console before the first deploy. The
+# console has them once the first boot is over, so a new host gets a few minutes. A host
+# whose keys can't be read in time is deployed to the way deploy always did, trusting the
+# key it sees first, and FREELUNCH_SSH_STRICT=1 refuses that.
+up_trust() {
+  local host="$1" address deadline out
+  # Nobody is watching a CI run, so a host whose keys can't be pinned isn't deployed to.
+  unpinned() {
+    [[ -z "${CI:-}" ]] || die "up: $host: $1. A CI run doesn't trust the first key it sees: run freelunch trust $host on your machine, then freelunch ci secrets to send known_hosts to CI, and run this again"
+    log "up: $host: $1, so deploy trusts the key it sees first (freelunch trust $host pins them later)"
+  }
+  address="$(host_addresses oci | awk -v h="$host" '$1 == h { print $2 }')"
+  [[ -n "$address" ]] || return 0
+  if ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1; then return 0; fi
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  deadline=$((SECONDS + ${FREELUNCH_TRUST_TIMEOUT:-600}))
+  while :; do
+    if ( cmd_trust "$host" ) > "$TMP/trust.out" 2>&1; then cat "$TMP/trust.out" >&2; return 0; fi
+    if grep -q "takes the OCI CLI" "$TMP/trust.out"; then
+      unpinned "the OCI CLI isn't installed to read its console"
+      return 0
+    fi
+    if ! grep -q "has no host keys" "$TMP/trust.out"; then cat "$TMP/trust.out" >&2; exit 1; fi
+    if [[ $SECONDS -ge $deadline ]]; then
+      unpinned "its console has no host keys yet"
+      return 0
+    fi
+    log "up: $host: waiting for its first boot to print the host keys"
+    sleep 20
+  done
+}
+
+cmd_up() {
+  need_tf
+  command -v jq >/dev/null || die "jq is required for 'up'"
+  local dry_run=0 move=0 a t list chosen="" tried=() skipped=() rc reason out host others=() tunnel verb=runs
+  for a in "$@"; do
+    case "$a" in
+      --dry-run) dry_run=1 ;;
+      --move)    move=1 ;;
+      *)         die "up: unknown argument $a (up takes --dry-run and --move)" ;;
+    esac
+  done
+  list="$(up_targets)" || exit 1
+  local targets=()
+  while IFS= read -r t; do [[ -z "$t" ]] || targets+=("$t"); done <<< "$list"
+  [[ ${#targets[@]} -gt 0 ]] || die "up: nothing to deploy to: no host or container platform has a terraform.tfvars in $(rel "$(state_root)"). freelunch init oci (or northflank, cloud-run, scaleway) writes an example to fill in"
+  log "up: targets, in order: ${targets[*]}"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  # Nobody is at the prompt of a push, and a target that is only made, never changed, has
+  # nothing a plan would show that the limits in the modules don't already stop.
+  FREELUNCH_AUTO_APPROVE=1
+
+  # An app with data stays where it is: its volume doesn't move, so a target above the one
+  # that runs it isn't tried unless --move says the data can be left behind.
+  local first="" ahead=()
+  for t in "${targets[@]}"; do
+    if is_deployed "$t"; then first="$t"; break; fi
+    ahead+=("$t")
+  done
+  if [[ -n "$first" && ${#ahead[@]} -gt 0 ]] && up_keeps_data; then
+    if [[ $move -eq 0 ]]; then
+      log "up: the app keeps data in a volume, which stays on $first, so ${ahead[*]} aren't tried (freelunch up --move leaves the data behind and tries them)"
+      targets=("$first")
+    else
+      log "up: --move: the data in the app's volumes stays on $first"
+    fi
+  fi
+
+  for t in "${targets[@]}"; do
+    if is_deployed "$t"; then
+      log "up: $t is deployed"
+      chosen="$t"
+      break
+    fi
+    if [[ $dry_run -eq 1 ]]; then log "up: would make $t"; continue; fi
+    log "up: making $t"
+    state_dirty "$t"
+    out="$TMP/up.$t.out"
+    # The status and the output of the attempt, which a subshell keeps from the shell itself.
+    { rc=0; ( up_apply "$t" ) || rc=$?; echo "$rc" > "$TMP/up.$t.rc"; } 2>&1 | keep "$out"
+    rc="$(cat "$TMP/up.$t.rc")"
+    if [[ "$rc" -eq 0 ]]; then chosen="$t"; break; fi
+    [[ "$rc" -eq "$NO_ROOM" ]] || exit "$rc"
+    reason="$(sed -n 's/^freelunch: //p' "$out" | tail -1)"
+    # The reasons already start with the stack's name.
+    tried+=("${reason:-$t: no room}")
+    skipped+=("$t")
+    log "up: $t has no room, on to the next target"
+  done
+  if [[ $dry_run -eq 1 ]]; then
+    if [[ -n "$chosen" ]]; then log "up: would deploy to $chosen"; else log "up: would deploy to the first of ${targets[*]} that has room"; fi
+    return 0
+  fi
+  if [[ -z "$chosen" ]]; then
+    printf '%s\n' "${tried[@]}" | sed 's/^/  /' >&2
+    die "up: no target has room right now (above). Nothing was deployed; the next run tries them again, and freelunch apply <stack> --wait-for-capacity waits for one"
+  fi
+  [[ ${#skipped[@]} -eq 0 ]] || log "up: no room at ${skipped[*]}; using $chosen"
+
+  for t in "${targets[@]}"; do
+    [[ "$t" == "$chosen" ]] || ! is_deployed "$t" || others+=("$t")
+  done
+  host="$(target_host "$chosen")"
+  [[ -n "$host" ]] || die "up: $chosen is deployed but its state lists no host or platform"
+  cmd_hybrid >/dev/null
+
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_configured cloudflare; then
+    tunnel=yes
+    if is_platform "$chosen"; then
+      tunnel="$(jq -r 'if .outputs.platforms.value[0].tunnel == false then "no" else "yes" end' "$(config_dir "$chosen")/terraform.tfstate")"
+    fi
+    if [[ "$tunnel" == yes ]]; then
+      cmd_lifecycle apply cloudflare
+    else
+      log "up: $host serves the app at its own address and can't hold a Cloudflare tunnel, so the routes stay as they are"
+    fi
+  fi
+  [[ "$chosen" != "oci" ]] || up_trust "$host"
+  cmd_deploy
+  if [[ ${#others[@]} -gt 0 ]]; then
+    [[ ${#others[@]} -eq 1 ]] || verb=run
+    log "up: ${others[*]} still $verb the app, unused now. freelunch destroy ${others[*]} removes them"
+  fi
 }
 
 # --- container platforms --------------------------------------------------------------
@@ -2867,14 +3397,15 @@ northflank_up() {
     die "northflank: can't look up the project $id ($code): $(nf_error)"
   else
     full="$(nf_no_room "$id")"
-    [[ -z "$full" ]] || die "northflank: Northflank won't make the project $id: $(nf_full_hint "$full")"
+    [[ -z "$full" ]] || no_room "northflank: Northflank won't make the project $id: $(nf_full_hint "$full")"
   fi
   jq -n --arg n "$id" --arg r "$region" --arg d "$NF_MARK" '{name: $n, region: $r, description: $d}' > "$TMP/project.json"
   code="$(nf PUT /projects "$TMP/project.json")"
   if [[ "$code" == 409 ]]; then
     error="$(nf_error)"
     full="$(nf_no_room "$id")"
-    die "northflank: can't make the project $id in $region (409): $error${full:+. $(nf_full_hint "$full")}"
+    [[ -z "$full" ]] || no_room "northflank: can't make the project $id in $region (409): $error. $(nf_full_hint "$full")"
+    die "northflank: can't make the project $id in $region (409): $error"
   fi
   nf_ok "$code" || die "northflank: can't make the project $id in $region ($code): $(nf_error)"
   [[ "$(jq -r '.data.id' "$TMP/nf.json")" == "$id" ]] || die "northflank: Northflank gave the project the ID $(jq -r '.data.id' "$TMP/nf.json"), not $id"
@@ -3401,6 +3932,9 @@ cloud_run_up() {
     403) die "cloud-run: the signed-in account can't use Cloud Run in $project ($code): $(cr_error)" ;;
     404) die "cloud-run: $(cr_error): is $project a project, and $region a Cloud Run region?" ;;
   esac
+  if [[ "$code" == 429 ]] || grep -Eq "$QUOTA_ERRORS" "$TMP/cr.json" 2>/dev/null; then
+    no_room "cloud-run: no quota left in $project ($code): $(cr_error)"
+  fi
   cr_ok "$code" || die "cloud-run: can't reach Cloud Run in $project ($code): $(cr_error)"
   log "cloud-run: project $project in $region"
 }
@@ -3732,6 +4266,9 @@ scaleway_up() {
   if [[ -z "$id" ]]; then
     jq -n --arg n "$name" --arg p "$project" --arg d "$SW_MARK" '{name: $n, project_id: $p, description: $d}' > "$TMP/namespace.json"
     code="$(sw POST "$region" /namespaces "$TMP/namespace.json")"
+    if ! sw_ok "$code" && { [[ "$code" == 429 ]] || grep -Eq "$QUOTA_ERRORS" "$TMP/sw.json" 2>/dev/null; }; then
+      no_room "scaleway: no quota left for the namespace $name in $region ($code): $(sw_error)"
+    fi
     sw_ok "$code" || die "scaleway: can't make the namespace $name in $region ($code): $(sw_error)"
   fi
   log "scaleway: namespace $name in $region"
@@ -5003,7 +5540,7 @@ EOF
 
 # github_workflows <project root>: the wait workflow and the one for every other command
 github_workflows() {
-  local base="$1" cron="11,41 * * * *" every="half hour" visibility image=""
+  local base="$1" cron="11,41 * * * *" every="half hour" visibility trigger=""
   local minutes=$'A run takes a minute or two. A public repository runs them for free; a private one on\n# GitHub Free has 2,000 minutes a month, about 20 days of runs every half hour.'
   visibility="$(cd "$base" && gh repo view --json visibility -q .visibility 2>/dev/null)" || visibility=""
   if [[ "$visibility" == "PUBLIC" ]]; then
@@ -5043,20 +5580,24 @@ jobs:
 EOF
     ci_uses "ci resume"
   } | write_new "$base/.github/workflows/$CI_WAIT_WORKFLOW"
-  [[ ! -f "$base/.github/workflows/image.yml" ]] || image=$'\n  # A new image of main, from the image workflow (freelunch init --image-workflow)\n  workflow_run:\n    workflows: [image]\n    types: [completed]\n    branches: [main]'
+  # A push to main (a merged pull request too) deploys, once the image it runs exists: with
+  # the image workflow (freelunch init --image-workflow) that is when it has built it.
+  trigger=$'\n  push:\n    branches: [main]'
+  [[ ! -f "$base/.github/workflows/image.yml" ]] || trigger=$'\n  # A new image of main, from the image workflow (freelunch init --image-workflow)\n  workflow_run:\n    workflows: [image]\n    types: [completed]\n    branches: [main]'
   {
     cat <<EOF
 # Written by freelunch ci init. Runs freelunch with this project's state and secrets:
-# freelunch deploy after a new image, and any other command from the Actions tab (Run
-# workflow) or with gh workflow run freelunch.yml -f run="status".
+# freelunch up on every push to main: it deploys to the first target that has room, and
+# goes on to the next when one is out of capacity. Any other command runs from the Actions
+# tab (Run workflow) or with gh workflow run freelunch.yml -f run="status".
 name: freelunch
 
-on:
+on:$trigger
   workflow_dispatch:
     inputs:
       run:
         description: The freelunch command to run
-        default: deploy$image
+        default: up
 
 permissions:
   contents: read
@@ -5072,7 +5613,7 @@ jobs:
     timeout-minutes: 30
     steps:
 EOF
-    ci_uses "\${{ inputs.run || 'deploy' }}"
+    ci_uses "\${{ inputs.run || 'up' }}"
   } | write_new "$base/.github/workflows/$CI_WORKFLOW"
   if [[ "$(action_ref)" == *@main ]]; then
     log "the workflows use freelunch-sh/freelunch@main; pin the project to a release with freelunch upgrade, then run ci init again"
@@ -5093,7 +5634,7 @@ gitlab_pipeline() {
   [[ ! -f "$file" ]] || { mkdir -p "$base/.gitlab"; file="$base/.gitlab/freelunch.yml"; }
   cat <<EOF | write_new "$file"
 # Written by freelunch ci init gitlab. Runs freelunch in its runner image, with this project's
-# state and secrets: what FREELUNCH_RUN says (deploy, by default) when you run the pipeline
+# state and secrets: what FREELUNCH_RUN says (up, by default) when you run the pipeline
 # (Build > Pipelines > Run pipeline), and ci resume, which goes on with a wait for capacity
 # you approved (freelunch ci wait), from a pipeline schedule.
 #
@@ -5108,7 +5649,7 @@ freelunch:
     entrypoint: [""]
   resource_group: freelunch
   variables:
-    FREELUNCH_RUN: deploy$state_vars
+    FREELUNCH_RUN: up$state_vars
   rules:
     - if: \$CI_PIPELINE_SOURCE == "web" || \$CI_PIPELINE_SOURCE == "schedule" || \$CI_PIPELINE_SOURCE == "api"
   script:
@@ -5641,7 +6182,7 @@ cmd_fmt() { need_tf; "$TF" fmt -recursive "$@" "$ROOT/shared" "$ROOT/providers" 
 main() {
   local cmd="${1:-help}"; shift || true
   find_project
-  if [[ -n "${FREELUNCH_PROJECT:-}" && -z "$PROJECT" && "$cmd" != "init" ]]; then
+  if [[ -n "${FREELUNCH_PROJECT:-}" && -z "$PROJECT" && "$cmd" != "init" && "$cmd" != "setup" ]]; then
     die "FREELUNCH_PROJECT=$FREELUNCH_PROJECT has no .freelunch folder (run freelunch init there)"
   fi
   case "$cmd" in
@@ -5652,19 +6193,21 @@ main() {
   # Secrets from a store are read by the commands that use credentials (domain: add and
   # status; doctor reports on them; ci secrets and ci wait put them in the bundle).
   case "$cmd" in
-    plan|apply|destroy|deploy|status) resolve_env_refs ;;
+    plan|apply|destroy|deploy|status|up) resolve_env_refs ;;
   esac
   # Commands that read or change state start from the state store's copy when it is newer.
   case "$cmd" in
-    plan|apply|destroy|deploy|status|output|hybrid|inventory|trust) resolve_state_refs; sync_start "$cmd" "$@" ;;
+    plan|apply|destroy|deploy|up|status|output|hybrid|inventory|trust) resolve_state_refs; sync_start "$cmd" "$@" ;;
   esac
   case "$cmd" in
     init)                 cmd_init "$@" ;;
+    setup)                cmd_setup "$@" ;;
     version)              cmd_version "$@" ;;
     upgrade)              cmd_upgrade "$@" ;;
     state)                resolve_state_refs; cmd_state "$@" ;;
     ci)                   cmd_ci "$@" ;;
     deploy)               cmd_deploy "$@" ;;
+    up)                   cmd_up "$@" ;;
     domain)               cmd_domain "$@" ;;
     list)                 cmd_list ;;
     plan|apply|destroy)   cmd_lifecycle "$cmd" "$@" ;;

@@ -119,9 +119,11 @@ This writes two workflows:
   attempt with the plan you approved, and the workflow turns itself off once the host
   exists, or when there is nothing to wait for. It runs about every half hour in a private
   repository and every quarter of an hour in a public one, as GitHub finds room.
-- `.github/workflows/freelunch.yml` runs `freelunch deploy` after the image workflow
-  (`freelunch init --image-workflow`) pushes a new image of `main`, and any other command you
-  start from the Actions tab or with `gh workflow run freelunch.yml -f run="status"`.
+- `.github/workflows/freelunch.yml` runs [`freelunch up`](deploy-a-container.md#deploy-wherever-there-is-room-freelunch-up)
+  on every push to `main`, a merged pull request included, or, when the project has the image
+  workflow (`freelunch init --image-workflow`), after it has built the new image. `up` deploys
+  to the first target that has room, so a push is all it takes. Any other command starts from
+  the Actions tab or with `gh workflow run freelunch.yml -f run="status"`.
 
 Both use the action in this repository (`uses: freelunch-sh/freelunch@<version>`, also
 listed on the GitHub Marketplace as *Run freelunch*), which sets up the same tofu or
@@ -220,7 +222,7 @@ freelunch ci secrets --print    # the value for the CI/CD variable FREELUNCH_BUN
 The pipeline runs freelunch in its runner image (`ghcr.io/freelunch-sh/freelunch`), which has
 OpenTofu, so the project should use OpenTofu too. Add `FREELUNCH_BUNDLE` under *Settings >
 CI/CD > Variables*, masked. A variable holds 10,000 characters, enough for a typical
-project's bundle; `ci secrets --print` says how big yours is. Running the pipeline deploys (`FREELUNCH_RUN` sets the command). To wait for
+project's bundle; `ci secrets --print` says how big yours is. Running the pipeline runs `freelunch up` (`FREELUNCH_RUN` sets the command). To wait for
 capacity, add a pipeline schedule (*Build > Pipeline schedules*) every 30 minutes with the
 variable `FREELUNCH_RUN` set to `ci resume`, after `freelunch ci wait`; GitLab can't turn the
 schedule off from the job, so turn it off once the wait is over. With GitLab's own state,
