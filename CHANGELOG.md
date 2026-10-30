@@ -12,6 +12,25 @@ release can change commands and the project layout.
 
 ### Added
 
+- **`freelunch setup`: the one-time wizard.** Asks where the app may run (most preferred
+  first) and for a domain, reads the OCI tenancy and home region, the SSH key, the gcloud
+  project and the Azure subscription from their own config, asks only for the rest, writes
+  `.freelunch/` with `targets` in `apps.tfvars`, creates `.env` with the tokens typed in,
+  lists what is still to fill in and runs `doctor`. `--ci` also makes the state store,
+  writes the workflow and sets the secret. Flags answer when there is no terminal.
+- **`freelunch up`: deploy wherever there is room.** One command, safe to run on every push:
+  it goes through the project's `targets` (`apps.tfvars`; every configured host and platform
+  stack, Oracle first, when left out), uses the first that runs the project or has room to
+  make it, and skips one that is out of capacity (OCI, after each availability domain) or
+  has no room for another project (Northflank's free team). Any other failure stops it. It
+  then points the Cloudflare tunnel at that target (not for one that can't hold a tunnel,
+  such as Cloud Run), pins an OCI host's keys from its console, and deploys. Apps and routes
+  without a `host` go to the target `up` chose (`default_host` in the deploy module and the
+  cloudflare stack); `init` now writes them that way, and `ci init`'s workflow runs `up` on
+  every push to `main`. A stack with no room exits with status 75. Every host cloud's out-of-capacity wording counts
+  (OCI, AWS, GCP, Azure), and so do quotas, Cloud Run's and Scaleway's included. An app that
+  mounts a volume stays on the target that runs it unless `up --move` leaves the data behind,
+  and a CI run refuses to trust a host key it couldn't pin.
 - **Install once, pin per project.** `install.sh` (`curl -fsSL
   https://raw.githubusercontent.com/freelunch-sh/freelunch/main/install.sh | bash`) installs
   the latest release as the `freelunch` command, and `init` pins the project to it in

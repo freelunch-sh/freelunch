@@ -67,14 +67,22 @@ says when it's ready ([docs/free-domains.md](docs/free-domains.md)).
 curl -fsSL https://raw.githubusercontent.com/freelunch-sh/freelunch/main/install.sh | bash
 
 cd your-project
-freelunch init                 # creates .freelunch/: tfvars examples, apps.tfvars, the version
-# fill in .freelunch/oci/terraform.tfvars, .freelunch/cloudflare/terraform.tfvars, .freelunch/.env
-freelunch apply oci            # the VM, with Docker
-freelunch apply cloudflare     # tunnel + DNS record
-freelunch deploy               # copy compose files and secrets, start, wait until healthy
+freelunch setup                # asks where the app may run and for what it can't find itself
+freelunch up                   # the VM, tunnel and DNS, then the app, wherever there is room
 ```
 
-If OCI is out of Arm capacity, `freelunch apply oci --wait-for-capacity` keeps trying, in
+`setup` is the one-time wizard: it reads your OCI, gcloud and Azure config and SSH key, writes
+`.freelunch/`, and runs `doctor` ([details](docs/deploy-a-container.md#the-short-way-freelunch-setup)).
+`freelunch init` and filling in the tfvars by hand does the same step by step.
+
+`up` is the one command to run after the setup, on your machine or from CI on every push. It
+goes through your targets in order (`targets` in `.freelunch/apps.tfvars`, or every stack you
+set up, Oracle first), skips one that is out of capacity, and deploys to the first with room.
+Step by step, `apply oci`, `apply cloudflare` and `deploy` do the same on one target.
+
+If OCI is out of Arm capacity, `freelunch up` moves on to the next target by itself (every
+availability domain is tried first), and takes Oracle again on a later run when it has room.
+To wait for Oracle instead, `freelunch apply oci --wait-for-capacity` keeps trying, in
 every availability domain, until the VM exists; with a reviewed plan it can wait in the
 background and notify you. That can take days, longer than a laptop stays awake, so
 `freelunch ci wait` hands the wait to GitHub Actions instead, which also deploys each new

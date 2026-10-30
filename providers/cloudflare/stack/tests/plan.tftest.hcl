@@ -189,3 +189,27 @@ run "r2_names_cloudflare_refuses_fail" {
 
   expect_failures = [terraform_data.r2_checks]
 }
+
+run "a_route_without_a_host_goes_to_the_default_host" {
+  command = plan
+
+  variables {
+    default_host = "oci-main"
+    routes       = { "api.example.com" = { port = 8080 } }
+  }
+
+  assert {
+    condition     = module.tunnel.routes["api.example.com"].host == "oci-main"
+    error_message = "A route that names no host uses default_host."
+  }
+}
+
+run "a_route_without_a_host_and_no_default_fails" {
+  command = plan
+
+  variables {
+    routes = { "api.example.com" = { port = 8080 } }
+  }
+
+  expect_failures = [terraform_data.checks]
+}
