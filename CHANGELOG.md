@@ -12,6 +12,11 @@ release can change commands and the project layout.
 
 ### Added
 
+- **Config in git, secrets in GitHub.** The tfvars and `known_hosts` are committed (`init`
+  no longer ignores them; `doctor` fails on a committed file that holds a secret). Workflows
+  pass each secret to the freelunch step as its own variable, and `ci restore` writes the OCI
+  profile and key and the SSH key back from the secrets that hold them. `FREELUNCH_BUNDLE` is
+  optional (`ci init --bundle`).
 - **No domain needed.** Without a `cloudflare` stack, a Northflank app's ports are public at
   the address Northflank gives them, and `up` and `deploy` print the address of a Northflank,
   Cloud Run or Scaleway app. For a VM, `up` says it needs a domain.

@@ -11,9 +11,15 @@ A project runs the same anywhere once three things can travel:
 - **Its state**, which lives in `.freelunch/<stack>/terraform.tfstate` and stays out of git.
   A [state store](#1-keep-the-state-in-a-store) keeps a copy that CI and your other
   machines reach, encrypted.
-- **The files git doesn't have**: tfvars, `.env`, app env files, `known_hosts`, the OCI API
-  key and the SSH key `deploy` signs in with. [`freelunch ci secrets`](#3-the-secret) puts
-  them into one CI secret, `FREELUNCH_BUNDLE`, and `freelunch ci restore` unpacks it in the job.
+- **Config, which git has**: the tfvars (no secrets in them: `freelunch doctor` refuses a file
+  that has one) and `known_hosts` (public keys) are committed, so a checkout is the config.
+- **Secrets, which GitHub has**, one each under the name the provider's own tools use
+  (`NORTHFLANK_API_TOKEN`, `CLOUDFLARE_API_TOKEN`, `FREELUNCH_STATE_PASSPHRASE`, ...). The
+  workflow hands each to the one step that runs freelunch; the files a secret can't be (the OCI
+  profile and API key, the SSH key `deploy` signs in with) are secrets holding their text
+  (`FREELUNCH_OCI_CONFIG`, `FREELUNCH_OCI_KEY`, `FREELUNCH_SSH_PRIVATE_KEY`), which
+  `freelunch ci restore` writes back. `freelunch ci init --bundle` keeps the older way instead:
+  [`freelunch ci secrets`](#3-the-secret) puts everything into one secret, `FREELUNCH_BUNDLE`.
 - **Your approval**, for the one thing CI does without asking: a wait for capacity. You
   review the plan here and [hand the wait over](#4-wait-for-capacity-in-github-actions);
   CI then applies only what that plan does.

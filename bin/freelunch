@@ -2066,15 +2066,15 @@ with_name() {
 # project_gitignore: the .gitignore of a project folder
 project_gitignore() {
   cat <<'EOF'
-# Written by freelunch init: local config, state and secrets stay out of git.
-*/terraform.tfvars
+# Written by freelunch init: state, secrets and local files stay out of git. The tfvars
+# and known_hosts are committed so CI runs the same config; they hold no secrets (freelunch
+# doctor checks), which go in .freelunch/.env here and in GitHub secrets there.
 */terraform.tfstate
 */terraform.tfstate.*
 */.terraform/
 .env
 *.env
 inventory.json
-known_hosts
 */wait.log
 */wait.state
 */approved.json
@@ -5216,8 +5216,13 @@ doctor_state() {
 
 # doctor_config: stacks in the project that have their example but no tfvars yet
 doctor_config() {
-  local d header=0
+  local d header=0 hit
   [[ -n "$PROJECT" ]] || return 0
+  while IFS= read -r hit; do
+    [[ -n "$hit" ]] || continue
+    [[ $header -eq 1 ]] || { echo "Config"; header=1; }
+    check fail "$hit looks like a secret in a file that goes to git: keep it in $(rel "$PROJECT")/.env, and in a GitHub secret for CI"
+  done < <(config_secrets)
   for d in "$PROJECT"/*/; do
     [[ -f "$d/terraform.tfvars.example" && ! -f "$d/terraform.tfvars" ]] || continue
     [[ $header -eq 1 ]] || { echo "Config"; header=1; }
@@ -5618,11 +5623,100 @@ state_init_store() {
 #   freelunch ci restore unpacks it in the job;
 # - a wait for capacity runs there on a schedule: freelunch ci wait approves what a plan
 #   reviewed here changes, and each run makes one attempt with it (ci resume).
+CI_BUNDLE_MODE=0 # 1 when ci init --bundle asked for the single FREELUNCH_BUNDLE secret
 CI_WAIT_WORKFLOW="freelunch-wait.yml"
 CI_WORKFLOW="freelunch.yml"
 BUNDLE_LIMIT=49152 # bytes; a GitHub secret holds 48 KB
 BUNDLED=()
 SSH_KEY_BUNDLED=""
+
+# --- secrets one by one, config in git ---------------------------------------------------
+
+# A workflow gets each secret as a GitHub secret of its own, by the name a provider's own tools
+# use (NORTHFLANK_API_TOKEN, CLOUDFLARE_API_TOKEN, ...), passed to the one step that needs it.
+# The files a secret can't be (the OCI key, the SSH key for deploy) come as secrets holding
+# their text, which ci restore writes back. Everything else is committed: the tfvars, which
+# hold no secrets, and known_hosts, which holds public keys. freelunch ci init --bundle keeps
+# the single FREELUNCH_BUNDLE secret instead, for people who prefer one.
+
+# ci_secret_names: the secrets this project's workflows need, one per line: NAME, then what it is
+ci_secret_names() {
+  local s var seen=" "
+  emit() { [[ "$seen" != *" $1 "* ]] || return 0; seen="$seen$1 "; printf '%s\t%s\n' "$1" "$2"; }
+  if [[ -n "$(state_config)" && "${FREELUNCH_STATE_PASSPHRASE:-}" != "none" ]]; then
+    emit FREELUNCH_STATE_PASSPHRASE "the passphrase that encrypts the state (the line in .freelunch/.env)"
+  fi
+  for s in $(project_stacks); do
+    case "$s" in
+      cloudflare)   emit CLOUDFLARE_API_TOKEN "Cloudflare API token" ;;
+      northflank)   emit NORTHFLANK_API_TOKEN "Northflank API token" ;;
+      scaleway)     emit SCW_SECRET_KEY "Scaleway secret key" ;;
+      cloud-run)    emit CLOUD_RUN_ACCESS_TOKEN "Google access token for Cloud Run" ;;
+      backblaze-b2) emit B2_APPLICATION_KEY_ID "Backblaze key ID"; emit B2_APPLICATION_KEY "Backblaze application key" ;;
+      oci)          emit FREELUNCH_OCI_CONFIG "the profile block of ~/.oci/config (the console shows it when you add an API key)"
+                    emit FREELUNCH_OCI_KEY "the OCI API private key (the .pem file the console gave you)" ;;
+      aws)          emit AWS_ACCESS_KEY_ID "AWS access key ID"; emit AWS_SECRET_ACCESS_KEY "AWS secret access key" ;;
+    esac
+    [[ "$(meta "$s" layer)" != "host" ]] || emit FREELUNCH_SSH_PRIVATE_KEY "the private SSH key deploy signs in to the hosts with (without a passphrase)"
+  done
+  for var in $(tfvars_map "$PROJECT/apps.tfvars" registries password_env | cut -f2); do
+    emit "$var" "the read-only token for a private registry (apps.tfvars)"
+  done
+}
+
+# ci_env_block <indent>: the env: lines that hand those secrets to a step
+ci_env_block() {
+  local name what
+  while IFS=$'\t' read -r name what; do
+    [[ -n "$name" ]] || continue
+    printf '%senv:\n' "$1"
+    break
+  done < <(ci_secret_names)
+  while IFS=$'\t' read -r name what; do
+    [[ -n "$name" ]] || continue
+    # shellcheck disable=SC2016 # a GitHub expression, not ours
+    printf '%s  %s: ${{ secrets.%s }}\n' "$1" "$name" "$name"
+  done < <(ci_secret_names)
+}
+
+# ci_restore_env: write the files that secrets carry as text: the OCI profile and key, and the
+# SSH key. Nothing to do when none is set.
+ci_restore_env() {
+  local profile n=0
+  if [[ -n "${FREELUNCH_OCI_CONFIG:-}" ]]; then
+    [[ -n "${FREELUNCH_OCI_KEY:-}" ]] || die "ci restore: FREELUNCH_OCI_CONFIG is set but FREELUNCH_OCI_KEY isn't: the OCI API private key goes in the secret FREELUNCH_OCI_KEY"
+    profile="$(printf '%s\n' "$FREELUNCH_OCI_CONFIG" | sed -n 's/^\[\(.*\)\][[:space:]]*$/\1/p' | head -1)"
+    [[ -n "$profile" ]] || die "ci restore: FREELUNCH_OCI_CONFIG has no [profile] line. Paste the whole block the console shows when you add an API key"
+    (umask 077 && mkdir -p "$HOME/.oci" \
+      && printf '%s\n' "$FREELUNCH_OCI_CONFIG" | grep -vE '^(key_file|security_token_file)[[:space:]]*=' > "$HOME/.oci/config" \
+      && echo "key_file=~/.oci/freelunch_api_key.pem" >> "$HOME/.oci/config" \
+      && printf '%s\n' "$FREELUNCH_OCI_KEY" > "$HOME/.oci/freelunch_api_key.pem") || die "ci restore: can't write ~/.oci"
+    chmod 600 "$HOME/.oci/config" "$HOME/.oci/freelunch_api_key.pem"
+    n=$((n + 2))
+  fi
+  if [[ -n "${FREELUNCH_SSH_PRIVATE_KEY:-}" ]]; then
+    (umask 077 && mkdir -p "$HOME/.ssh" && printf '%s\n' "$FREELUNCH_SSH_PRIVATE_KEY" > "$HOME/.ssh/freelunch_deploy") || die "ci restore: can't write ~/.ssh"
+    chmod 600 "$HOME/.ssh/freelunch_deploy"
+    n=$((n + 1))
+  fi
+  [[ $n -eq 0 ]] || log "restored $n files from the secrets that hold them"
+  return 0
+}
+
+# config_secrets: files meant for git that look like they hold a secret, as file:line, one per
+# line. A secret goes in a GitHub secret or .freelunch/.env; the files committed hold none.
+config_secrets() {
+  local f
+  for f in "$PROJECT"/apps.tfvars "$PROJECT"/*/terraform.tfvars "$PROJECT"/known_hosts; do
+    [[ -f "$f" ]] || continue
+    awk -v file="$(rel "$f")" '
+      { line = $0; sub(/[ \t]*#.*/, "", line) }
+      line ~ /-----BEGIN [A-Z ]*PRIVATE KEY-----/ { print file ":" NR; next }
+      line ~ /(ghp_|gho_|ghs_|github_pat_|glpat-|xox[bap]-|AKIA|sk_live_)[A-Za-z0-9_]{8,}/ { print file ":" NR; next }
+      line ~ /^[ \t]*[A-Za-z0-9_]*(token|secret|password|passwd|api_key|private_key|credentials?)[A-Za-z0-9_]*[ \t]*=[ \t]*"[^"]{4,}"/ && line !~ /_env[ \t]*=/ && line !~ /(= *"")|(= *"\$)/ { print file ":" NR }
+    ' "$f"
+  done
+}
 
 # ci_ready: a project whose state is in a store, so that CI and this machine share it
 ci_ready() {
@@ -5650,13 +5744,16 @@ ci_uses() {
       - uses: $(action_ref)
         with:
           run: $1
-          bundle: \${{ secrets.FREELUNCH_BUNDLE }}
+EOF
+  # shellcheck disable=SC2016 # a GitHub expression, not ours
+  if [[ "$CI_BUNDLE_MODE" == 1 ]]; then echo '          bundle: ${{ secrets.FREELUNCH_BUNDLE }}'; fi
+  cat <<EOF
           tool: $(tool_name)
           version: "$(tool_version)"
 EOF
+  # Each secret goes to this one step, as an environment variable of its own name.
+  if [[ "$CI_BUNDLE_MODE" != 1 ]]; then ci_env_block "        "; fi
 }
-
-# github_workflows <project root>: the wait workflow and the one for every other command
 github_workflows() {
   local base="$1" cron="11,41 * * * *" every="half hour" visibility trigger="" contents=read
   local minutes=$'A run takes a minute or two. A public repository runs them for free; a private one on\n# GitHub Free has 2,000 minutes a month, about 20 days of runs every half hour.'
@@ -5780,20 +5877,30 @@ EOF
 }
 
 ci_init() {
-  local where="${1:-github}" base
+  local where="github" base a given=0
+  for a in "$@"; do
+    case "$a" in
+      --bundle) CI_BUNDLE_MODE=1 ;;
+      -*)       die "ci init: unknown option $a" ;;
+      *)        [[ $given -eq 0 ]] || die "ci init: github or gitlab, not both"; where="$a"; given=1 ;;
+    esac
+  done
   [[ -n "$PROJECT" ]] || die "ci init: run it in a project, where its .freelunch/ folder is (freelunch init makes one)"
-  [[ $# -le 1 ]] || die "ci init: github or gitlab, not both"
   need_tf
   base="$(dirname "$PROJECT")"
   case "$where" in
     github) github_workflows "$base" ;;
-    gitlab) gitlab_pipeline "$base" ;;
+    gitlab) CI_BUNDLE_MODE=1; gitlab_pipeline "$base" ;;
     *)      die "ci init: github or gitlab (other CI systems: docs/ci.md#other-ci-systems)" ;;
   esac
   printf '\nNext steps:\n' >&2
   local i=1
   if [[ -z "$(state_config)" ]]; then echo "  $i. freelunch state init git (or oci, r2, b2, gitlab): the state where CI reaches it" >&2; i=$((i + 1)); fi
-  if [[ "$where" == "github" ]]; then
+  if [[ "$where" == "github" && $CI_BUNDLE_MODE -eq 0 ]]; then
+    echo "  $i. add these as secrets of the repository (Settings > Secrets and variables > Actions):" >&2
+    while IFS=$'\t' read -r a g; do [[ -z "$a" ]] || echo "       $a: $g" >&2; done < <(ci_secret_names)
+    echo "  $((i + 1)). commit and push .freelunch/ and the workflows" >&2
+  elif [[ "$where" == "github" ]]; then
     echo "  $i. freelunch ci secrets: what CI needs and git doesn't have, in the secret FREELUNCH_BUNDLE" >&2
     echo "  $((i + 1)). commit and push the workflows, then freelunch ci wait <stack> --plan <file> to wait for capacity there" >&2
   else
@@ -5995,7 +6102,8 @@ ci_restore() {
     *)       die "ci restore: unknown option $1" ;;
   esac
   [[ "${CI:-}" != "true" ]] || force=1
-  [[ -n "${FREELUNCH_BUNDLE:-}" ]] || die "ci restore: FREELUNCH_BUNDLE is not set. freelunch ci secrets puts it in the repository's secrets, and the workflow passes it on"
+  # Without a bundle the secrets come one by one, and some of them hold files.
+  if [[ -z "${FREELUNCH_BUNDLE:-}" ]]; then ci_restore_env; return 0; fi
   base="$PWD"
   [[ -z "$PROJECT" ]] || base="$(dirname "$PROJECT")"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"

@@ -14,7 +14,7 @@ inputs:
     description: The freelunch command to run, e.g. deploy, status or ci resume
     required: true
   bundle:
-    description: The FREELUNCH_BUNDLE secret (freelunch ci secrets makes it)
+    description: The FREELUNCH_BUNDLE secret (freelunch ci secrets makes it), for projects that keep everything in one secret instead of one secret per credential
     required: false
     default: ""
   tool:
@@ -49,6 +49,8 @@ runs:
         GH_REPO: ${{ github.repository }}
       run: |
         freelunch="$GITHUB_ACTION_PATH/bin/freelunch"
-        if [ -n "$FREELUNCH_BUNDLE" ]; then "$freelunch" ci restore; fi
+        # The bundle, or the secrets that hold files (the OCI key, the SSH key for deploy)
+        "$freelunch" ci restore
+        if [ -z "$FREELUNCH_SSH_KEY" ] && [ -f "$HOME/.ssh/freelunch_deploy" ]; then export FREELUNCH_SSH_KEY="$HOME/.ssh/freelunch_deploy"; fi
         read -ra args <<< "$FREELUNCH_RUN"
         "$freelunch" "${args[@]}"

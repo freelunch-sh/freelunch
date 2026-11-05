@@ -1040,7 +1040,8 @@ test_init_writes_the_project_folder() {
   for f in .gitignore apps.tfvars .env.example oci/terraform.tfvars.example cloudflare/terraform.tfvars.example; do
     exists "$p/.freelunch/$f"
   done
-  grep -qx '\*/terraform.tfvars' "$p/.freelunch/.gitignore"
+  fails grep -qx '\*/terraform.tfvars' "$p/.freelunch/.gitignore"
+  fails grep -qx 'known_hosts' "$p/.freelunch/.gitignore"
   grep -qx '\*/terraform.tfstate' "$p/.freelunch/.gitignore"
   grep -qx '\*.env' "$p/.freelunch/.gitignore"
   grep -q '^  shop-api = {' "$p/.freelunch/apps.tfvars"
@@ -2723,7 +2724,7 @@ test_init_again_updates_an_older_project() {
   printf 'apps = {\n  sidecar = {\n    host    = "oci-main"\n    compose = "../poc/sidecar/compose.yaml"\n  }\n  web = { host = "oci-main", compose = "../web/compose.yaml" }\n}\n' > "$p/.freelunch/apps.tfvars"
   touch "$p/poc/sidecar/compose.yaml"
   out="$(cd "$p" && "$CLI" init oci 2>&1)"
-  contains "$out" "added to .freelunch/.gitignore: */terraform.tfstate.* */.terraform/ *.env inventory.json known_hosts */wait.log */wait.state */approved.json *.tfplan"
+  contains "$out" "added to .freelunch/.gitignore: */terraform.tfstate.* */.terraform/ *.env inventory.json */wait.log */wait.state */approved.json *.tfplan"
   contains "$out" "kept .freelunch/apps.tfvars"
   equals "$(head -1 "$p/.freelunch/.gitignore")" "# mine"
   git -C "$p" init -q
@@ -3100,7 +3101,67 @@ test_ci_secrets_bundle_what_git_leaves_out() {
   # CI needs the state in a store.
   rm "$p/.freelunch/state.local.tfbackend"
   if out="$(ci_in "$p" ci secrets --print 2>&1)"; then echo "ci secrets should have failed"; return 1; fi
-  contains "$out" "freelunch state init oci"
+  contains "$out" "freelunch state init git (or oci, r2, b2, gitlab)"
+}
+
+# With no bundle, each workflow step gets the secrets as variables of their own names, and
+# nothing is written into the workflow but the expressions that read them.
+test_ci_init_hands_each_secret_to_the_step() {
+  local p="$WORK/ci-env" w
+  doctor_project "$p"
+  state_store "$p"
+  ci_in "$p" ci init >/dev/null 2>&1
+  w="$p/.github/workflows/freelunch.yml"
+  grep -q '          FREELUNCH_OCI_KEY: ${{ secrets.FREELUNCH_OCI_KEY }}' "$w"
+  grep -q '          FREELUNCH_OCI_CONFIG: ${{ secrets.FREELUNCH_OCI_CONFIG }}' "$w"
+  grep -q '          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}' "$w"
+  grep -q 'FREELUNCH_SSH_PRIVATE_KEY: ${{ secrets.FREELUNCH_SSH_PRIVATE_KEY }}' "$w"
+  fails grep -q 'FREELUNCH_BUNDLE' "$w"
+  # The secrets reach the freelunch step and no other.
+  equals "$(grep -c 'secrets\.' "$w")" "$(grep -c 'secrets\.' <(sed -n '/uses: freelunch-sh/,$p' "$w"))"
+  rm -r "$p/.github"
+  ci_in "$p" ci init --bundle >/dev/null 2>&1
+  grep -q 'bundle: ${{ secrets.FREELUNCH_BUNDLE }}' "$w"
+  fails grep -q 'CLOUDFLARE_API_TOKEN' "$w"
+}
+
+# ci restore writes the files the secrets carry, and the key that goes with the profile.
+test_ci_restore_writes_files_from_secrets() {
+  local q="$WORK/restore-env" out
+  mkdir -p "$q/home" "$q/.freelunch"
+  out="$(cd "$q" && HOME="$q/home" FREELUNCH_OCI_CONFIG=$'[DEFAULT]\nuser=ocid1.user.oc1..me\nkey_file=/somewhere/else.pem' \
+    FREELUNCH_OCI_KEY='-----BEGIN PRIVATE KEY-----' FREELUNCH_SSH_PRIVATE_KEY='ssh-key-text' "$CLI" ci restore 2>&1)"
+  contains "$out" "restored 3 files from the secrets that hold them"
+  grep -qx 'key_file=~/.oci/freelunch_api_key.pem' "$q/home/.oci/config"
+  fails grep -q '/somewhere/else.pem' "$q/home/.oci/config"
+  grep -qx 'user=ocid1.user.oc1..me' "$q/home/.oci/config"
+  equals "$(cat "$q/home/.oci/freelunch_api_key.pem")" "-----BEGIN PRIVATE KEY-----"
+  equals "$(mode "$q/home/.oci/freelunch_api_key.pem")" "-rw-------"
+  equals "$(mode "$q/home/.ssh/freelunch_deploy")" "-rw-------"
+  # The profile without its key, or without a [profile] line, is said plainly.
+  if out="$(cd "$q" && HOME="$q/home" FREELUNCH_OCI_CONFIG='[x]' "$CLI" ci restore 2>&1)"; then echo "should have failed"; return 1; fi
+  contains "$out" "FREELUNCH_OCI_KEY"
+  if out="$(cd "$q" && HOME="$q/home" FREELUNCH_OCI_CONFIG='user=me' FREELUNCH_OCI_KEY=k "$CLI" ci restore 2>&1)"; then echo "should have failed"; return 1; fi
+  contains "$out" "has no [profile] line"
+  # Nothing set, nothing written, nothing said.
+  out="$(cd "$q" && HOME="$WORK/restore-empty" "$CLI" ci restore 2>&1)"
+  lacks "$out" "restored"
+}
+
+# Files meant for git are checked for secrets, by doctor.
+test_doctor_refuses_secrets_in_committed_files() {
+  local p="$WORK/doctor-secret" out
+  doctor_project "$p"
+  printf 'registries = { r = { username = "me", password_env = "GHCR_TOKEN" } }\n' > "$p/.freelunch/apps.tfvars"
+  equals "$(cd "$p" && "$CLI" doctor config 2>&1 | grep -c 'looks like a secret' || true)" "0"
+  printf 'northflank_token = "nf_abcdef123456"\n' >> "$p/.freelunch/cloudflare/terraform.tfvars"
+  printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\n' >> "$p/.freelunch/known_hosts"
+  printf 'x = "ghp_abcdefghijklmnop"\n' >> "$p/.freelunch/apps.tfvars"
+  out="$(cd "$p" && "$CLI" doctor 2>&1 || true)"
+  contains "$out" ".freelunch/cloudflare/terraform.tfvars:"
+  contains "$out" "looks like a secret in a file that goes to git"
+  contains "$out" ".freelunch/known_hosts:"
+  contains "$out" ".freelunch/apps.tfvars:"
 }
 
 # ci init writes a workflow that waits for capacity, every half hour in a private repository

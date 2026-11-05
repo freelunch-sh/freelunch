@@ -1,12 +1,12 @@
-# Written by freelunch init: local config, state and secrets stay out of git.
-*/terraform.tfvars
+# Written by freelunch init: state, secrets and local files stay out of git. The tfvars
+# and known_hosts are committed so CI runs the same config; they hold no secrets (freelunch
+# doctor checks), which go in .freelunch/.env here and in GitHub secrets there.
 */terraform.tfstate
 */terraform.tfstate.*
 */.terraform/
 .env
 *.env
 inventory.json
-known_hosts
 */wait.log
 */wait.state
 */approved.json
