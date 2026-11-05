@@ -696,6 +696,9 @@ case "$url" in
       # shellcheck disable=SC2086 # one argument per platform
       respond 200 "$(jq -nc '{manifests: ([$ARGS.positional[] | split("/") | {platform: {os: .[0], architecture: .[1]}}] + [{platform: {os: "unknown", architecture: "unknown"}}])}' --args ${FAKE_PLATFORMS:-linux/amd64 linux/arm64})"
     fi ;;
+  https://*)
+    # Any other address is the app itself, at the one its platform or a route gave it: FAKE_APP_CODE answers (default 200)
+    respond "${FAKE_APP_CODE:-200}" "" ;;
 esac
 EOF
 chmod +x "$WORK/bin/curl"
@@ -1027,7 +1030,7 @@ up_in() {
   (cd "$dir" && HOME="$dir/home" PATH="$WORK/up-bin:$WORK/nf-bin:$WORK/bin:$PATH" FAKE_LOG="$dir/fake.log" FAKE_NF="$dir/nf" \
     FREELUNCH_TF="$WORK/bin/up-tf" UP_FIXTURES="$ROOT" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_ROOT="$dir/host" \
     FAKE_CONSOLE_KEYS="${FAKE_CONSOLE_KEYS-$(cut -d' ' -f1,2 "$WORK/hostkey.pub")}" FAKE_SCANNED="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")" \
-    FREELUNCH_TRUST_TIMEOUT="${FREELUNCH_TRUST_TIMEOUT:-0}" GHCR_TOKEN=ghp_test-token \
+    FREELUNCH_TRUST_TIMEOUT="${FREELUNCH_TRUST_TIMEOUT:-0}" GHCR_TOKEN=ghp_test-token FREELUNCH_VERIFY_INTERVAL=0 \
     NORTHFLANK_API_TOKEN="nf-token" CLOUDFLARE_API_TOKEN="" "$dir-checkout/bin/freelunch" up "$@")
 }
 
@@ -3184,7 +3187,12 @@ assert jobs["deploy"]["environment"] == "production"
 assert jobs["deploy"]["permissions"] == {"contents": "write"}
 assert "main" in jobs["deploy"]["if"] and "pull_request" in jobs["deploy"]["if"]
 uses = [s["uses"] for j in jobs.values() for s in j["steps"] if "uses" in s]
-assert [u for u in uses if u.startswith("freelunch-sh/freelunch@")] == ["freelunch-sh/freelunch@FREELUNCH_PIN"] * 2
+assert [u for u in uses if u.startswith("freelunch-sh/freelunch@")] == ["freelunch-sh/freelunch@FREELUNCH_PIN"] * 3
+steps = jobs["deploy"]["steps"]
+rb = [x for x in steps if "rollback" in x.get("if", "") or "steps.up.outcome" in x.get("if", "")]
+assert len(rb) == 1 and "failure()" in rb[0]["if"] and rb[0]["env"]["IMAGE_TAG"] == "sha-${{ github.event.before }}"
+up = [x for x in steps if x.get("id") == "up"][0]
+assert set(rb[0]["env"]) == set(up["env"]), "the rollback step has the same secrets as the deploy"
 assert not [u for u in uses if u.endswith("@main") or u.endswith("@master")], uses
 ' "$t"
   doctor_project "$p"
@@ -3231,6 +3239,46 @@ test_agent_writes_instructions_for_each_agent() {
   fails grep -q 'FREELUNCH_PIN' "$p/AGENTS.md"
   if out="$(cd "$p" && "$CLI" agent windsurf 2>&1)"; then echo "should have failed"; return 1; fi
   contains "$out" "claude, codex, cursor, copilot or all"
+}
+
+# verify waits for the app to answer, and says what it saw when it doesn't.
+test_verify_waits_for_the_app() {
+  local d="$WORK/verify" out
+  mkdir -p "$d/bin"
+  cat > "$d/bin/curl" <<'FAKE'
+#!/usr/bin/env bash
+# FAKE_CODES: the status each call returns, in order, the last one for the rest; 000 is no connection
+n=$(cat "$FAKE_DIR/n" 2>/dev/null || echo 0); echo $((n + 1)) > "$FAKE_DIR/n"
+echo "$*" >> "$FAKE_DIR/calls"
+read -ra c <<< "$FAKE_CODES"
+code="${c[$n]:-${c[${#c[@]}-1]}}"
+if [[ "$code" == 000 ]]; then echo "curl: (7) Failed to connect to app.example.com port 443" >&2; printf 000; exit 7; fi
+printf '%s' "$code"
+FAKE
+  chmod +x "$d/bin/curl"
+  run_verify() { rm -f "$d/n" "$d/calls"; FAKE_DIR="$d" PATH="$d/bin:$PATH" FREELUNCH_VERIFY_INTERVAL=0 FAKE_CODES="$1" "$CLI" verify "${@:2}" 2>&1; }
+  # Not up yet, then up.
+  out="$(run_verify "000 502 200" https://app.example.com --timeout 30)"
+  contains "$out" "verify: https://app.example.com answers"
+  equals "$(wc -l < "$d/calls" | tr -d ' ')" "3"
+  # No path: a 404 is an answer, a 500 is not.
+  run_verify "404" https://app.example.com >/dev/null
+  if out="$(run_verify "500" https://app.example.com --timeout 0)"; then echo "should have failed"; return 1; fi
+  contains "$out" "HTTP 500 after 0s"
+  contains "$out" "the app doesn't answer"
+  # A path has to be healthy: 404 isn't.
+  if out="$(run_verify "404" https://app.example.com --path /healthz --timeout 0)"; then echo "should have failed"; return 1; fi
+  contains "$out" "app.example.com/healthz: HTTP 404"
+  grep -q 'app.example.com/healthz' "$d/calls"
+  run_verify "301" https://app.example.com --path /healthz >/dev/null
+  # Never connects.
+  if out="$(run_verify "000" https://app.example.com --timeout 0)"; then echo "should have failed"; return 1; fi
+  contains "$out" "no answer (Failed to connect"
+  # Every address has to answer; wrong use is said plainly.
+  if out="$(run_verify "200" 2>&1)"; then echo "should have failed"; return 1; fi
+  contains "$out" "give the address to check"
+  if out="$(run_verify "200" https://x.example --path healthz 2>&1)"; then echo "should have failed"; return 1; fi
+  contains "$out" "starts with /"
 }
 
 # ci init writes a workflow that waits for capacity, every half hour in a private repository
@@ -3981,7 +4029,17 @@ test_up_with_no_domain_says_where_the_app_is() {
   rm -r "$p/.freelunch/cloudflare"
   out="$(FAKE_UP="northflank=ok" up_in "$p" 2>&1)"
   contains "$out" "up: live on northflank-main: https://p8080--freelunch--team.code.run"
+  contains "$out" "verify: https://p8080--freelunch--team.code.run answers"
   lacks "$out" "cloudflare"
+  # A deploy that finishes with an app that doesn't answer fails the run, and a workflow gets
+  # the address as an output and in its summary.
+  if out="$(FAKE_UP="northflank=ok" FAKE_APP_CODE=503 FREELUNCH_VERIFY_TIMEOUT=0 up_in "$p" 2>&1)"; then echo "up should have failed"; return 1; fi
+  contains "$out" "HTTP 503 after 0s"
+  contains "$out" "deployed to northflank-main, but the app doesn't answer"
+  FAKE_UP="northflank=ok" FREELUNCH_VERIFY=0 FAKE_APP_CODE=503 up_in "$p" >/dev/null 2>&1
+  FAKE_UP="northflank=ok" GITHUB_OUTPUT="$p/out" GITHUB_STEP_SUMMARY="$p/summary" up_in "$p" >/dev/null 2>&1
+  grep -qx 'urls=https://p8080--freelunch--team.code.run' "$p/out"
+  grep -q 'Live at: https://p8080--freelunch--team.code.run' "$p/summary"
   p="$WORK/up-nodomain-vm"
   up_project "$p" oci
   rm -r "$p/.freelunch/cloudflare"
