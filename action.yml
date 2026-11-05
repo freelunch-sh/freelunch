@@ -26,6 +26,14 @@ inputs:
     required: false
     default: ""
 
+outputs:
+  url:
+    description: The address freelunch up put the app at (the first, when there are several), once it answered
+    value: ${{ steps.freelunch.outputs.url }}
+  urls:
+    description: All the addresses, separated by spaces
+    value: ${{ steps.freelunch.outputs.urls }}
+
 runs:
   using: composite
   steps:
@@ -39,7 +47,8 @@ runs:
       with:
         terraform_version: ${{ inputs.version || 'latest' }}
         terraform_wrapper: false
-    - shell: bash
+    - id: freelunch
+      shell: bash
       env:
         FREELUNCH_BUNDLE: ${{ inputs.bundle }}
         FREELUNCH_TF: ${{ inputs.tool }}
