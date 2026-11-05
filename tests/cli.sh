@@ -3183,7 +3183,7 @@ for name, job in jobs.items():
     text = yaml.dump(job)
     secrets = [x for x in text.split("secrets.")[1:] if not x.startswith("GITHUB_TOKEN")]
     assert name == "deploy" or not secrets, (name, secrets)
-assert jobs["deploy"]["environment"] == "production"
+assert jobs["deploy"]["environment"] == {"name": "production", "url": "${{ steps.up.outputs.url }}"}
 assert jobs["deploy"]["permissions"] == {"contents": "write"}
 assert "main" in jobs["deploy"]["if"] and "pull_request" in jobs["deploy"]["if"]
 uses = [s["uses"] for j in jobs.values() for s in j["steps"] if "uses" in s]
@@ -4039,6 +4039,7 @@ test_up_with_no_domain_says_where_the_app_is() {
   FAKE_UP="northflank=ok" FREELUNCH_VERIFY=0 FAKE_APP_CODE=503 up_in "$p" >/dev/null 2>&1
   FAKE_UP="northflank=ok" GITHUB_OUTPUT="$p/out" GITHUB_STEP_SUMMARY="$p/summary" up_in "$p" >/dev/null 2>&1
   grep -qx 'urls=https://p8080--freelunch--team.code.run' "$p/out"
+  grep -qx 'url=https://p8080--freelunch--team.code.run' "$p/out"
   grep -q 'Live at: https://p8080--freelunch--team.code.run' "$p/summary"
   p="$WORK/up-nodomain-vm"
   up_project "$p" oci

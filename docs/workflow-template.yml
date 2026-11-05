@@ -74,7 +74,10 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: production
+    # The environment makes GitHub record a Deployment, with the app's address on it.
+    environment:
+      name: production
+      url: ${{ steps.up.outputs.url }}
     permissions:
       contents: write # the state is kept in the freelunch-state branch of this repository
     # One deploy at a time; a second waits for the first.
