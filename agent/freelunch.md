@@ -59,7 +59,7 @@ and the name to type. Tell them to paste the value into GitHub's page, never int
 1. Look at the repository: language, how it starts, its port, whether a `Dockerfile` exists.
 2. Write the files above. Open one pull request with them. The `check` job (no secrets) and
    the image build run on it; fix what they report.
-3. Tell the person which secrets to add (the table), with the link, and wait until they say done.
+3. Tell the person which secrets to add (the table), with the link, and wait until they say done. If one is forgotten, the deploy fails first with the names of the empty ones and the page to add them on (`ci needs`): relay that, and re-run the workflow when they've added them.
 4. After merge, the `deploy` job runs. Read its log (`gh run view` or the Actions tab). On
    success it prints the app's URL; give it to the person. On failure, quote the one line
    that says why and fix the file it names.
