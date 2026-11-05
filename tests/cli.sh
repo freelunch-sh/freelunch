@@ -480,7 +480,7 @@ case "$url" in
       "GET /projects/"*/services/*)
         service="${path##*/}"
         if [[ -f "$nf/services/$project/$service.json" ]]; then
-          respond 200 "$(jq -c --arg st "$(nf_deployment "$service")" '{data: {id: .name, name: .name, description, status: {deployment: {status: $st, reason: "DEPLOYING"}}}}' "$nf/services/$project/$service.json")"
+          respond 200 "$(jq -c --arg st "$(nf_deployment "$service")" --arg p "$project" '{data: {id: .name, name: .name, description, status: {deployment: {status: $st, reason: "DEPLOYING"}}, ports: [.ports[]? | {name, internalPort, public, dns: (if .public then "\(.name)--\($p)--team.code.run" else null end)}]}}' "$nf/services/$project/$service.json")"
         else nf_missing Service; fi ;;
       "GET /projects/"*/services)
         [[ -f "$nf/projects/$project.json" ]] || { nf_missing Project; exit 0; }
@@ -3829,6 +3829,34 @@ test_git_state_store_refuses_a_tampered_file() {
   if out="$(in_dir "$p" "$CLI" output oci 2>&1)"; then echo "output should have failed"; return 1; fi
   contains "$out" "Error"
   absent "$p/.freelunch/oci/terraform.tfstate"
+}
+
+# With no domain, nothing tunnels to the app, so its ports are public at the address Northflank
+# gives them, and that address is what deploy and up report.
+test_northflank_without_a_domain_gets_a_public_address() {
+  local p="$WORK/nf-nodomain" out
+  nf_project "$p"
+  rm -r "$p/.freelunch/cloudflare"
+  out="$(GHCR_TOKEN=ghp_test-token nf_in "$p" deploy 2>&1)"
+  equals "$(jq -c .ports "$(dirname "$(ls "$p"/nf/services/freelunch/api.json)")/api.json")" '[{"name":"p8080","internalPort":8080,"public":true,"protocol":"HTTP"}]'
+  absent "$p/nf/services/freelunch/cloudflared.json"
+  contains "$out" "northflank-main: api: https://p8080--freelunch--team.code.run"
+  lacks "$out" "cloudflared"
+}
+
+# up with no domain ends with where the app is, or says why nothing serves it.
+test_up_with_no_domain_says_where_the_app_is() {
+  local p="$WORK/up-nodomain" out
+  up_project "$p" northflank
+  rm -r "$p/.freelunch/cloudflare"
+  out="$(FAKE_UP="northflank=ok" up_in "$p" 2>&1)"
+  contains "$out" "up: live on northflank-main: https://p8080--freelunch--team.code.run"
+  lacks "$out" "cloudflare"
+  p="$WORK/up-nodomain-vm"
+  up_project "$p" oci
+  rm -r "$p/.freelunch/cloudflare"
+  out="$(FAKE_UP="oci=ok" up_in "$p" 2>&1)"
+  contains "$out" "up: oci-main runs the app, but nothing serves it to the internet: a VM needs a domain on Cloudflare (freelunch setup --domain <name>) or an open port of its own"
 }
 
 # tests/cli.sh <pattern>: only the tests whose name matches the pattern (grep -E)
