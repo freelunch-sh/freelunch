@@ -5384,7 +5384,7 @@ workflow_lint() {
       n="${line#*uses:}"; n="$(echo "$n" | sed -e 's/#.*//' -e 's/[[:space:]]//g' -e "s/['\"]//g")"
       case "$n" in ./*|docker://*|"") continue ;; esac
       case "$n" in actions/*|github/*|freelunch-sh/*) continue ;; esac
-      [[ "${n#*@}" =~ ^[0-9a-f]{40}$ ]] || check warn "$(rel "$f"): $n is a tag a maintainer can move; pin third-party actions to a commit (uses: $n@<40-character commit>)"
+      [[ "${n#*@}" =~ ^[0-9a-f]{40}$ ]] || check warn "$(rel "$f"): $n is a tag a maintainer can move; pin third-party actions to a commit (uses: ${n%%@*}@<40-character commit>)"
     done < <(grep -E '^[[:space:]]*-?[[:space:]]*uses:' "$f")
   done
 }
