@@ -91,7 +91,7 @@ the same app, without a card, as two always-on services: your app and `cloudflar
 ([switch to another provider](docs/deploy-a-container.md#switch-to-another-provider)).
 
 To ship a new version, change the image tag and run `freelunch deploy` again; the VM stays.
-`freelunch upgrade` moves the project to the latest freelunch release.
+`freelunch upgrade` moves the project to the latest freelunch release. Already deploying by hand? [Move it to CI/CD](docs/adopt-in-ci.md): a prompt for your coding agent that writes the pipeline.
 
 In GitHub Actions, the [Run freelunch](action.yml) action runs any command with the version
 the project pins; `freelunch ci init` writes the workflows:
