@@ -1,0 +1,91 @@
+# A CI/CD pipeline with freelunch as one step: copy it to .github/workflows/deploy.yml.
+# Nobody installs anything: the freelunch step is a GitHub Action, and everything else here is
+# the usual build. Change the three things marked CHANGE:
+#   1. FREELUNCH_PIN: the version this project pins (the line in .freelunch/version, or a
+#      release tag such as v0.1.0, or a full commit SHA).
+#   2. The env: lines of the deploy step: one for each secret the targets in
+#      .freelunch/apps.tfvars need (the list is in docs/ci.md and in the agent notes).
+#   3. platforms: linux/amd64 for x86 clouds, linux/arm64 for Oracle's Arm VMs, both when a
+#      project may land on either (up goes wherever there is room).
+# The jobs, in order:
+#   check   every pull request, no secrets: the config in git is complete and holds no secret
+#   build   every pull request builds the image; main also pushes it to ghcr.io, tagged by commit
+#   deploy  main only, in the `production` environment: freelunch up, to the first target with room
+# Secrets are GitHub secrets of the repository (Settings > Secrets and variables > Actions),
+# one each; never write a value in this file or anywhere in the repository.
+name: deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Nothing is allowed unless a job says so. Pull requests from forks get no secrets at all.
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: freelunch-sh/freelunch@FREELUNCH_PIN # CHANGE 1
+        with:
+          run: check
+
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # to push the image to ghcr.io (a pull request pushes nothing)
+    outputs:
+      image: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: type=sha,format=long
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64 # CHANGE 3
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: [check, build]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    permissions:
+      contents: write # the state is kept in the freelunch-state branch of this repository
+    # One deploy at a time; a second waits for the first.
+    concurrency:
+      group: freelunch
+    steps:
+      - uses: actions/checkout@v7
+      - uses: freelunch-sh/freelunch@FREELUNCH_PIN # CHANGE 1
+        with:
+          run: up
+        env: # CHANGE 2: the secrets the targets need, and no others
+          IMAGE_TAG: ${{ needs.build.outputs.image }} # the compose file's image: ghcr.io/OWNER/REPO:${IMAGE_TAG:-main}
+          FREELUNCH_STATE_PASSPHRASE: ${{ secrets.FREELUNCH_STATE_PASSPHRASE }}
+          NORTHFLANK_API_TOKEN: ${{ secrets.NORTHFLANK_API_TOKEN }}

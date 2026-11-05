@@ -3164,6 +3164,75 @@ test_doctor_refuses_secrets_in_committed_files() {
   contains "$out" ".freelunch/apps.tfvars:"
 }
 
+# The template an agent copies: freelunch is a step, secrets only reach the deploy job, and
+# the job a pull request runs works with none.
+test_workflow_template_keeps_secrets_in_the_deploy_job() {
+  local t="$ROOT/docs/workflow-template.yml" p="$WORK/template" out
+  python3 -c '
+import sys, yaml
+w = yaml.safe_load(open(sys.argv[1]))
+on = w.get(True, w.get("on"))
+assert "pull_request" in on and "pull_request_target" not in on, "pull_request only"
+assert w["permissions"] == {}, "no permissions unless a job asks"
+jobs = w["jobs"]
+assert list(jobs) == ["check", "build", "deploy"], list(jobs)
+for name, job in jobs.items():
+    text = yaml.dump(job)
+    secrets = [x for x in text.split("secrets.")[1:] if not x.startswith("GITHUB_TOKEN")]
+    assert name == "deploy" or not secrets, (name, secrets)
+assert jobs["deploy"]["environment"] == "production"
+assert jobs["deploy"]["permissions"] == {"contents": "write"}
+assert "main" in jobs["deploy"]["if"] and "pull_request" in jobs["deploy"]["if"]
+uses = [s["uses"] for j in jobs.values() for s in j["steps"] if "uses" in s]
+assert [u for u in uses if u.startswith("freelunch-sh/freelunch@")] == ["freelunch-sh/freelunch@FREELUNCH_PIN"] * 2
+assert not [u for u in uses if u.endswith("@main") or u.endswith("@master")], uses
+' "$t"
+  doctor_project "$p"
+  state_store "$p"
+  out="$(cd "$p" && HOME="$p/home" "$CLI" check 2>&1)"
+  contains "$out" "The config is complete."
+  printf 'targets = ["nowhere"]\n' > "$p/.freelunch/apps.tfvars"
+  if out="$(cd "$p" && HOME="$p/home" "$CLI" check 2>&1)"; then echo "check should have failed"; return 1; fi
+  contains "$out" "nowhere"
+  rm "$p/.freelunch/apps.tfvars"
+  if out="$(cd "$p" && HOME="$p/home" "$CLI" check 2>&1)"; then echo "check should have failed"; return 1; fi
+  contains "$out" "apps.tfvars is missing"
+  if command -v actionlint >/dev/null; then actionlint "$t"; fi
+}
+
+# The instructions for coding agents say to write the workflow and never to install freelunch,
+# carry the workflow template, and keep whatever else the file holds.
+test_agent_writes_instructions_for_each_agent() {
+  local p="$WORK/agent" out
+  mkdir -p "$p" && git -C "$p" init -q
+  printf '# My project\nUse tabs.\n' > "$p/AGENTS.md"
+  out="$(cd "$p" && "$CLI" agent all 2>&1)"
+  contains "$out" "wrote .claude/skills/freelunch/SKILL.md"
+  head -2 "$p/.claude/skills/freelunch/SKILL.md" | grep -qx 'name: freelunch'
+  exists "$p/.cursor/rules/freelunch.mdc"
+  exists "$p/.github/copilot-instructions.md"
+  grep -qx 'Use tabs.' "$p/AGENTS.md"
+  local f
+  for f in .claude/skills/freelunch/SKILL.md AGENTS.md .cursor/rules/freelunch.mdc .github/copilot-instructions.md; do
+    grep -q 'Do not install' "$p/$f"
+    grep -q '^name: deploy$' "$p/$f"
+    grep -q 'freelunch-sh/freelunch@' "$p/$f"
+    fails grep -q 'pull_request_target:' "$p/$f"
+    fails grep -q '<!-- workflow-template -->' "$p/$f"
+  done
+  # Again: one copy, not two.
+  (cd "$p" && "$CLI" agent codex >/dev/null 2>&1)
+  equals "$(grep -c 'freelunch:begin' "$p/AGENTS.md")" "1"
+  grep -qx 'Use tabs.' "$p/AGENTS.md"
+  # The pin the project has goes into the workflow.
+  mkdir -p "$p/.freelunch" && echo "v0.1.0" > "$p/.freelunch/version"
+  (cd "$p" && "$CLI" agent codex >/dev/null 2>&1)
+  grep -q 'freelunch-sh/freelunch@v0.1.0' "$p/AGENTS.md"
+  fails grep -q 'FREELUNCH_PIN' "$p/AGENTS.md"
+  if out="$(cd "$p" && "$CLI" agent windsurf 2>&1)"; then echo "should have failed"; return 1; fi
+  contains "$out" "claude, codex, cursor, copilot or all"
+}
+
 # ci init writes a workflow that waits for capacity, every half hour in a private repository
 # and every quarter of an hour in a public one, and one that deploys after a new image.
 test_ci_init_writes_the_workflows() {
