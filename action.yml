@@ -62,4 +62,10 @@ runs:
         "$freelunch" ci restore
         if [ -z "$FREELUNCH_SSH_KEY" ] && [ -f "$HOME/.ssh/freelunch_deploy" ]; then export FREELUNCH_SSH_KEY="$HOME/.ssh/freelunch_deploy"; fi
         read -ra args <<< "$FREELUNCH_RUN"
+        # Secrets that are missing are said here, by name, before anything runs. A pull request's
+        # check needs none.
+        case "${args[0]:-}" in
+          check|verify|help|version|agent) ;;
+          *) "$freelunch" ci needs ;;
+        esac
         "$freelunch" "${args[@]}"
