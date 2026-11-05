@@ -110,6 +110,15 @@ service against the fields Northflank requires and their ranges, so a body it wo
 down doesn't leave half a deploy behind. Every service runs on one instance, and deploy waits up to
 `FREELUNCH_DEPLOY_TIMEOUT` seconds (180) for each.
 
+A container that sits in `TASK_STARTING` makes no progress, and a restart brings it up in
+seconds. Set `FREELUNCH_DEPLOY_RESTART_STUCK=1` and deploy restarts it once, halfway through
+the wait. Without it, the timeout error prints the restart command. With a volume the old
+container stops before the new one starts, so a stuck start means downtime.
+
+`freelunch logs <app|cloudflared> [--lines n]` prints the last lines a service logged, and
+`freelunch status` shows the last five of any service that isn't running. The logs call
+(`GET /projects/<p>/services/<s>/logs?lineLimit=n`) is tested against the fake API only.
+
 `freelunch status` asks Northflank which services run, `freelunch doctor` checks the token,
 the region and the project, and whether the team has room for it, and `freelunch destroy northflank` deletes the services, the
 saved registry logins and the project. freelunch marks what it makes (`Managed by freelunch`
@@ -210,3 +219,28 @@ services made in the dashboard aren't in it.
 - [ ] Live test on a Sandbox account
 - [ ] A public `code.run` URL for apps without a domain
 - [ ] The free database as a service stack
+
+## Plans per app, memory limits and `--image`
+
+```hcl
+# apps.tfvars
+apps = { api = { host = "northflank-main", compose = "api.yaml", plan = "nf-compute-10" } }
+```
+
+An app's `plan` beats the stack's. Without one, a memory limit in its Compose file picks the
+smallest plan that holds it (`nf-compute-10` 256 MB, `nf-compute-20` 512 MB, `nf-compute-50`
+1 GB); a limit no plan holds stops the deploy and lists the plans. The estimate in `deploy`
+and `--dry-run` adds up each app's plan. Plans above `nf-compute-20` need
+`acknowledge_billable_resources = true`: whether a free Sandbox may pick them is **not
+verified** (the only source is a third-party issue; see `provider.yaml`), and `nf-compute-50`'s
+$12 price comes from a user report. `doctor` checks that Northflank lists each plan.
+
+`freelunch deploy --image api=0.8.17` deploys that tag of the app's image once; the Compose
+file keeps its own. `--image api=ghcr.io/me/api:0.8.17` replaces the whole image.
+
+## Not supported yet
+
+- **Jobs** (scheduled or one-off), and a database add-on. The Sandbox includes 2 jobs and 1
+  database, but freelunch uses neither.
+- **Sharing a volume** between a service and a job (or two services). Whether Northflank
+  allows it hasn't been tested; each volume is made for, and attached to, one app.

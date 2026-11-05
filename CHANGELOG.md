@@ -12,6 +12,26 @@ release can change commands and the project layout.
 
 ### Added
 
+- **`freelunch harden`** makes a `production` environment that only the main branch deploys from
+  (and, with `--reviewer`, after approval) and CODEOWNERS for workflows and `.freelunch/`;
+  `freelunch check` also fails workflows that use `pull_request_target` or `write-all`.
+  `build prompt` gives a coding agent what it needs to write a Dockerfile.
+- **`freelunch build detect|init`.** Names the app's stack (Node, Python, Go, Java, Ruby, PHP,
+  static), port and start command, and writes a Dockerfile for it when there is none (non-root,
+  never overwrites). `ci init --pipeline` writes the CI/CD workflow from the template with the
+  project's pin, platforms and secrets.
+- **Plans per app on Northflank.** `plan = "nf-compute-10"` on an app in `apps.tfvars` beats the
+  stack's `plan`. Without it, a Compose memory limit (`deploy.resources.limits.memory` or
+  `mem_limit`) picks the smallest plan that holds it, or stops the deploy with the plan table.
+  The monthly estimate adds each app's own plan, and `doctor` checks that Northflank knows the
+  plans. A plan outside the free Sandbox's still needs `acknowledge_billable_resources`.
+- **`freelunch deploy --image app=tag`** deploys another tag (or a whole image) once on a
+  container platform, without editing the Compose file.
+- **Safer Northflank deploys.** `FREELUNCH_DEPLOY_RESTART_STUCK=1` restarts a container stuck in
+  `TASK_STARTING`; the timeout error prints the restart command. `freelunch logs <app>` shows a
+  service's logs, and `status` shows the last lines of one that isn't running. A CI deploy that
+  can't find an `env_file` says the bundle is probably out of date, and `ci secrets` warns when
+  it leaves one out.
 - **For coding agents.** `freelunch agent` writes the instructions a coding agent reads
   (`.claude/skills/freelunch/SKILL.md`, `AGENTS.md`, Cursor and Copilot files) from one source,
   `agent/freelunch.md`. They tell the agent to write a GitHub Actions workflow with freelunch as a

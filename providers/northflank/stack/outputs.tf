@@ -17,10 +17,14 @@ output "platforms" {
     # Dollars a month: what the free plan covers (null once paid resources are allowed), a
     # service on this plan, cloudflared and a GB of volume. deploy adds them up.
     pricing = {
-      budget    = var.acknowledge_billable_resources ? null : local.limits.monthly_credit
-      service   = lookup(local.limits.plan_prices, var.plan, null)
-      tunnel    = local.limits.plan_prices["nf-compute-10"]
-      volume_gb = local.limits.volume_gb_price
+      budget  = var.acknowledge_billable_resources ? null : local.limits.monthly_credit
+      service = lookup(local.limits.plan_prices, var.plan, null)
+      tunnel  = local.limits.plan_prices["nf-compute-10"]
+      # Every plan freelunch knows the price of, and the ones this account may pick (null once paid resources are allowed).
+      plans         = local.limits.plan_prices
+      plan_memory   = local.limits.plan_memory
+      plans_allowed = var.acknowledge_billable_resources ? null : local.limits.plans
+      volume_gb     = local.limits.volume_gb_price
     }
   }]
 }

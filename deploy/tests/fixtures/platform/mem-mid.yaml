@@ -1,0 +1,8 @@
+services:
+  mid:
+    image: ghcr.io/me/mid:1
+    ports: ["8080:8080"]
+    deploy:
+      resources:
+        limits:
+          memory: 300M

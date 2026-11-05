@@ -1,0 +1,5 @@
+services:
+  big:
+    image: ghcr.io/me/big:1
+    ports: ["8080:8080"]
+    mem_limit: 4g

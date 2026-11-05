@@ -224,6 +224,7 @@ run "apps_on_a_platform_become_services" {
       ports       = [8080, 9090]
       volumes     = []
       healthcheck = { cmd = "wget -qO- http://127.0.0.1:8080/health", initial_delay = 90, interval = 15, timeout = 5, retries = 6 }
+      plan        = "nf-compute-20"
     })
     error_message = "The service takes image, command, environment, ports and healthcheck from the Compose file."
   }
@@ -248,6 +249,7 @@ run "compose_files_in_other_shapes" {
       ports       = []
       volumes     = []
       healthcheck = { cmd = "/bin/sh -c \"curl -f http://localhost/ || exit 1\"", initial_delay = 1, interval = 30, timeout = 30, retries = 3 }
+      plan        = "nf-compute-20"
     })
     error_message = "A list environment, a string entrypoint and a CMD-SHELL test (as a string) carry over too, with Docker's defaults."
   }
@@ -574,4 +576,75 @@ run "an_app_without_a_host_and_no_default_fails" {
   }
 
   expect_failures = [output.targets]
+}
+
+run "an_app_may_have_a_plan_of_its_own" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = "tests/fixtures/platform/cloudflare.tfstate"
+    apps                 = { api = { host = "northflank-main", compose = "api.yaml", env_file = "../api.env", plan = "nf-compute-10" } }
+  }
+
+  assert {
+    condition     = output.platforms["northflank-main"].services.api.plan == "nf-compute-10"
+    error_message = "The app's plan beats the stack's."
+  }
+}
+
+run "a_plan_outside_the_free_plan_is_refused" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = "tests/fixtures/platform/cloudflare.tfstate"
+    apps                 = { api = { host = "northflank-main", compose = "api.yaml", env_file = "../api.env", plan = "nf-compute-50" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
+run "a_memory_limit_picks_the_smallest_plan_that_holds_it" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    apps                 = { small = { host = "northflank-main", compose = "mem-small.yaml" } }
+  }
+
+  assert {
+    condition     = output.platforms["northflank-main"].services.small.plan == "nf-compute-10"
+    error_message = "200M fits nf-compute-10 (256 MB)."
+  }
+}
+
+run "a_memory_limit_may_need_the_bigger_free_plan" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    apps                 = { mid = { host = "northflank-main", compose = "mem-mid.yaml" } }
+  }
+
+  assert {
+    condition     = output.platforms["northflank-main"].services.mid.plan == "nf-compute-20"
+    error_message = "300M needs nf-compute-20."
+  }
+}
+
+run "a_memory_limit_no_plan_holds_is_refused" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    apps                 = { big = { host = "northflank-main", compose = "mem-big.yaml" } }
+  }
+
+  expect_failures = [output.platforms]
 }
