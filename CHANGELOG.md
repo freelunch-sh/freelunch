@@ -12,6 +12,11 @@ release can change commands and the project layout.
 
 ### Added
 
+- **For coding agents.** `freelunch agent` writes the instructions a coding agent reads
+  (`.claude/skills/freelunch/SKILL.md`, `AGENTS.md`, Cursor and Copilot files) from one source,
+  `agent/freelunch.md`. They tell the agent to write a GitHub Actions workflow with freelunch as a
+  step ([`docs/workflow-template.yml`](docs/workflow-template.yml): check, build, deploy) and never
+  to install freelunch. `freelunch check` lints the config without a secret, for pull requests.
 - **Config in git, secrets in GitHub.** The tfvars and `known_hosts` are committed (`init`
   no longer ignores them; `doctor` fails on a committed file that holds a secret). Workflows
   pass each secret to the freelunch step as its own variable, and `ci restore` writes the OCI

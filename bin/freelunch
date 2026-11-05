@@ -136,6 +136,11 @@ Infrastructure:
                           a platform it also deletes what apply and deploy made there
   status                  Hosts and platforms, the apps on each one and whether they run,
                           tunnels and their URLs, service token expiry, and capacity waits
+  agent [claude|codex|cursor|copilot|all]
+                          Write the instructions a coding agent reads (SKILL.md, AGENTS.md, ...):
+                          it writes the CI/CD workflow with freelunch as a step, never installs it
+  check                   Check the config in git without any secret: complete, real targets,
+                          no secret in a file. What a pull request runs
   doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in and
                           what the tenancy's limits leave, the Northflank token, SSH keys,
                           images and their registry logins, the Cloudflare token and zone. It
@@ -5230,6 +5235,20 @@ doctor_config() {
   done
 }
 
+# cmd_check: what a pull request can verify without a single secret: the config in git is
+# complete, names real targets and holds no secret
+cmd_check() {
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  [[ -n "$PROJECT" ]] || die "check: run it in a project, where its .freelunch/ folder is"
+  echo "freelunch check ($(rel "$PROJECT"))"
+  echo
+  doctor_config
+  [[ -f "$PROJECT/apps.tfvars" ]] || check fail "$(rel "$PROJECT")/apps.tfvars is missing: it says which apps run and where"
+  ( up_targets ) >/dev/null 2>"$TMP/check.err" || check fail "$(sed -e "s/^freelunch: //" "$TMP/check.err" | head -1)"
+  echo
+  if [[ $FAILS -eq 0 ]]; then echo "The config is complete."; else echo "$FAILS problem(s)."; return 1; fi
+}
+
 cmd_doctor() {
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   SCRATCH_HYBRID=1
@@ -5250,6 +5269,71 @@ cmd_doctor() {
   [[ $WARNS -eq 0 ]] || warns=", $WARNS warning(s)"
   echo
   if [[ $FAILS -eq 0 ]]; then echo "No problems found$warns."; else echo "$FAILS problem(s)$warns."; return 1; fi
+}
+
+# --- agent instructions --------------------------------------------------------------------
+
+# agent_source: agent/freelunch.md with the workflow template put in and the pin filled in
+agent_source() {
+  local pin tpl
+  pin="$(pinned_version)"
+  [[ -n "$pin" ]] || pin="$(release_version)"
+  tpl="$(cat "$ROOT/docs/workflow-template.yml")"
+  [[ -z "$pin" ]] || tpl="${tpl//FREELUNCH_PIN/$pin}"
+  TPL="$tpl" awk '/^<!-- workflow-template -->$/ { print "```yaml"; print ENVIRON["TPL"]; print "```"; next } { print }' "$ROOT/agent/freelunch.md"
+  if [[ -n "$pin" ]]; then
+    printf '\nThe pin for this project is `%s` (write it in `.freelunch/version` too).\n' "$pin"
+  else
+    printf '\nThis project has no pin yet: use the newest release tag of freelunch-sh/freelunch (or its latest commit SHA before the first release) wherever the workflow says FREELUNCH_PIN, and in `.freelunch/version`.\n'
+  fi
+}
+
+# agent_section <file>: put the instructions between markers in a file that may have other
+# content (AGENTS.md, copilot-instructions.md), replacing an earlier copy
+agent_section() {
+  local file="$1" begin="<!-- freelunch:begin -->" end="<!-- freelunch:end -->" body
+  mkdir -p "$(dirname "$file")"
+  body="$(printf '%s\n%s\n%s\n' "$begin" "$(agent_source)" "$end")"
+  if [[ -f "$file" ]] && grep -qF "$begin" "$file"; then
+    BODY="$body" awk -v b="$begin" -v e="$end" '
+      index($0, b) { print ENVIRON["BODY"]; skip = 1; next }
+      index($0, e) { skip = 0; next }
+      !skip { print }' "$file" > "$file.new" && mv "$file.new" "$file"
+  elif [[ -f "$file" ]]; then
+    printf '\n%s\n' "$body" >> "$file"
+  else
+    printf '%s\n' "$body" > "$file"
+  fi
+  log "wrote $(rel "$file")"
+}
+
+# cmd_agent [claude|codex|cursor|copilot|all]: the instructions for a coding agent, in the file
+# each agent reads. They tell it to write the workflow, not to install freelunch.
+cmd_agent() {
+  local base which a
+  base="$(git rev-parse --show-toplevel 2>/dev/null)" || die "agent: run it in your project's git repository"
+  [[ $# -gt 0 ]] || set -- all
+  for a in "$@"; do
+    case "$a" in claude|codex|cursor|copilot|all) ;; *) die "agent: claude, codex, cursor, copilot or all (not '$a')" ;; esac
+  done
+  for which in claude codex cursor copilot; do
+    case " $* " in *" all "*|*" $which "*) ;; *) continue ;; esac
+    case "$which" in
+      claude)
+        mkdir -p "$base/.claude/skills/freelunch"
+        {
+          printf -- '---\nname: freelunch\ndescription: Deploy this project to a free cloud with a GitHub Actions CI/CD workflow that runs freelunch as a step. Use when asked to deploy, host, set up CI/CD or go live. Never installs freelunch.\n---\n\n'
+          agent_source
+        } > "$base/.claude/skills/freelunch/SKILL.md"
+        log "wrote .claude/skills/freelunch/SKILL.md" ;;
+      codex)   agent_section "$base/AGENTS.md" ;;
+      cursor)
+        mkdir -p "$base/.cursor/rules"
+        { printf -- '---\ndescription: Deploy this project to a free cloud with GitHub Actions and freelunch\nalwaysApply: false\n---\n\n'; agent_source; } > "$base/.cursor/rules/freelunch.mdc"
+        log "wrote .cursor/rules/freelunch.mdc" ;;
+      copilot) agent_section "$base/.github/copilot-instructions.md" ;;
+    esac
+  done
 }
 
 # --- state ----------------------------------------------------------------------------
@@ -6441,6 +6525,8 @@ main() {
     plan|apply|destroy)   cmd_lifecycle "$cmd" "$@" ;;
     status)               cmd_status ;;
     doctor)               cmd_doctor ;;
+    check)                cmd_check ;;
+    agent)                cmd_agent "$@" ;;
     trust)                cmd_trust "$@" ;;
     hybrid)               cmd_hybrid ;;
     inventory)            cmd_inventory ;;
