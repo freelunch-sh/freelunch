@@ -82,10 +82,25 @@ jobs:
       group: freelunch
     steps:
       - uses: actions/checkout@v7
-      - uses: freelunch-sh/freelunch@FREELUNCH_PIN # CHANGE 1
+      # up deploys, then waits for the app to answer; a run that ends with an app that doesn't
+      # fails here. The address is the step's `urls` output and in the run's summary.
+      - id: up
+        uses: freelunch-sh/freelunch@FREELUNCH_PIN # CHANGE 1
         with:
           run: up
         env: # CHANGE 2: the secrets the targets need, and no others
           IMAGE_TAG: ${{ needs.build.outputs.image }} # the compose file's image: ghcr.io/OWNER/REPO:${IMAGE_TAG:-main}
+          FREELUNCH_STATE_PASSPHRASE: ${{ secrets.FREELUNCH_STATE_PASSPHRASE }}
+          NORTHFLANK_API_TOKEN: ${{ secrets.NORTHFLANK_API_TOKEN }}
+      # Rollback: when up failed (a deploy that broke, or an app that doesn't answer), put the
+      # image of the commit before back, which is still in the registry, and keep the run red.
+      # When there was no room it changed nothing, and this step finds none either, harmlessly:
+      # up is safe to repeat. The same env as above.
+      - if: failure() && steps.up.outcome == 'failure' && github.event.before != '0000000000000000000000000000000000000000'
+        uses: freelunch-sh/freelunch@FREELUNCH_PIN # CHANGE 1
+        with:
+          run: up
+        env: # CHANGE 2: the same as the step above
+          IMAGE_TAG: sha-${{ github.event.before }}
           FREELUNCH_STATE_PASSPHRASE: ${{ secrets.FREELUNCH_STATE_PASSPHRASE }}
           NORTHFLANK_API_TOKEN: ${{ secrets.NORTHFLANK_API_TOKEN }}

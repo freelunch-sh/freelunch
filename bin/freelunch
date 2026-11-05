@@ -139,6 +139,8 @@ Infrastructure:
   agent [claude|codex|cursor|copilot|all]
                           Write the instructions a coding agent reads (SKILL.md, AGENTS.md, ...):
                           it writes the CI/CD workflow with freelunch as a step, never installs it
+  verify [--path /x] [--timeout s] <url>...
+                          Wait until the app answers at its address; fails with what it saw
   check                   Check the config in git without any secret: complete, real targets,
                           no secret in a file. What a pull request runs
   doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in and
@@ -3142,6 +3144,11 @@ cmd_up() {
   [[ ! -f "$TMP/urls" ]] || urls="$(awk -F'\t' -v h="$host" '$1 == h { print $2 }' "$TMP/urls" | sort -u | paste -sd' ' -)"
   if [[ -n "$urls" ]]; then
     log "up: live on $host: $urls"
+    up_report "$urls"
+    if [[ "${FREELUNCH_VERIFY:-1}" != 0 ]]; then
+      # shellcheck disable=SC2086 # the addresses are words
+      verify_urls "${FREELUNCH_VERIFY_PATH:-}" "${FREELUNCH_VERIFY_TIMEOUT:-180}" $urls || die "up: deployed to $host, but the app doesn't answer. Its logs say why; the run fails so a broken app isn't taken for a live one"
+    fi
   elif is_platform "$chosen"; then
     log "up: $host is running the app, but gave no public address"
   else
@@ -3151,6 +3158,12 @@ cmd_up() {
     [[ ${#others[@]} -eq 1 ]] || verb=run
     log "up: ${others[*]} still $verb the app, unused now. freelunch destroy ${others[*]} removes them"
   fi
+}
+
+# up_report <urls>: what a workflow can pick up: the step's output and its summary
+up_report() {
+  [[ -z "${GITHUB_OUTPUT:-}" ]] || printf 'urls=%s\n' "$1" >> "$GITHUB_OUTPUT"
+  [[ -z "${GITHUB_STEP_SUMMARY:-}" ]] || printf '### freelunch\n\nLive at: %s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
 }
 
 # report_url <host> <url> [what]: say where an app is served, and keep it for what ends the run
@@ -5336,6 +5349,60 @@ cmd_agent() {
   done
 }
 
+# --- verify ----------------------------------------------------------------------------
+
+# verify_url <url> <path> <timeout seconds>: wait until the address answers. With a path
+# (the app's health route) the answer has to be a 2xx or 3xx; without one, any answer below 500
+# does: an API with nothing at / still answers 404 when it runs. On failure the reason says
+# what the last try saw.
+verify_url() {
+  local url="${1%/}" path="$2" timeout="$3" interval="${FREELUNCH_VERIFY_INTERVAL:-5}" start code last="" now
+  start="$(date +%s)"
+  while :; do
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$url$path" 2>"$TMP/verify.err")" || code="000"
+    if [[ ! "$code" =~ ^[0-9]{3}$ || "$code" == "000" ]]; then
+      last="no answer ($(sed -e 's/^curl: ([0-9]*) //' "$TMP/verify.err" | head -1))"
+    else
+      last="HTTP $code"
+      if [[ -n "$path" ]]; then [[ "$code" =~ ^[23] ]] && return 0
+      else [[ "$code" -lt 500 ]] && return 0
+      fi
+    fi
+    now="$(date +%s)"
+    if (( now - start >= timeout )); then
+      log "verify: $url$path: $last after ${timeout}s"
+      return 1
+    fi
+    sleep "$interval"
+  done
+}
+
+# verify_urls <path> <timeout> <url...>: every address has to answer; says which one doesn't
+verify_urls() {
+  local path="$1" timeout="$2" u bad=0; shift 2
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  for u in "$@"; do
+    if verify_url "$u" "$path" "$timeout"; then log "verify: $u$path answers"; else bad=1; fi
+  done
+  return $bad
+}
+
+cmd_verify() {
+  local path="${FREELUNCH_VERIFY_PATH:-}" timeout="${FREELUNCH_VERIFY_TIMEOUT:-180}" urls=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --path)    [[ $# -gt 1 ]] || die "verify: --path takes the app's health route"; path="$2"; shift ;;
+      --timeout) [[ $# -gt 1 && "$2" =~ ^[0-9]+$ ]] || die "verify: --timeout takes seconds"; timeout="$2"; shift ;;
+      -*)        die "verify: unknown option $1" ;;
+      *)         urls+=("$1") ;;
+    esac
+    shift
+  done
+  [[ ${#urls[@]} -gt 0 ]] || die "verify: give the address to check (freelunch up prints it)"
+  [[ -z "$path" || "$path" == /* ]] || die "verify: the path starts with / (not '$path')"
+  verify_urls "$path" "$timeout" "${urls[@]}" || die "verify: the app doesn't answer. The deploy finished, so the app itself is the problem: check its logs (freelunch status shows where it runs)"
+}
+
 # --- state ----------------------------------------------------------------------------
 
 # state_where <stack>: how the stack's state here and the store's copy stand
@@ -6526,6 +6593,7 @@ main() {
     status)               cmd_status ;;
     doctor)               cmd_doctor ;;
     check)                cmd_check ;;
+    verify)               cmd_verify "$@" ;;
     agent)                cmd_agent "$@" ;;
     trust)                cmd_trust "$@" ;;
     hybrid)               cmd_hybrid ;;
