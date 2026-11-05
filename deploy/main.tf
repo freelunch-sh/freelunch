@@ -44,6 +44,7 @@ locals {
       compose  = abspath(startswith(pathexpand(a.compose), "/") ? pathexpand(a.compose) : "${var.config_dir}/${a.compose}")
       env_file = a.env_file == null ? null : abspath(startswith(pathexpand(a.env_file), "/") ? pathexpand(a.env_file) : "${var.config_dir}/${a.env_file}")
       bucket   = a.bucket
+      plan     = a.plan
     }
   }
 
@@ -232,6 +233,49 @@ locals {
     ]
   ])))
 
+  # A Compose memory limit (deploy.resources.limits.memory or mem_limit) as text: 512M, 1g, 256mb.
+  memory_text = {
+    for name, s in local.service : name => trimspace(tostring(try(s.deploy.resources.limits.memory, try(s.mem_limit, ""))))
+  }
+
+  # ... and in MB; null without a limit.
+  memory_mb = {
+    for name, t in local.memory_text : name => (
+      length(regexall("^([0-9.]+)\\s*([kKmMgG]?)[bB]?$", t)) == 0 ? null :
+      ceil(tonumber(regexall("^([0-9.]+)\\s*([kKmMgG]?)[bB]?$", t)[0][0]) * {
+        "" = 1 / 1048576, "k" = 1 / 1024, "m" = 1, "g" = 1024
+      }[lower(regexall("^([0-9.]+)\\s*([kKmMgG]?)[bB]?$", t)[0][1])])
+    )
+  }
+
+  # The plan of each platform app: its own, else the smallest plan that holds the memory limit
+  # in its Compose file, else the stack's. A limit no plan holds gets null and is reported.
+  app_plan = {
+    for name, a in local.platform_apps : name => (
+      a.plan != null ? a.plan :
+      try(local.memory_mb[name], null) == null || try(local.platforms[a.host].pricing.plan_memory, null) == null ? local.platforms[a.host].size :
+      try([for p in sort([for k, m in local.platforms[a.host].pricing.plan_memory : format("%09d|%s", m, k) if m >= local.memory_mb[name]]) : split("|", p)[1]][0], null)
+    )
+  }
+
+  memory_problems = sort(compact([
+    for name, a in local.platform_apps : (
+      local.app_plan[name] == null
+      ? "${name}: its memory limit (${local.memory_mb[name]} MB) is more than any plan of ${a.host} has. Plans: ${join(", ", [for k, m in local.platforms[a.host].pricing.plan_memory : "${k} ${m} MB"])}"
+      : ""
+    )
+  ]))
+
+  # A plan of an app's own has to be one the account may pick, and one with a known price.
+  plan_problems = sort(compact(flatten([
+    for name, a in local.platform_apps : [
+      try(local.app_plan[name], null) == null || local.app_plan[name] == local.platforms[a.host].size ? "" :
+      try(local.platforms[a.host].pricing.plans, null) == null ? "${name}: ${a.host} has no plans to choose from, so plan = \"${local.app_plan[name]}\" means nothing there" :
+      !contains(keys(local.platforms[a.host].pricing.plans), local.app_plan[name]) ? "${name}: ${local.app_plan[name]} is not a plan freelunch knows on ${a.host} (known: ${join(", ", sort(keys(local.platforms[a.host].pricing.plans)))})" :
+      local.platforms[a.host].pricing.plans_allowed != null && !contains(local.platforms[a.host].pricing.plans_allowed, local.app_plan[name]) ? "${name}: ${local.app_plan[name]} is outside the free plan (${join(", ", local.platforms[a.host].pricing.plans_allowed)}). Set acknowledge_billable_resources = true in that stack to use it" : ""
+    ]
+  ])))
+
   # Every service counts against a free plan's limit, cloudflared too.
   too_many = sort([
     for h, t in local.targets : "${h} runs ${t.tunnel ? length(t.apps) + 1 : length(t.apps)} services (${join(", ", concat(sort(keys(t.apps)), t.tunnel ? ["cloudflared"] : []))}), and its free plan has ${local.platforms[h].max_services}"
@@ -242,7 +286,7 @@ locals {
   # and each named volume at volume_size, billed per GB.
   costs = {
     for h, t in local.targets : h => {
-      services   = length(t.apps) * local.platforms[h].pricing.service + (t.tunnel ? local.platforms[h].pricing.tunnel : 0)
+      services   = sum(concat([0], [for name, a in t.apps : try(local.platforms[h].pricing.plans[coalesce(try(local.app_plan[name], null), local.platforms[h].size)], local.platforms[h].pricing.service)])) + (t.tunnel ? local.platforms[h].pricing.tunnel : 0)
       volume_gb  = sum(concat([0], [for name, a in t.apps : length(try(local.volumes[name], []))])) * try(local.platforms[h].volume_size, 0) / 1024
       budget     = local.platforms[h].pricing.budget
       per_volume = local.platforms[h].pricing.volume_gb

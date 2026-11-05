@@ -35,5 +35,7 @@ limits:
   # Dollars a month, for deploy's estimate: the Sandbox's resources, each plan, and a GB of
   # volume. deploy stops when the services and volumes would cost more than the credit.
   monthly_credit: 20
-  plan_prices: { nf-compute-10: 2.70, nf-compute-20: 5.40 }
+  plan_prices: { nf-compute-10: 2.70, nf-compute-20: 5.40, nf-compute-50: 12.00 } # nf-compute-50 from a user report, not checked against /v1/plans
+  # Memory of each plan in MB, to map a Compose memory limit to the smallest plan that holds it.
+  plan_memory: { nf-compute-10: 256, nf-compute-20: 512, nf-compute-50: 1024 }
   volume_gb_price: 0.11657

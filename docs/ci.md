@@ -311,3 +311,14 @@ AWS, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; for Azure, a service princ
 | A run waits for minutes before it starts, or comes hours late | GitHub starts scheduled runs late when it is busy, now and then not at all; the next one goes on |
 | `three runs in a row failed, so freelunch-wait.yml is off` | Fix what the runs' logs show, then `freelunch ci wait oci` turns it on again with the same approval |
 | `encrypting state takes OpenTofu` | `FREELUNCH_TF` isn't OpenTofu: the message says what its `version` printed. With Terraform, set `FREELUNCH_STATE_PASSPHRASE=none` |
+
+## Hardening
+
+A workflow's secrets are readable by any code that runs in the job, so the pipeline limits
+which code that is. `freelunch harden` (needs `gh`, signed in as an admin of the repository)
+makes a `production` environment that only `main` deploys from, with `--reviewer <login>` only
+after that person approves, and writes `.github/CODEOWNERS` for the workflows and `.freelunch/`.
+Then, by hand: move each secret to that environment (Settings > Environments > production), and
+turn on the ruleset that requires code-owner review for `main`. `freelunch check`, which pull
+requests run, fails a workflow that uses `pull_request_target` or `permissions: write-all` and
+warns about third-party actions named by a tag instead of a commit.

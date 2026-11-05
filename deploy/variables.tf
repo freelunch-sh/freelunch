@@ -13,6 +13,8 @@ variable "apps" {
     compose  = string
     env_file = optional(string)
     bucket   = optional(string)
+    # Compute plan of the app on a container platform; without it the stack's plan.
+    plan = optional(string)
   }))
   default = {}
 

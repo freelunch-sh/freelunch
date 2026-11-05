@@ -9,7 +9,7 @@ output "targets" {
 
   precondition {
     condition     = length(local.missing_files) == 0
-    error_message = "Files listed in apps.tfvars do not exist: ${join(", ", local.missing_files)}."
+    error_message = "Files listed in apps.tfvars do not exist: ${join(", ", local.missing_files)}. If this runs in CI, your FREELUNCH_BUNDLE is probably out of date: run freelunch ci secrets on the machine that has the files."
   }
 
   precondition {
@@ -29,15 +29,25 @@ output "platforms" {
       volume_size = try(local.platforms[h].volume_size, null)
       # What only this platform needs (Cloud Run's label and instance size, say).
       settings = try(local.platforms[h].settings, {})
-      cost          = try(local.costs[h].services + local.costs[h].volume_gb * local.costs[h].per_volume, null)
-      budget        = try(local.costs[h].budget, null)
-      services      = { for name, a in t.apps : name => try(local.specs[name], null) }
+      cost     = try(local.costs[h].services + local.costs[h].volume_gb * local.costs[h].per_volume, null)
+      budget   = try(local.costs[h].budget, null)
+      services = { for name, a in t.apps : name => try(merge(local.specs[name], { plan = coalesce(try(local.app_plan[name], null), local.platforms[h].size) }), null) }
     } if t.kind == "platform"
   }
 
   precondition {
     condition     = length(local.platform_problems) == 0
     error_message = "These apps can't run on a container platform as they are:\n- ${join("\n- ", local.platform_problems)}"
+  }
+
+  precondition {
+    condition     = length(local.memory_problems) == 0
+    error_message = "Memory limits don't fit a plan:\n- ${join("\n- ", local.memory_problems)}"
+  }
+
+  precondition {
+    condition     = length(local.plan_problems) == 0
+    error_message = "Plans in apps.tfvars don't fit:\n- ${join("\n- ", local.plan_problems)}"
   }
 
   precondition {

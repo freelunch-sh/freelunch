@@ -15,7 +15,7 @@ run "free_sandbox_by_default" {
       volume_size  = 6144
       tunnel       = true
       max_services = 2
-      pricing      = { budget = 20, service = 5.4, tunnel = 2.7, volume_gb = 0.11657 }
+      pricing      = { budget = 20, service = 5.4, tunnel = 2.7, volume_gb = 0.11657, plans = { nf-compute-10 = 2.7, nf-compute-20 = 5.4, nf-compute-50 = 12 }, plans_allowed = ["nf-compute-10", "nf-compute-20"] }
     }
     error_message = "The default target is one Northflank project on the biggest free plan, with two services and the smallest volumes Northflank takes."
   }

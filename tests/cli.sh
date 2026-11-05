@@ -268,6 +268,10 @@ case "$1 $2" in
     mkdir -p "$FAKE_GH" && cat > "$FAKE_GH/$3" ;;
   "workflow enable"|"workflow disable"|"workflow run") ;;
   "run list") echo "${FAKE_RUNS:-[]}" ;;
+  "api users/"*) echo 4242 ;;
+  "api -X")
+    cat > /dev/null
+    if [[ "${FAKE_GH_DENY:-}" == 1 && "$3" == "PUT" ]]; then echo "HTTP 403" >&2; exit 1; fi ;;
   *) exit 1 ;;
 esac
 EOF
@@ -445,6 +449,7 @@ case "$url" in
     volume="${volume%%/*}"
     vf="$nf/volumes/$project/$volume.json"
     case "$method $path" in
+      "GET /plans") respond 200 '{"data":{"plans":[{"id":"nf-compute-10"},{"id":"nf-compute-20"},{"id":"nf-compute-50"}]}}' ;;
       "GET /regions") respond 200 '{"data":{"regions":[{"id":"europe-west"},{"id":"us-central"}]}}' ;;
       "GET /projects/"*/volumes\?*)
         respond 200 "$(for f in "$nf/volumes/$project"/*.json; do [[ -f "$f" ]] && jq -c '. + {id: .name}' "$f"; done | jq -sc '{data: .}')" ;;
@@ -475,8 +480,19 @@ case "$url" in
       "GET /projects/"*/services/*/containers)
         service="${path%/containers}"
         service="${service##*/}"
-        if listed "$service" "${FAKE_NF_STOPPED:-}"; then state=TASK_FAILED; else state=TASK_RUNNING; fi
+        if listed "$service" "${FAKE_NF_STOPPED:-}"; then state=TASK_FAILED
+        elif listed "$service" "${FAKE_NF_STARTING:-}" && [[ ! -f "$nf/restarted-$service" ]]; then state=TASK_STARTING
+        else state=TASK_RUNNING; fi
         respond 200 "$(jq -nc --arg s "$service" --arg st "$state" '{data: {containers: [{name: ($s + "-7d9f4-x2k"), status: $st}]}}')" ;;
+      "GET /projects/"*/services/*/logs\?*)
+        service="${path%/logs\?*}"
+        service="${service##*/}"
+        respond 200 "$(jq -nc --arg s "$service" '{data: [{ts: "2026-11-05T10:00:00Z", log: ($s + " line one")}, {ts: "2026-11-05T10:00:01Z", log: ($s + " line two")}]}')" ;;
+      "POST /projects/"*/services/*/restart)
+        service="${path%/restart}"
+        service="${service##*/}"
+        touch "$nf/restarted-$service"
+        respond 200 '{"data":{}}' ;;
       "GET /projects/"*/services/*)
         service="${path##*/}"
         if [[ -f "$nf/services/$project/$service.json" ]]; then
@@ -2489,6 +2505,21 @@ test_deploy_to_northflank_fails_loudly() {
   contains "$out" "northflank: cloudflared is still in_progress after 0s"
   if out="$(GHCR_TOKEN=x FAKE_NF_STOPPED=api FREELUNCH_DEPLOY_TIMEOUT=0 nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
   contains "$out" "northflank: api is still out, but no container runs (task_failed)"
+  # --image deploys another tag once, without touching the Compose file.
+  out="$(GHCR_TOKEN=x FREELUNCH_CHECK_IMAGES=0 nf_in "$p" deploy --dry-run --image api=2.0.0 2>&1)"
+  contains "$out" "api runs ghcr.io/me/api:2.0.0 this time"
+  contains "$out" "ghcr.io/me/api:2.0.0"
+  if out="$(GHCR_TOKEN=x nf_in "$p" deploy --dry-run --image nothing=1 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "no app of that name runs on a container platform"
+  # A container stuck starting names the restart command; with FREELUNCH_DEPLOY_RESTART_STUCK it is restarted once.
+  rm -f "$p/nf/restarted-"*
+  if out="$(GHCR_TOKEN=x FAKE_NF_STARTING=api FREELUNCH_DEPLOY_TIMEOUT=0 nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "/projects/freelunch/services/api/restart"
+  contains "$out" "freelunch logs api"
+  fails grep -q '^nf POST .*/restart' "$p/fake.log"
+  out="$(GHCR_TOKEN=x FAKE_NF_STARTING=api FREELUNCH_DEPLOY_RESTART_STUCK=1 FREELUNCH_DEPLOY_TIMEOUT=12 nf_in "$p" deploy 2>&1)"
+  contains "$out" "api has made no progress in 6s; restarting it once"
+  equals "$(grep -c '^nf POST /projects/freelunch/services/api/restart' "$p/fake.log")" 1
   # A login Northflank turns down says which field and why, without the password.
   rm -f "$p/nf/registries/"*.json
   if out="$(GHCR_TOKEN=ghp_secret-token FAKE_NF_ECHO_PASSWORD=1 nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
@@ -2649,7 +2680,13 @@ test_status_and_doctor_ask_northflank() {
   out="$(FAKE_NF_STOPPED=cloudflared nf_in "$p" status)"
   contains "$out" "$(printf 'Platforms\n  northflank-main project freelunch in europe-west  amd64  nf-compute-20')"
   contains "$out" "$(printf 'Apps on northflank-main (Northflank project freelunch)\n  api                  running\n  cloudflared          not running (task_failed)')"
-  contains "$out" "$(printf 'Tunnels\n  northflank-main not checked without CLOUDFLARE_API_TOKEN')"
+  contains "$out" "      | cloudflared line two"
+  lacks "$out" "| api line"
+  out="$(nf_in "$p" logs api --lines 1)"
+  equals "$out" "api line two"
+  if out="$(nf_in "$p" logs nothing 2>&1)"; then echo "logs should have failed"; return 1; fi
+  contains "$out" "nothing doesn't run on a Northflank project"
+  contains "$(FAKE_NF_STOPPED=cloudflared nf_in "$p" status)" "$(printf 'Tunnels\n  northflank-main not checked without CLOUDFLARE_API_TOKEN')"
   out="$(TEST_NF_TOKEN='' nf_in "$p" status)"
   contains "$out" "  not asked without NORTHFLANK_API_TOKEN"
   # doctor: the region, the token and the project.
@@ -2658,6 +2695,11 @@ test_status_and_doctor_ask_northflank() {
   contains "$out" "  ok    NORTHFLANK_API_TOKEN signs in"
   contains "$out" "  ok    the project freelunch is there"
   contains "$out" "  ok    ghcr.io/me/api:1.0.0 has a linux/amd64 build for northflank-main"
+  contains "$out" "  ok    plan nf-compute-20 exists (about \$5.40 a month)"
+  sed -i.bak 's|env_file = "api.env"|env_file = "api.env", plan = "nf-compute-50"|' "$p/.freelunch/apps.tfvars"
+  out="$(GHCR_TOKEN=x nf_in "$p" doctor 2>&1 || true)"
+  contains "$out" "plan nf-compute-50 exists (about \$12.00 a month), but a free Sandbox may not be allowed to pick it"
+  mv "$p/.freelunch/apps.tfvars.bak" "$p/.freelunch/apps.tfvars"
   out="$(GHCR_TOKEN=x TEST_NF_TOKEN=wrong nf_in "$p" doctor 2>&1 || true)"
   contains "$out" "  fail  Northflank doesn't take NORTHFLANK_API_TOKEN (401): Invalid token"
   sed -i.bak 's/^region = .*/region = "mars-north"/' "$p/.freelunch/northflank/terraform.tfvars"
@@ -3279,6 +3321,137 @@ FAKE
   contains "$out" "give the address to check"
   if out="$(run_verify "200" https://x.example --path healthz 2>&1)"; then echo "should have failed"; return 1; fi
   contains "$out" "starts with /"
+}
+
+# A run with a secret missing stops first and names it, with the page to add it on.
+test_ci_needs_names_the_missing_secrets() {
+  local p="$WORK/needs" out
+  doctor_project "$p"
+  state_store "$p"
+  if out="$(cd "$p" && HOME="$p/home" GITHUB_REPOSITORY=me/shop CLOUDFLARE_API_TOKEN=x "$CLI" ci needs 2>&1)"; then echo "should have failed"; return 1; fi
+  contains "$out" "https://github.com/me/shop/settings/secrets/actions/new"
+  contains "$out" "FREELUNCH_OCI_CONFIG:"
+  contains "$out" "FREELUNCH_OCI_KEY:"
+  contains "$out" "FREELUNCH_SSH_PRIVATE_KEY:"
+  lacks "$out" "CLOUDFLARE_API_TOKEN:"
+  # The value never appears.
+  lacks "$out" "=x"
+  # With all of them set, nothing is said; the bundle covers them too.
+  out="$(cd "$p" && HOME="$p/home" CLOUDFLARE_API_TOKEN=x FREELUNCH_OCI_CONFIG=a FREELUNCH_OCI_KEY=b FREELUNCH_SSH_PRIVATE_KEY=c FREELUNCH_STATE_PASSPHRASE=d GHCR_TOKEN=e "$CLI" ci needs 2>&1)"
+  equals "$out" ""
+  out="$(cd "$p" && HOME="$p/home" FREELUNCH_BUNDLE=anything "$CLI" ci needs 2>&1)"
+  equals "$out" ""
+  # The action runs it for every command but the ones that need no secret.
+  grep -q 'check|verify|help|version|agent) ;;' "$ROOT/action.yml"
+  grep -q '"\$freelunch" ci needs' "$ROOT/action.yml"
+}
+
+# ci init --pipeline writes the template with this project's pin, platforms and secrets.
+test_ci_init_pipeline_fills_in_the_template() {
+  local p="$WORK/pipeline" w
+  doctor_project "$p"
+  state_store "$p"
+  mkdir -p "$p/.freelunch" && echo "v0.1.0" > "$p/.freelunch/version"
+  ci_in "$p" ci init --pipeline >/dev/null 2>&1
+  w="$p/.github/workflows/deploy.yml"
+  grep -q 'freelunch-sh/freelunch@v0.1.0' "$w"
+  fails grep -q 'FREELUNCH_PIN' "$w"
+  grep -q 'platforms: linux/amd64,linux/arm64' "$w"
+  fails grep -q 'NORTHFLANK_API_TOKEN' "$w"
+  equals "$(grep -c 'FREELUNCH_OCI_KEY: ${{ secrets.FREELUNCH_OCI_KEY }}' "$w")" "2"
+  equals "$(grep -c 'IMAGE_TAG:' "$w")" "2"
+  python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$w"
+  if command -v actionlint >/dev/null; then actionlint "$w"; fi
+  if ci_in "$p" ci init --pipeline --bundle >/dev/null 2>&1; then echo "should have failed"; return 1; fi
+}
+
+# build detect names the stack, port and start command; build init writes a Dockerfile that
+# uses them and never overwrites one.
+test_build_detects_the_stack_and_writes_a_dockerfile() {
+  local d="$WORK/build" out
+  mkdir -p "$d"
+  mk() { rm -rf "$d/app"; mkdir -p "$d/app"; local f; for f in "$@"; do mkdir -p "$d/app/$(dirname "$f")"; echo '{}' > "$d/app/$f"; done; }
+  mk package.json; echo '{"scripts":{"start":"node server.js"}}' > "$d/app/package.json"
+  out="$(cd "$d/app" && "$CLI" build detect 2>&1)"
+  contains "$out" "stack: node"; contains "$out" "start: npm start"
+  (cd "$d/app" && "$CLI" build init >/dev/null 2>&1)
+  grep -qx 'CMD \["npm", "start"\]' "$d/app/Dockerfile"
+  grep -qx 'USER node' "$d/app/Dockerfile"
+  grep -qx 'EXPOSE 3000' "$d/app/Dockerfile"
+  # Never overwrites.
+  echo mine > "$d/app/Dockerfile"
+  out="$(cd "$d/app" && "$CLI" build init 2>&1)"
+  contains "$out" "kept"; equals "$(cat "$d/app/Dockerfile")" "mine"
+  mk requirements.txt; echo "fastapi" > "$d/app/requirements.txt"
+  contains "$(cd "$d/app" && "$CLI" build detect 2>&1)" "start: uvicorn main:app --host 0.0.0.0 --port 8000"
+  echo "Flask==3" > "$d/app/requirements.txt"
+  contains "$(cd "$d/app" && "$CLI" build detect 2>&1)" "start: gunicorn --bind 0.0.0.0:8000 app:app"
+  mk go.mod;        contains "$(cd "$d/app" && "$CLI" build detect 2>&1)" "stack: go"
+  mk pom.xml;       contains "$(cd "$d/app" && "$CLI" build detect 2>&1)" "stack: java"
+  mk Gemfile;       contains "$(cd "$d/app" && "$CLI" build detect 2>&1)" "stack: ruby"
+  mk composer.json; contains "$(cd "$d/app" && "$CLI" build detect 2>&1)" "stack: php"
+  mk index.html;    contains "$(cd "$d/app" && "$CLI" build detect 2>&1)" "port: 8080"
+  (cd "$d/app" && "$CLI" build init >/dev/null 2>&1)
+  grep -q 'nginx-unprivileged' "$d/app/Dockerfile"
+  # Every stack's Dockerfile is a FROM, a non-root user and a CMD or a base that has one.
+  for f in go.mod pom.xml Gemfile composer.json requirements.txt; do
+    mk "$f"; (cd "$d/app" && "$CLI" build init >/dev/null 2>&1)
+    grep -q '^FROM ' "$d/app/Dockerfile"
+    grep -qE '^(USER |FROM gcr.io/distroless/static-debian12:nonroot)' "$d/app/Dockerfile"
+    grep -q '^CMD ' "$d/app/Dockerfile"
+  done
+  # Nothing recognisable is said plainly.
+  mk README.md
+  if out="$(cd "$d/app" && "$CLI" build init 2>&1)"; then echo "should have failed"; return 1; fi
+  contains "$out" "can't tell what the app"
+  contains "$out" "freelunch build prompt"
+  out="$(cd "$d/app" && "$CLI" build prompt)"
+  contains "$out" "listen on the port in the PORT environment variable"
+  contains "$out" "linux/amd64 and linux/arm64"
+  absent "$d/app/Dockerfile"
+}
+
+# check reads the workflows for what hands secrets to code that isn't yours.
+test_check_lints_the_workflows() {
+  local p="$WORK/lint" out w
+  doctor_project "$p"
+  state_store "$p"
+  ci_in "$p" ci init --pipeline >/dev/null 2>&1
+  out="$(cd "$p" && HOME="$p/home" "$CLI" check 2>&1)"
+  contains "$out" "The config is complete."
+  lacks "$out" "pull_request_target"
+  w="$p/.github/workflows/bad.yml"
+  mkdir -p "$p/.github/workflows"
+  printf 'on:\n  pull_request_target:\n    types: [opened]\npermissions: write-all\njobs:\n  x:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: someone/their-action@v1\n      - uses: other/pinned@0123456789abcdef0123456789abcdef01234567 # v2\n      - uses: actions/checkout@v7\n' > "$w"
+  if out="$(cd "$p" && HOME="$p/home" "$CLI" check 2>&1)"; then echo "check should have failed"; return 1; fi
+  contains "$out" "bad.yml runs on pull_request_target"
+  contains "$out" "bad.yml has permissions: write-all"
+  contains "$out" "someone/their-action@v1 is a tag a maintainer can move"
+  lacks "$out" "other/pinned"
+  lacks "$out" "actions/checkout"
+}
+
+# harden makes the production environment, limited to the branch and its reviewer, and
+# CODEOWNERS; and says what it needs when GitHub refuses.
+test_harden_makes_the_production_environment() {
+  local p="$WORK/harden" out
+  doctor_project "$p"
+  out="$(ci_in "$p" harden --reviewer alice 2>&1)"
+  contains "$out" "environment production of me/shop deploys only from main, after alice approves"
+  grep -q '^gh api -X PUT repos/me/shop/environments/production --input -$' "$p/fake.log"
+  grep -q '^gh api -X POST repos/me/shop/environments/production/deployment-branch-policies --input -$' "$p/fake.log"
+  grep -q '^gh api users/alice' "$p/fake.log"
+  grep -qx '/.github/workflows/ @me' "$p/.github/CODEOWNERS"
+  grep -qx '/.freelunch/        @me' "$p/.github/CODEOWNERS"
+  # CODEOWNERS isn't overwritten.
+  echo "mine" > "$p/.github/CODEOWNERS"
+  ci_in "$p" harden >/dev/null 2>&1
+  equals "$(cat "$p/.github/CODEOWNERS")" "mine"
+  # Without admin rights, it says so and what to do by hand.
+  if out="$(FAKE_GH_DENY=1 ci_in "$p" harden 2>&1)"; then echo "should have failed"; return 1; fi
+  contains "$out" "needs admin rights on me/shop"
+  if out="$(ci_in "$p" harden --bogus 2>&1)"; then echo "should have failed"; return 1; fi
+  contains "$out" "unknown argument --bogus"
 }
 
 # ci init writes a workflow that waits for capacity, every half hour in a private repository
