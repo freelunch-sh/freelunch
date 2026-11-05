@@ -394,6 +394,22 @@ Service tokens
   backend        expires on 2027-10-23 14:02, in 365 days
 ```
 
+## No domain yet
+
+A domain is optional. Without a `cloudflare` stack, `up` doesn't tunnel anything, and a
+container platform serves the app at its own address, which `up` and `deploy` print:
+
+| Target | Address without a domain |
+|---|---|
+| Northflank | its ports are made public at `https://<port>--<service>--<project>--<team>.code.run` |
+| Cloud Run | the service's `*.run.app` address |
+| Scaleway | the container's `*.functions.fnc.<region>.scw.cloud` address |
+| A VM (Oracle, GCP, AWS, Azure) | none: a VM needs a tunnel, so `up` says so and points to `freelunch setup --domain <name>` |
+
+Add a domain later with `freelunch setup --domain myapp.example.org`: the Cloudflare stack
+routes the app, and Northflank's ports go private again behind the tunnel. The Northflank
+address comes from the service's `dns` field, which isn't checked against a live account yet.
+
 ## Deploy wherever there is room: `freelunch up`
 
 Steps 3 to 6 are what `freelunch up` does in one command, and it picks the target for you.

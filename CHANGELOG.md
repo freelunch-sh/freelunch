@@ -12,6 +12,9 @@ release can change commands and the project layout.
 
 ### Added
 
+- **No domain needed.** Without a `cloudflare` stack, a Northflank app's ports are public at
+  the address Northflank gives them, and `up` and `deploy` print the address of a Northflank,
+  Cloud Run or Scaleway app. For a VM, `up` says it needs a domain.
 - **State in a branch of your own repository.** `freelunch state init git` keeps each stack's
   state, encrypted by OpenTofu, in an orphan branch (`freelunch-state`) of the project's repo, so
   CI needs no storage account. `ci init` gives the workflows `contents: write` for it, and
