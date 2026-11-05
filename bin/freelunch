@@ -37,6 +37,7 @@ on_exit() {
   [[ -z "$WAIT" ]] || end_wait stopped "${DIED:-the CLI stopped (exit status $1)}"
   # What this run applied or destroyed goes to the state store, also when it failed halfway.
   [[ "$STATE_DIRTY" == " " ]] || push_dirty
+  git_store_close
   [[ -z "$TMP" ]] || rm -rf "$TMP"
 }
 
@@ -682,8 +683,15 @@ state_init() {
   [[ ! -f "$dir/ready" ]] || return 0
   cfg="$(state_config)"
   mkdir -p "$dir"
-  printf 'terraform {\n  backend "%s" {}\n}\n' "$(state_backend "$cfg")" > "$dir/main.tf"
-  sed "s/{stack}/$s/g" "$cfg" > "$dir/backend.tfbackend"
+  if [[ "$(state_backend "$cfg")" == "git" ]]; then
+    # The git store is the local backend over a worktree of the state branch.
+    git_store_open
+    printf 'terraform {\n  backend "local" {}\n}\n' > "$dir/main.tf"
+    printf 'path = "%s/%s.tfstate"\n' "$GIT_STORE" "$s" > "$dir/backend.tfbackend"
+  else
+    printf 'terraform {\n  backend "%s" {}\n}\n' "$(state_backend "$cfg")" > "$dir/main.tf"
+    sed "s/{stack}/$s/g" "$cfg" > "$dir/backend.tfbackend"
+  fi
   if ! state_try "$s" "$dir/init.out" init -input=false -no-color -reconfigure -backend-config="$dir/backend.tfbackend"; then
     state_error "$(cat "$dir/init.out" "$dir/init.out.err")"
     return 1
@@ -800,6 +808,7 @@ sync_push() {
     # Some backends raise the serial of what they push, so the copy here becomes the store's.
     pushed="$TMP/state/$s.pushed"
     if state_try "$s" "$pushed" state pull && [[ -n "$(state_id "$pushed")" ]]; then take_state "$s" "$pushed"; else echo "$here" > "$file.synced"; fi
+    if [[ "$(state_backend "$(state_config)")" == "git" ]]; then git_store_save "$s" || return 1; fi
     log "$s: copied the state to the store (serial $(state_id "$file" | cut -d' ' -f2))"
     return 0
   fi
@@ -2902,10 +2911,8 @@ cmd_setup() {
 
 # setup_ci <first target>: a state store, the workflow and the secret, which a push needs
 setup_ci() {
-  if [[ -z "$(state_config)" ]]; then
-    if [[ "$1" == oci ]]; then cmd_state init oci
-    else die "setup: CI needs the project's state somewhere it can reach: freelunch state init r2 (or b2, gitlab), fill in what it says, then run freelunch setup --ci again"; fi
-  fi
+  # The state in a branch of the repository needs no account; a store the project has stays.
+  if [[ -z "$(state_config)" ]]; then cmd_state init git; fi
   cmd_state push
   cmd_ci init github
   cmd_ci secrets
@@ -5253,7 +5260,7 @@ cmd_state() {
     esac
   done
   cfg="$(state_config)"
-  [[ -n "$cfg" ]] || die "state: this project keeps its state on this machine only. freelunch state init oci (or r2, b2, gitlab) keeps a copy where CI and your other machines reach it (docs/ci.md#1-keep-the-state-in-a-store)"
+  [[ -n "$cfg" ]] || die "state: this project keeps its state on this machine only. freelunch state init git (or oci, r2, b2, gitlab) keeps a copy where CI and your other machines reach it (docs/ci.md#1-keep-the-state-in-a-store)"
   # Pushing over a copy that isn't encrypted yet has to read it first.
   if [[ "$sub" == "push" && -n "$force" ]]; then state_setup fallback; else state_setup; fi
   if [[ ${#stacks[@]} -eq 0 ]]; then while IFS= read -r s; do stacks+=("$s"); done < <(project_stacks); fi
@@ -5470,15 +5477,96 @@ EOF
   [[ -n "$path" ]] || log "the origin remote isn't on gitlab.com, so put the project's ID (Settings > General) in the file"
 }
 
-# state_init_store <oci|r2|b2|gitlab>: a store for the project's state:
+# --- state in the project's own repository ----------------------------------------------
+
+# state.git.tfbackend keeps each stack's state, encrypted by OpenTofu, in a branch of the
+# project's own git repository (freelunch-state by default), so a project needs no account
+# at a storage service for CI. It is the local backend over a worktree of that branch: state
+# runs work on <worktree>/<stack>.tfstate, and a push to the store commits and pushes the
+# branch with the credentials the repository has (in GitHub Actions, the checkout's token,
+# which needs contents: write). The branch is an orphan, with the state files and nothing else.
+GIT_STORE=""   # the worktree of the state branch, once opened
+
+# git_store_conf <key> <default>: a setting of state.git.tfbackend
+git_store_conf() {
+  local v
+  v="$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$(state_config)" | head -1)"
+  echo "${v:-$2}"
+}
+
+# git_store_open: the worktree of the state branch in TMP, current with the remote's
+git_store_open() {
+  local root remote branch
+  [[ -z "$GIT_STORE" ]] || return 0
+  # Some state runs happen in subshells, which share the worktree through TMP.
+  if [[ -e "$TMP/gitstore/.git" ]]; then GIT_STORE="$TMP/gitstore"; return 0; fi
+  root="$(dirname "$PROJECT")"
+  remote="$(git_store_conf remote origin)"
+  branch="$(git_store_conf branch freelunch-state)"
+  git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || die "state: the git store keeps the state in this project's repository, and $(rel "$root") isn't one (git init, and add a remote)"
+  GIT_STORE="$TMP/gitstore"
+  if git -C "$root" fetch --quiet --depth=1 "$remote" "refs/heads/$branch" 2>"$TMP/gitstore.err"; then
+    git -C "$root" worktree add --quiet --detach "$GIT_STORE" FETCH_HEAD >/dev/null 2>&1 || die "state: can't check out the state branch $branch"
+  elif git -C "$root" ls-remote --exit-code --heads "$remote" "$branch" >/dev/null 2>&1; then
+    die "state: can't fetch the state branch $branch from $remote: $(head -3 "$TMP/gitstore.err")"
+  else
+    # No branch yet: the first push makes it, with no history of the code in it.
+    git -C "$root" worktree add --quiet --detach "$GIT_STORE" HEAD >/dev/null 2>&1 || die "state: the project's repository has no commit yet, so there is nothing to base the state branch on"
+    git -C "$GIT_STORE" checkout --quiet --orphan "$branch"
+    git -C "$GIT_STORE" rm -rfq . 2>/dev/null || true
+  fi
+}
+
+# git_store_save <stack>: commit the stack's state file in the worktree and push the branch.
+# A branch that moved meanwhile means another run is at the same state; nothing is merged.
+git_store_save() {
+  local s="$1" branch remote
+  branch="$(git_store_conf branch freelunch-state)"
+  remote="$(git_store_conf remote origin)"
+  git -C "$GIT_STORE" add -- "$s.tfstate"
+  if git -C "$GIT_STORE" diff --cached --quiet; then return 0; fi
+  git -C "$GIT_STORE" -c user.name=freelunch -c user.email=freelunch@users.noreply.github.com \
+    commit --quiet -m "state: $s" >/dev/null
+  if ! git -C "$GIT_STORE" push --quiet "$remote" "HEAD:refs/heads/$branch" 2>"$TMP/gitstore.err"; then
+    log "$s: couldn't push the state branch $branch to $remote: $(sed -n '1,3p' "$TMP/gitstore.err" | tr '\n' ' '). If it moved meanwhile, another run is at the same state: run this again"
+    return 1
+  fi
+}
+
+# git_store_close: remove the worktree, which TMP's removal would leave registered
+git_store_close() {
+  [[ -n "$TMP" && -n "$PROJECT" && -e "$TMP/gitstore/.git" ]] || return 0
+  git -C "$(dirname "$PROJECT")" worktree remove --force "$TMP/gitstore" >/dev/null 2>&1 || true
+  git -C "$(dirname "$PROJECT")" worktree prune >/dev/null 2>&1 || true
+  GIT_STORE=""
+}
+
+# state_store_git: state.git.tfbackend, and the .gitignore and .env a store needs
+state_store_git() {
+  [[ "$(tool_name)" == "tofu" ]] || die "state init git: the state goes into your repository, so it has to be encrypted, and that takes OpenTofu (FREELUNCH_TF=tofu)"
+  git -C "$(dirname "$PROJECT")" rev-parse --git-dir >/dev/null 2>&1 || die "state init git: $(rel "$(dirname "$PROJECT")") isn't a git repository (git init, commit, and add a remote)"
+  {
+    state_header git
+    cat <<'EOF'
+# The state is kept, encrypted, in a branch of this repository. The passphrase is
+# FREELUNCH_STATE_PASSPHRASE: in .freelunch/.env here, and a GitHub secret for the workflows,
+# which also need `permissions: contents: write`.
+branch = "freelunch-state"
+remote = "origin"
+EOF
+  } > "$PROJECT/state.git.tfbackend"
+  log "wrote $(rel "$PROJECT")/state.git.tfbackend: the state goes to the branch freelunch-state of this repository, encrypted"
+}
+
+# state_init_store <oci|r2|b2|gitlab|git>: a store for the project's state:
 # state.<backend>.tfbackend, and what it needs in .freelunch/.env
 state_init_store() {
   local store="${1:-}" cfg
   cfg="$(state_config)"
   [[ -z "$cfg" ]] || die "state init: $(rel "$cfg") is there already. Edit it, or remove it to start again"
   case "$store" in
-    oci|r2|b2|gitlab) ;;
-    *) die "state init: name a store: oci (Object Storage in the tenancy of your OCI host: 20 GB Always Free, nothing new to sign up for), r2 (Cloudflare R2), b2 (Backblaze B2) or gitlab (this GitLab project's own state)" ;;
+    oci|r2|b2|gitlab|git) ;;
+    *) die "state init: name a store: git (a branch of this repository, encrypted: nothing new to sign up for), oci (Object Storage in the tenancy of your OCI host: 20 GB Always Free), r2 (Cloudflare R2), b2 (Backblaze B2) or gitlab (this GitLab project's own state)" ;;
   esac
   need_tf
   command -v jq >/dev/null || die "jq is required for the state store"
@@ -5509,7 +5597,7 @@ SSH_KEY_BUNDLED=""
 # ci_ready: a project whose state is in a store, so that CI and this machine share it
 ci_ready() {
   [[ -n "$PROJECT" ]] || die "ci: run it in a project, where its .freelunch/ folder is (freelunch init makes one)"
-  [[ -n "$(state_config)" ]] || die "ci: CI and this machine need the state in one place first. freelunch state init oci (or r2, b2, gitlab) keeps a copy in a store both reach (docs/ci.md#1-keep-the-state-in-a-store)"
+  [[ -n "$(state_config)" ]] || die "ci: CI and this machine need the state in one place first. freelunch state init git (or oci, r2, b2, gitlab) keeps a copy in a store both reach (docs/ci.md#1-keep-the-state-in-a-store)"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
 }
 
@@ -5540,13 +5628,15 @@ EOF
 
 # github_workflows <project root>: the wait workflow and the one for every other command
 github_workflows() {
-  local base="$1" cron="11,41 * * * *" every="half hour" visibility trigger=""
+  local base="$1" cron="11,41 * * * *" every="half hour" visibility trigger="" contents=read
   local minutes=$'A run takes a minute or two. A public repository runs them for free; a private one on\n# GitHub Free has 2,000 minutes a month, about 20 days of runs every half hour.'
   visibility="$(cd "$base" && gh repo view --json visibility -q .visibility 2>/dev/null)" || visibility=""
   if [[ "$visibility" == "PUBLIC" ]]; then
     cron="4,19,34,49 * * * *" every="quarter of an hour" minutes="A run takes a minute or two, which a public repository runs for free."
   fi
   mkdir -p "$base/.github/workflows"
+  # A state kept in a branch of this repository is pushed by the jobs.
+  [[ "$(state_backend "$(state_config)")" != "git" ]] || contents="write"
   {
     cat <<EOF
 # Written by freelunch ci init. Waits for cloud capacity here instead of on your machine,
@@ -5564,7 +5654,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: $contents # write when the state is kept in a branch of this repository
   actions: write # to turn this workflow off when the wait is over
 
 # One attempt at a time. A run of freelunch.yml may go alongside: a deploy only reads the
@@ -5600,7 +5690,7 @@ on:$trigger
         default: up
 
 permissions:
-  contents: read
+  contents: $contents # write when the state is kept in a branch of this repository
 
 # One run at a time; a second waits for the first.
 concurrency:
@@ -5672,7 +5762,7 @@ ci_init() {
   esac
   printf '\nNext steps:\n' >&2
   local i=1
-  if [[ -z "$(state_config)" ]]; then echo "  $i. freelunch state init oci (or r2, b2, gitlab): the state where CI reaches it" >&2; i=$((i + 1)); fi
+  if [[ -z "$(state_config)" ]]; then echo "  $i. freelunch state init git (or oci, r2, b2, gitlab): the state where CI reaches it" >&2; i=$((i + 1)); fi
   if [[ "$where" == "github" ]]; then
     echo "  $i. freelunch ci secrets: what CI needs and git doesn't have, in the secret FREELUNCH_BUNDLE" >&2
     echo "  $((i + 1)). commit and push the workflows, then freelunch ci wait <stack> --plan <file> to wait for capacity there" >&2

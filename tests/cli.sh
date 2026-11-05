@@ -3118,7 +3118,7 @@ test_ci_init_writes_the_workflows() {
   grep -q "          run: \${{ inputs.run || 'up' }}" "$p/.github/workflows/freelunch.yml"
   grep -qx '    branches: \[main\]' "$p/.github/workflows/freelunch.yml"
   fails grep -q '^  workflow_run:' "$p/.github/workflows/freelunch.yml"
-  contains "$out" "freelunch state init oci (or r2, b2, gitlab)"
+  contains "$out" "freelunch state init git (or oci, r2, b2, gitlab)"
   if command -v actionlint >/dev/null; then actionlint "$wait" "$p/.github/workflows/freelunch.yml"; fi
   # A version that comes in two writes is still the same tool.
   rm -r "$p/.github"
@@ -3708,10 +3708,10 @@ test_setup_says_what_is_wrong() {
   # CI needs everything filled in first.
   if out="$(TEST_NO_HOME=1 setup_in "$p" --targets northflank --ci --no-doctor 2>&1)"; then echo "setup should have failed"; return 1; fi
   contains "$out" "setup: fill in what is listed above, then run freelunch setup --ci again to set up CI"
-  # And a place for the state, which only an OCI target can make by itself.
+  # The state goes in a branch of the project's repository, which has to be one.
   sed -i.bak 's/^NORTHFLANK_API_TOKEN=.*/NORTHFLANK_API_TOKEN=x/' "$p/.freelunch/.env" && rm "$p/.freelunch/.env.bak"
   if out="$(TEST_NO_HOME=1 setup_in "$p" --ci --no-doctor 2>&1)"; then echo "setup should have failed"; return 1; fi
-  contains "$out" "setup: CI needs the project's state somewhere it can reach: freelunch state init r2 (or b2, gitlab)"
+  contains "$out" "state init git: $p isn't a git repository"
 }
 
 # What setup writes is what up reads.
@@ -3721,6 +3721,114 @@ test_setup_then_up_dry_run() {
   setup_in "$p" --targets northflank,oci --no-doctor >/dev/null 2>&1
   out="$(cd "$p" && HOME="$p/home" "$CLI" up --dry-run 2>&1)"
   contains "$out" "up: targets, in order: northflank oci"
+}
+
+# The workflows run the version the project pins, a release or a commit, never a moving branch.
+test_ci_init_pins_the_workflows_to_the_projects_version() {
+  local p="$WORK/ci-pin" sha=0123456789abcdef0123456789abcdef01234567
+  mkdir -p "$p/.freelunch"
+  echo "$sha" > "$p/.freelunch/version"
+  ci_in "$p" ci init >/dev/null 2>&1
+  grep -q "      - uses: freelunch-sh/freelunch@$sha" "$p/.github/workflows/freelunch.yml"
+  grep -q "      - uses: freelunch-sh/freelunch@$sha" "$p/.github/workflows/freelunch-wait.yml"
+  fails grep -q 'freelunch@main' "$p/.github/workflows/freelunch.yml"
+}
+
+# git_project <dir>: a project in a git repository with a bare origin (<dir>-origin.git) that
+# has main, and the oci and cloudflare stacks "deployed"
+git_project() {
+  new_project "$1"
+  git init -q -b main --bare "$1-origin.git"
+  git -C "$1" init -q -b main
+  printf '.freelunch/*/terraform.tfstate\n.freelunch/.env\n' > "$1/.gitignore"
+  git -C "$1" add compose.yaml .gitignore
+  git -C "$1" -c user.name=t -c user.email=t@example.com commit -qm first
+  git -C "$1" remote add origin "$1-origin.git"
+  git -C "$1" push -q origin main
+}
+
+# The state in a branch of the repository: encrypted, an orphan branch with the state files and
+# nothing else, shared with a clone through the remote, and nothing of it left in the checkout.
+test_git_state_store_keeps_the_state_in_a_branch() {
+  local p="$WORK/gitstore" q="$WORK/gitstore-clone" out
+  CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu || return 0
+  git_project "$p"
+  out="$(in_dir "$p" "$CLI" state init git 2>&1)"
+  contains "$out" "state.git.tfbackend: the state goes to the branch freelunch-state of this repository, encrypted"
+  grep -q '^FREELUNCH_STATE_PASSPHRASE=' "$p/.freelunch/.env"
+  out="$(in_dir "$p" "$CLI" state push 2>&1)"
+  contains "$out" "oci: copied the state to the store"
+  contains "$out" "cloudflare: copied the state to the store"
+  equals "$(git -C "$p-origin.git" ls-tree -r --name-only freelunch-state | tr '\n' ' ')" "cloudflare.tfstate oci.tfstate "
+  equals "$(git -C "$p-origin.git" rev-list --max-parents=0 freelunch-state | wc -l | tr -d ' ')" 1
+  fails grep -q '203.0.113.10' <(git -C "$p-origin.git" show freelunch-state:oci.tfstate)
+  # The code's branch is untouched and no worktree is left behind.
+  equals "$(git -C "$p-origin.git" log --format=%s main)" "first"
+  equals "$(git -C "$p" worktree list | wc -l | tr -d ' ')" 1
+  contains "$(in_dir "$p" "$CLI" state 2>&1)" "State store: git (.freelunch/state.git.tfbackend, encrypted)"
+  contains "$(in_dir "$p" "$CLI" state 2>&1)" "  oci          in step (serial"
+  # A clone with no state takes the branch's.
+  git clone -q "$p-origin.git" "$q"
+  cp -R "$p/.freelunch" "$q/"
+  rm "$q/.freelunch"/*/terraform.tfstate*
+  out="$(in_dir "$q" "$CLI" output oci -json hosts 2>&1)"
+  contains "$out" "oci: took the store's state"
+  contains "$out" '"public_ip":"203.0.113.10"'
+  # What one pushes the other gets, one commit per change.
+  with_ip "$q/.freelunch/oci/terraform.tfstate" 203.0.113.99
+  in_dir "$q" "$CLI" state push oci >/dev/null 2>&1
+  out="$(in_dir "$p" "$CLI" output oci -json hosts 2>&1)"
+  contains "$out" '"public_ip":"203.0.113.99"'
+  equals "$(git -C "$p-origin.git" log --format=%s freelunch-state -- oci.tfstate | tr '\n' ' ')" "state: oci state: oci "
+  # Another passphrase doesn't open it.
+  sed -i.bak 's/^FREELUNCH_STATE_PASSPHRASE=.*/FREELUNCH_STATE_PASSPHRASE=another passphrase entirely/' "$q/.freelunch/.env" && rm "$q/.freelunch/.env.bak"
+  rm "$q/.freelunch/oci/terraform.tfstate"*
+  if out="$(in_dir "$q" "$CLI" output oci 2>&1)"; then echo "output should have failed"; return 1; fi
+  contains "$out" "doesn't open with FREELUNCH_STATE_PASSPHRASE"
+}
+
+test_git_state_store_needs_a_repository_and_opentofu() {
+  local p="$WORK/gitstore-bad" out
+  new_project "$p"
+  if out="$(in_dir "$p" "$CLI" state init git 2>&1)"; then echo "state init should have failed"; return 1; fi
+  contains "$out" "isn't a git repository (git init, commit, and add a remote)"
+  absent "$p/.freelunch/state.git.tfbackend"
+}
+
+# A state kept in the repository's own branch is pushed by the workflows, so they may write.
+test_ci_init_lets_the_workflows_push_the_git_state() {
+  local p="$WORK/ci-git" wait
+  CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu || return 0
+  git_project "$p"
+  in_dir "$p" "$CLI" state init git >/dev/null 2>&1
+  ci_in "$p" ci init >/dev/null 2>&1
+  wait="$p/.github/workflows/freelunch-wait.yml"
+  grep -q '^  contents: write' "$wait"
+  grep -q '^  contents: write' "$p/.github/workflows/freelunch.yml"
+  # Any other store needs read only.
+  rm -r "$p/.github" "$p/.freelunch/state.git.tfbackend"
+  state_store "$p"
+  ci_in "$p" ci init >/dev/null 2>&1
+  grep -q '^  contents: read' "$p/.github/workflows/freelunch.yml"
+}
+
+# A state file changed in the branch is refused, not read: the encryption is authenticated.
+test_git_state_store_refuses_a_tampered_file() {
+  local p="$WORK/gitstore-tamper" t="$WORK/gitstore-tamper-edit" out
+  CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu || return 0
+  git_project "$p"
+  in_dir "$p" "$CLI" state init git >/dev/null 2>&1
+  in_dir "$p" "$CLI" state push >/dev/null 2>&1
+  git clone -q --branch freelunch-state "$p-origin.git" "$t"
+  # Flip one character inside the encrypted payload.
+  jq -c '(.. | strings | select(length > 40)) |= (.[0:20] + (if .[20:21] == "A" then "B" else "A" end) + .[21:])' "$t/oci.tfstate" > "$t/x" 2>/dev/null || sed 's/a/b/' "$t/oci.tfstate" > "$t/x"
+  mv "$t/x" "$t/oci.tfstate"
+  git -C "$t" -c user.name=t -c user.email=t@example.com commit -qam tamper
+  git -C "$t" push -q origin freelunch-state
+  rm "$p/.freelunch/oci/terraform.tfstate"*
+  if out="$(in_dir "$p" "$CLI" output oci 2>&1)"; then echo "output should have failed"; return 1; fi
+  contains "$out" "Error"
+  absent "$p/.freelunch/oci/terraform.tfstate"
 }
 
 # tests/cli.sh <pattern>: only the tests whose name matches the pattern (grep -E)

@@ -38,12 +38,23 @@ backends, so anything one of them supports works too.
 
 | Store | Free | Card | `freelunch state init` |
 |---|---|---|---|
+| **A branch of your own repository** (recommended: nothing to sign up for) | yes | no | `git`: the state, encrypted, in the branch `freelunch-state`; the workflows get `contents: write` |
 | **OCI Object Storage** (recommended with an OCI host) | 20 GB and 50,000 requests a month, Always Free | no new one | `oci`: makes the bucket and its key |
 | Cloudflare R2 | 10 GB | R2 asks for a payment method before the first bucket | `r2`: writes the settings to fill in |
 | Backblaze B2 | 10 GB | no | `b2`: writes the settings to fill in |
 | GitLab | its own state for the project | no | `gitlab`: for a project on GitLab |
 
-With an OCI host, the store is one command away:
+The branch needs OpenTofu (the state is encrypted before it reaches git, so a public repository
+is fine), a git repository with a remote, and the passphrase in CI as `FREELUNCH_STATE_PASSPHRASE`.
+It is an orphan branch with one file per stack and none of your code:
+
+```bash
+freelunch state init git
+freelunch state push
+git add .freelunch/state.git.tfbackend && git commit -m "Keep the freelunch state in a branch"
+```
+
+With an OCI host, a bucket in your own tenancy is one command away too:
 
 ```bash
 freelunch state init oci
@@ -129,7 +140,10 @@ Both use the action in this repository (`uses: freelunch-sh/freelunch@<version>`
 listed on the GitHub Marketplace as *Run freelunch*), which sets up the same tofu or
 terraform version you have, unpacks the bundle and runs the command with the freelunch
 version in `.freelunch/version`. After `freelunch upgrade`, the workflows run the new version
-without an edit. Commit and push both files.
+without an edit.
+The pin is a release tag, or a full commit for a version that has no release yet
+(`curl ... install.sh | bash -s <commit>`, or `freelunch upgrade <commit>`); the workflows
+never run a moving branch such as `main`, so a CI run is the code you tested. Commit and push both files.
 
 ## 3. The secret
 

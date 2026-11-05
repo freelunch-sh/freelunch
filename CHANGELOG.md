@@ -12,6 +12,11 @@ release can change commands and the project layout.
 
 ### Added
 
+- **State in a branch of your own repository.** `freelunch state init git` keeps each stack's
+  state, encrypted by OpenTofu, in an orphan branch (`freelunch-state`) of the project's repo, so
+  CI needs no storage account. `ci init` gives the workflows `contents: write` for it, and
+  `setup --ci` uses it when the project has no other store. Workflows run the version the
+  project pins (a release or a commit), never `@main`.
 - **`freelunch setup`: the one-time wizard.** Asks where the app may run (most preferred
   first) and for a domain, reads the OCI tenancy and home region, the SSH key, the gcloud
   project and the Azure subscription from their own config, asks only for the rest, writes
