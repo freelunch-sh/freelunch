@@ -263,19 +263,20 @@ the provider's page before relying on one.
 
 **Legend:** checked = implemented in freelunch · **recommended** = the one to start with where a section has several ·
 🟢 official/partner Terraform provider · 🟡 community provider · 🟠 provider exists but is stale · ⚪ no Terraform provider (API/CLI only) ·
-♾️ always free · 🔁 monthly credit · ⏳ trial credit · 🎓 startup/research programs · 💲 paid only
+♾️ always free · 🔁 monthly credit · ⏳ trial credit · 🎓 startup/research programs · 💲 paid only ·
+⚙️ the engine that runs an implemented provider (`tofu`, `api`, `cli`, `guided`; [how they differ](docs/engines.md)), the jobs it supports, and `verified: fake-api` (only a test double has run it) or `live`
 
 ### Hyperscalers (4/8)
 
 Large public clouds. Only OCI and GCP give always-free VMs; Azure gives new accounts 12 months of small VMs, and AWS a 6-month credit.
 
 - [ ] **[Alibaba Cloud](providers/alibaba-cloud/)** 🟢 `aliyun/alicloud` · ⏳ Free trials of selected products for new accounts; startup credit programs
-- [x] **[Amazon Web Services](providers/aws/)** 🟢 `hashicorp/aws` · ⏳ New accounts (since 2025-07-15): up to $200 credit on the Free plan, which ends after 6 months; always-free Lambda 1M requests/month, DynamoDB 25 GB, CloudFront 1 TB egress
-- [x] **[Google Cloud](providers/gcp/)** 🟢 `hashicorp/google` · ♾️ 1 e2-micro VM (us-west1, us-central1 or us-east1) with 30 GB standard disk, 5 GB Cloud Storage, Cloud Run 2M requests + 180k vCPU-s/month; $300 trial credit for 90 days
+- [x] **[Amazon Web Services](providers/aws/)** 🟢 `hashicorp/aws` · ⏳ New accounts (since 2025-07-15): up to $200 credit on the Free plan, which ends after 6 months; always-free Lambda 1M requests/month, DynamoDB 25 GB, CloudFront 1 TB egress · ⚙️ `tofu`
+- [x] **[Google Cloud](providers/gcp/)** 🟢 `hashicorp/google` · ♾️ 1 e2-micro VM (us-west1, us-central1 or us-east1) with 30 GB standard disk, 5 GB Cloud Storage, Cloud Run 2M requests + 180k vCPU-s/month; $300 trial credit for 90 days · ⚙️ `tofu`
 - [ ] **[Huawei Cloud](providers/huawei-cloud/)** 🟡 `huaweicloud/huaweicloud` · ⏳ Free trial packages for new accounts; free DNS hosting; startup program
 - [ ] **[IBM Cloud](providers/ibm-cloud/)** 🟢 `IBM-Cloud/ibm` · ♾️ Lite plans: Cloudant 1 GB, Db2 100 MB, API Connect 50k calls/month, Log Analysis 500 MB/day
-- [x] **[Microsoft Azure](providers/azure/)** 🟢 `hashicorp/azurerm` · ⏳ $200 credit for 30 days; 12 months: 750 h each of B1s, B2pts v2 (Arm) and B2ats v2 (AMD) VMs, 2 × 64 GB P6 SSD disks; always free: App Service F1 (10 apps), Functions 1M requests, Container Apps 180k vCPU-s + 2M requests, Cosmos DB 25 GB
-- [x] **[Oracle Cloud (OCI)](providers/oci/)** 🟢 `oracle/oci` · ♾️ 2 Arm A1 OCPUs + 12 GB RAM, 2 AMD micro VMs, 200 GB block storage, 10 TB egress/month, 2 VCNs, 1 flexible load balancer, 20 GB object storage; home region only
+- [x] **[Microsoft Azure](providers/azure/)** 🟢 `hashicorp/azurerm` · ⏳ $200 credit for 30 days; 12 months: 750 h each of B1s, B2pts v2 (Arm) and B2ats v2 (AMD) VMs, 2 × 64 GB P6 SSD disks; always free: App Service F1 (10 apps), Functions 1M requests, Container Apps 180k vCPU-s + 2M requests, Cosmos DB 25 GB · ⚙️ `tofu`
+- [x] **[Oracle Cloud (OCI)](providers/oci/)** 🟢 `oracle/oci` · ♾️ 2 Arm A1 OCPUs + 12 GB RAM, 2 AMD micro VMs, 200 GB block storage, 10 TB egress/month, 2 VCNs, 1 flexible load balancer, 20 GB object storage; home region only · ⚙️ `tofu`
 - [ ] **[Tencent Cloud](providers/tencent-cloud/)** 🟢 `tencentcloudstack/tencentcloud` · ⏳ Free trial packages for new accounts; startup program
 
 ### VPS & cloud credits (0/10)
@@ -316,13 +317,13 @@ Run a container without managing a VM. Free tiers usually sleep when idle.
 - [ ] **[Appwrite Cloud](providers/appwrite/)** 🟢 `appwrite/appwrite` · ♾️ Unlimited projects with no pausing; per project: 1 database, 3 buckets, 5 functions
 - [ ] **[Back4App Containers](providers/back4app/)** ⚪ · ♾️ 1 container, 256 MB RAM, 100 GB transfer
 - [ ] **[Clever Cloud](providers/clever-cloud/)** 🟡 `CleverCloud/clevercloud` · ⏳ EUR 20 credit at sign-up; DEV plan with free MySQL and PostgreSQL
-- [x] **[Google Cloud Run](providers/cloud-run/)** 🟢 `hashicorp/google` · ♾️ With request-based billing, per billing account and month: 2M requests, 180,000 vCPU-seconds and 360,000 GB-seconds; scales to zero between requests
+- [x] **[Google Cloud Run](providers/cloud-run/)** 🟢 `hashicorp/google` · ♾️ With request-based billing, per billing account and month: 2M requests, 180,000 vCPU-seconds and 360,000 GB-seconds; scales to zero between requests · ⚙️ `tofu`
 - [ ] **[Leapcell](providers/leapcell/)** ⚪ · ♾️ Hobby plan: 20 projects, 100k serverless invocations/month, 3 GB-hours compute, 2 GB transfer
-- [x] **[Northflank](providers/northflank/)** ⚪ · ♾️ Sandbox: 2 services, 2 jobs and 1 database, always on with no sleeping, plans up to nf-compute-20 (0.2 vCPU, 512 MB) and up to $20/month of resources; no card · 🟢 always on · **recommended**
-- [x] **[Oracle Kubernetes Engine (OKE)](providers/oke/)** 🟢 `oracle/oci` · ♾️ Basic cluster with no control-plane fee; worker nodes on the Always Free Arm cores (2 OCPUs and 12 GB since June 2026 on new accounts, 4 and 24 on older ones), shared with the oci stack's VMs; 200 GB block storage, 1 flexible load balancer
+- [x] **[Northflank](providers/northflank/)** ⚪ · ♾️ Sandbox: 2 services, 2 jobs and 1 database, always on with no sleeping, plans up to nf-compute-20 (0.2 vCPU, 512 MB) and up to $20/month of resources; no card · 🟢 always on · ⚙️ `guided` · **recommended**
+- [x] **[Oracle Kubernetes Engine (OKE)](providers/oke/)** 🟢 `oracle/oci` · ♾️ Basic cluster with no control-plane fee; worker nodes on the Always Free Arm cores (2 OCPUs and 12 GB since June 2026 on new accounts, 4 and 24 on older ones), shared with the oci stack's VMs; 200 GB block storage, 1 flexible load balancer · ⚙️ `tofu`
 - [ ] **[Railway](providers/railway/)** 🟡 `terraform-community-providers/railway` · 🔁 $5 trial credit for 30 days, then the Free plan: $1 of usage credit a month, up to 1 vCPU and 0.5 GB RAM per service, 0.5 GB volume
-- [x] **[Render](providers/render/)** 🟢 `render-oss/render` · ♾️ Free web services: 750 instance-hours/month, 512 MB / 0.1 CPU, spin down after 15 min idle; free Postgres expires after 30 days; 5 GB/month bandwidth · 💤 sleeps when idle
-- [x] **[Scaleway](providers/scaleway/)** ⚪ · ♾️ Serverless Containers: 400,000 GB-s of memory and 200,000 vCPU-s per account and month, enough for one 128 MB container all month or bigger ones that scale to zero; no free VMs; Startup Program for EU companies (up to EUR 36K)
+- [x] **[Render](providers/render/)** 🟢 `render-oss/render` · ♾️ Free web services: 750 instance-hours/month, 512 MB / 0.1 CPU, spin down after 15 min idle; free Postgres expires after 30 days; 5 GB/month bandwidth · 💤 sleeps when idle · ⚙️ `tofu`
+- [x] **[Scaleway](providers/scaleway/)** ⚪ · ♾️ Serverless Containers: 400,000 GB-s of memory and 200,000 vCPU-s per account and month, enough for one 128 MB container all month or bigger ones that scale to zero; no free VMs; Startup Program for EU companies (up to EUR 36K) · ⚙️ `guided`
 - [ ] **[SnapDeploy](providers/snapdeploy/)** ⚪ · ♾️ 4 containers, 100 container-hours/month, 512 MB / 0.25 vCPU; sleeps after 15 min idle
 - [ ] **[Zeabur](providers/zeabur/)** ⚪ · ♾️ $0 plan with auto-sleep · 💤 sleeps when idle
 
@@ -331,7 +332,7 @@ Run a container without managing a VM. Free tiers usually sleep when idle.
 Static sites, edge functions and CDN in front of the hosts.
 
 - [ ] **[bunny.net](providers/bunny-net/)** 🟡 `BunnyWay/bunnynet` · ⏳ 14-day trial with $20 credit (no card), plus $30 when billing details are added; then pay-as-you-go CDN from $0.01/GB in Europe and North America
-- [x] **[Cloudflare](providers/cloudflare/)** 🟢 `cloudflare/cloudflare` · ♾️ DNS for unlimited domains, CDN/SSL/WAF basics, Tunnel, Zero Trust (50 users), Workers 100k requests/day, Pages (unlimited sites and bandwidth), R2 10 GB with no egress fees, D1 5 GB, KV, Queues
+- [x] **[Cloudflare](providers/cloudflare/)** 🟢 `cloudflare/cloudflare` · ♾️ DNS for unlimited domains, CDN/SSL/WAF basics, Tunnel, Zero Trust (50 users), Workers 100k requests/day, Pages (unlimited sites and bandwidth), R2 10 GB with no egress fees, D1 5 GB, KV, Queues · ⚙️ `tofu`
 - [ ] **[Deno Deploy](providers/deno-deploy/)** 🟠 `denoland/deno` · ♾️ 1M requests/month, 20 GiB egress/month, 1 GiB KV (about 10 CPU-hours/month); personal use · 🚧 hard cap, no billing
 - [ ] **[Fastly](providers/fastly/)** 🟢 `fastly/fastly` · ♾️ Monthly: CDN 100 GB per region + 1M requests, Compute 10M requests + 100M vCPU-ms, 5 GB object storage, 1 GB KV store, 5 TLS domains
 - [ ] **[Netlify](providers/netlify/)** 🟢 `netlify/netlify` · ♾️ 300 credits/month (hard limit; credit-based since Sep 2025)
@@ -341,35 +342,35 @@ Static sites, edge functions and CDN in front of the hosts.
 
 Keep state off free VMs, which can be reclaimed: managed Postgres, MySQL, Redis, document and analytics databases.
 
-- [x] **[Aiven](providers/aiven/)** 🟢 `aiven/aiven` · ♾️ Free PostgreSQL and Valkey: one service of each type per organisation, single node, 1 CPU, 1 GB RAM, 1 GB disk (PostgreSQL, max_connections 20), powered off after inactivity
+- [x] **[Aiven](providers/aiven/)** 🟢 `aiven/aiven` · ♾️ Free PostgreSQL and Valkey: one service of each type per organisation, single node, 1 CPU, 1 GB RAM, 1 GB disk (PostgreSQL, max_connections 20), powered off after inactivity · ⚙️ `tofu`
 - [ ] **[ClickHouse Cloud](providers/clickhouse/)** 🟢 `ClickHouse/clickhouse` · ⏳ Trial credit for new accounts
-- [x] **[CockroachDB Cloud](providers/cockroachdb/)** 🟢 `cockroachdb/cockroach` · ♾️ Basic clusters include $15 of usage a month (50M request units + 10 GiB storage) across the organisation; a payment method must be on file · 💤 scales to zero
-- [x] **[Couchbase Capella](providers/couchbase-capella/)** 🟢 `couchbasecloud/couchbase-capella` · ♾️ One free Capella operational cluster per organisation, no time limit, no card; deleted after 30 days without activity. Storage figure unverified (the pricing page said 8 GB, a third party said 1 GB)
+- [x] **[CockroachDB Cloud](providers/cockroachdb/)** 🟢 `cockroachdb/cockroach` · ♾️ Basic clusters include $15 of usage a month (50M request units + 10 GiB storage) across the organisation; a payment method must be on file · 💤 scales to zero · ⚙️ `tofu`
+- [x] **[Couchbase Capella](providers/couchbase-capella/)** 🟢 `couchbasecloud/couchbase-capella` · ♾️ One free Capella operational cluster per organisation, no time limit, no card; deleted after 30 days without activity. Storage figure unverified (the pricing page said 8 GB, a third party said 1 GB) · ⚙️ `tofu`
 - [ ] **[CrateDB Cloud](providers/crate/)** ⚪ · ♾️ 1 node with 2 CPUs, 2 GiB memory, 8 GiB storage; no payment method needed
-- [x] **[DataStax Astra DB](providers/datastax-astra/)** 🟢 `datastax/astra` · ♾️ Free plan: up to 5 serverless databases, fixed monthly credits (amount unpublished), hibernated after 48 hours idle and deleted after 30 days hibernated
+- [x] **[DataStax Astra DB](providers/datastax-astra/)** 🟢 `datastax/astra` · ♾️ Free plan: up to 5 serverless databases, fixed monthly credits (amount unpublished), hibernated after 48 hours idle and deleted after 30 days hibernated · ⚙️ `tofu`
 - [ ] **[Elastic Cloud](providers/elastic-cloud/)** 🟢 `elastic/ec` · ⏳ Free trial for new accounts
 - [ ] **[InfluxDB Cloud](providers/influxdb/)** ⚪ · ♾️ Writes up to 3 MB/5 min, reads 30 MB/5 min, 10,000 series cardinality
-- [x] **[MongoDB Atlas](providers/mongodb-atlas/)** 🟢 `mongodb/mongodbatlas` · ♾️ Free (M0) cluster: 512 MB storage, 500 connections, 100 ops/sec, 10 GB in and out per 7 days; one per project; paused after 30 days without a connection · ⏸️ pauses when unused
-- [x] **[MotherDuck](providers/motherduck/)** 🟡 `motherduckdb/motherduck` · ♾️ Lite plan: 10 GB storage, 10 Pulse compute-hours/month, 3 users and 2 service accounts, 1 day snapshot retention; serverless DuckDB for analytics
-- [x] **[Neo4j AuraDB](providers/neo4j-aura/)** 🟡 `neo4j-labs/neo4jaura` · ♾️ AuraDB Free: 1 database, 200k nodes, 400k relationships, 1 GB storage; pauses after 72 h idle, deleted after 30 days paused
-- [x] **[Neon](providers/neon/)** 🟡 `kislerdm/neon` · ♾️ 100 projects, each with 1 GB Postgres storage (20 GB total) and 100 CU-hours/month; scales to zero after 5 min; 10 branches per project · 💤 scales to zero
+- [x] **[MongoDB Atlas](providers/mongodb-atlas/)** 🟢 `mongodb/mongodbatlas` · ♾️ Free (M0) cluster: 512 MB storage, 500 connections, 100 ops/sec, 10 GB in and out per 7 days; one per project; paused after 30 days without a connection · ⏸️ pauses when unused · ⚙️ `tofu`
+- [x] **[MotherDuck](providers/motherduck/)** 🟡 `motherduckdb/motherduck` · ♾️ Lite plan: 10 GB storage, 10 Pulse compute-hours/month, 3 users and 2 service accounts, 1 day snapshot retention; serverless DuckDB for analytics · ⚙️ `tofu`
+- [x] **[Neo4j AuraDB](providers/neo4j-aura/)** 🟡 `neo4j-labs/neo4jaura` · ♾️ AuraDB Free: 1 database, 200k nodes, 400k relationships, 1 GB storage; pauses after 72 h idle, deleted after 30 days paused · ⚙️ `tofu`
+- [x] **[Neon](providers/neon/)** 🟡 `kislerdm/neon` · ♾️ 100 projects, each with 1 GB Postgres storage (20 GB total) and 100 CU-hours/month; scales to zero after 5 min; 10 branches per project · 💤 scales to zero · ⚙️ `tofu`
 - [ ] **[Nile](providers/nile/)** ⚪ · ♾️ Unlimited databases, 1 GB storage total, 50M query tokens
 - [ ] **[Prisma Postgres](providers/prisma-postgres/)** ⚪ · ♾️ 1.01 GB storage, 200k operations/month, 50 databases; no card
-- [x] **[Redis Cloud](providers/redis-cloud/)** 🟢 `RedisLabs/rediscloud` · ♾️ One free 30 MB database (Redis Cloud Essentials free plan), shared cloud, best-effort SLA, community support
+- [x] **[Redis Cloud](providers/redis-cloud/)** 🟢 `RedisLabs/rediscloud` · ♾️ One free 30 MB database (Redis Cloud Essentials free plan), shared cloud, best-effort SLA, community support · ⚙️ `tofu`
 - [ ] **[SingleStore Helios](providers/singlestore/)** 🟢 `singlestore-labs/singlestoredb` · ♾️ Managed Shared edition: 1 free workspace (shared), for evaluation and non-production; storage and compute caps unverified
-- [x] **[Supabase](providers/supabase/)** 🟡 `supabase/supabase` · ♾️ 2 active projects, 500 MB database, 1 GB file storage; free projects pause after a week of inactivity · ⏸️ pauses when unused
-- [x] **[TiDB Cloud](providers/tidb-cloud/)** 🟢 `tidbcloud/tidbcloud` · ♾️ 5 free Starter clusters per organisation, each with 5 GiB row storage, 5 GiB columnar storage and 50M request units/month; MySQL-compatible · 💤 scales to zero
+- [x] **[Supabase](providers/supabase/)** 🟡 `supabase/supabase` · ♾️ 2 active projects, 500 MB database, 1 GB file storage; free projects pause after a week of inactivity · ⏸️ pauses when unused · ⚙️ `tofu`
+- [x] **[TiDB Cloud](providers/tidb-cloud/)** 🟢 `tidbcloud/tidbcloud` · ♾️ 5 free Starter clusters per organisation, each with 5 GiB row storage, 5 GiB columnar storage and 50M request units/month; MySQL-compatible · 💤 scales to zero · ⚙️ `tofu`
 - [ ] **[Tiger Data (Timescale)](providers/timescale/)** 🟢 `timescale/timescale` · ⏳ Free trial for new accounts
 - [ ] **[Tinybird](providers/tinybird/)** ⚪ · ♾️ 10 GB storage + 1,000 API requests/day
 - [ ] **[Turso](providers/turso/)** 🟠 `celest-dev/turso` · ♾️ 9 GB total storage, up to 500 databases, 1B row reads/month
-- [x] **[Upstash](providers/upstash/)** 🟡 `upstash/upstash` · ♾️ Redis: 1 free database with 250 MB data, 500K commands/month and 10 GB bandwidth/month · 🟢 always on
-- [x] **[YugabyteDB Aeon](providers/yugabyte/)** 🟡 `yugabyte/ybm` · ♾️ Sandbox cluster: 1 per account, single node up to 2 vCPUs / 4 GB RAM / 10 GB, 15 connections, 500 tables or 12.5M rows, no backups; paused after 10 days idle, deleted after 15
+- [x] **[Upstash](providers/upstash/)** 🟡 `upstash/upstash` · ♾️ Redis: 1 free database with 250 MB data, 500K commands/month and 10 GB bandwidth/month · 🟢 always on · ⚙️ `tofu`
+- [x] **[YugabyteDB Aeon](providers/yugabyte/)** 🟡 `yugabyte/ybm` · ♾️ Sandbox cluster: 1 per account, single node up to 2 vCPUs / 4 GB RAM / 10 GB, 15 connections, 500 tables or 12.5M rows, no backups; paused after 10 days idle, deleted after 15 · ⚙️ `tofu`
 
 ### Object storage (1/2)
 
 S3-compatible buckets for backups and assets. Cloudflare R2 is listed under Cloudflare.
 
-- [x] **[Backblaze B2](providers/backblaze-b2/)** 🟢 `Backblaze/b2` · ♾️ 10 GB S3-compatible storage, always free; downloads free up to 3x the average stored · **recommended**
+- [x] **[Backblaze B2](providers/backblaze-b2/)** 🟢 `Backblaze/b2` · ♾️ 10 GB S3-compatible storage, always free; downloads free up to 3x the average stored · ⚙️ `tofu` · **recommended**
 - [ ] **[Filebase](providers/filebase/)** ⚪ · ♾️ 5 GB S3-compatible storage
 
 ### Networking & tunnels (0/7)
@@ -388,9 +389,9 @@ Private mesh networks and tunnels that join hosts across clouds into one network
 
 Free names to use instead of a paid domain. Each can be delegated to Cloudflare, so the cloudflare stack serves your apps on it. `freelunch domain suggest` checks which names are still free.
 
-- [x] **[DigitalPlat FreeDomain](providers/digitalplat/)** ⚪ · ♾️ One free name per account under dpdns.org, qzz.io, us.kg or xx.kg, ready in minutes; the dashboard shows which suffixes take new names · **recommended**
-- [x] **[EU.org](providers/eu-org/)** ⚪ · ♾️ Free names under eu.org or a country subdomain such as de.eu.org, with no expiry; requests are checked by hand and can take months
-- [x] **[pp.ua](providers/pp-ua/)** ⚪ · ♾️ Free names under pp.ua, renewed every year for free with a phone check by SMS or Telegram
+- [x] **[DigitalPlat FreeDomain](providers/digitalplat/)** ⚪ · ♾️ One free name per account under dpdns.org, qzz.io, us.kg or xx.kg, ready in minutes; the dashboard shows which suffixes take new names · ⚙️ `guided` · **recommended**
+- [x] **[EU.org](providers/eu-org/)** ⚪ · ♾️ Free names under eu.org or a country subdomain such as de.eu.org, with no expiry; requests are checked by hand and can take months · ⚙️ `guided`
+- [x] **[pp.ua](providers/pp-ua/)** ⚪ · ♾️ Free names under pp.ua, renewed every year for free with a phone check by SMS or Telegram · ⚙️ `guided`
 
 ### DNS (0/5)
 

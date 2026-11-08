@@ -9,6 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | yes |
 | **Terraform provider** | [`koyeb/koyeb`](https://registry.terraform.io/providers/koyeb/koyeb/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-11-08 |
 
 ## What's free

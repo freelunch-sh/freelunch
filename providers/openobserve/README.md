@@ -9,6 +9,7 @@
 | **Free tier** | 💲 No free tier (paid) |
 | **Card required** | no |
 | **Terraform provider** | [`openobserve/openobserve`](https://registry.terraform.io/providers/openobserve/openobserve/latest) (community) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-19 |
 
 ## What's free

@@ -3,7 +3,8 @@
 
 **Legend:** checked = implemented in freelunch · **recommended** = the one to start with where a section has several ·
 🟢 official/partner Terraform provider · 🟡 community provider · 🟠 provider exists but is stale · ⚪ no Terraform provider (API/CLI only) ·
-♾️ always free · 🔁 monthly credit · ⏳ trial credit · 🎓 startup/research programs · 💲 paid only
+♾️ always free · 🔁 monthly credit · ⏳ trial credit · 🎓 startup/research programs · 💲 paid only ·
+⚙️ the engine that runs an implemented provider (`tofu`, `api`, `cli`, `guided`; [how they differ](docs/engines.md)), the jobs it supports, and `verified: fake-api` (only a test double has run it) or `live`
 %{ for s in sections ~}
 
 ### ${s.title} (${s.done}/${length(s.providers)})
@@ -11,7 +12,7 @@
 ${s.description}
 
 %{ for p in s.providers ~}
-- [${p.status == "ready" ? "x" : " "}] **[${p.display_name}](providers/${p.name}/)** ${p.iac_icon}${p.terraform_provider != null ? " `${p.terraform_provider}`" : ""} · ${p.tier_icon} ${p.free_tier}${p.behavior_tag}${try(p.recommended, false) == true ? " · **recommended**" : ""}
+- [${p.status == "ready" ? "x" : " "}] **[${p.display_name}](providers/${p.name}/)** ${p.iac_icon}${p.terraform_provider != null ? " `${p.terraform_provider}`" : ""} · ${p.tier_icon} ${p.free_tier}${p.behavior_tag}${p.engine_tag}${try(p.recommended, false) == true ? " · **recommended**" : ""}
 %{ endfor ~}
 %{ endfor ~}
 

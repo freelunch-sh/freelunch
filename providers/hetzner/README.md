@@ -9,6 +9,7 @@
 | **Free tier** | 💲 No free tier (paid) |
 | **Card required** | yes |
 | **Terraform provider** | [`hetznercloud/hcloud`](https://registry.terraform.io/providers/hetznercloud/hcloud/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

@@ -9,6 +9,7 @@
 | **Free tier** | ⏳ Trial credit (time-limited) |
 | **Card required** | unknown |
 | **Terraform provider** | [`timescale/timescale`](https://registry.terraform.io/providers/timescale/timescale/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

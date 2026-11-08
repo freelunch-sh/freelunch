@@ -9,6 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | unknown |
 | **Terraform provider** | [`IBM-Cloud/ibm`](https://registry.terraform.io/providers/IBM-Cloud/ibm/latest) (official) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

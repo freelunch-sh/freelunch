@@ -9,6 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | unknown |
 | **Terraform provider** | [`singlestore-labs/singlestoredb`](https://registry.terraform.io/providers/singlestore-labs/singlestoredb/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-11-08 |
 
 ## What's free

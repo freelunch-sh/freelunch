@@ -9,6 +9,7 @@
 | **Free tier** | ⏳ Trial credit (time-limited) |
 | **Card required** | no |
 | **Terraform provider** | [`BunnyWay/bunnynet`](https://registry.terraform.io/providers/BunnyWay/bunnynet/latest) (community) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-19 |
 
 ## What's free

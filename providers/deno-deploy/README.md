@@ -9,6 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | [`denoland/deno`](https://registry.terraform.io/providers/denoland/deno/latest) (stale) |
+| **Engine** | `guided` |
 | **Last verified** | 2026-11-08 |
 
 ## What's free

@@ -9,6 +9,7 @@
 | **Free tier** | ⏳ Trial credit (time-limited) |
 | **Card required** | yes |
 | **Terraform provider** | [`UpCloudLtd/upcloud`](https://registry.terraform.io/providers/UpCloudLtd/upcloud/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

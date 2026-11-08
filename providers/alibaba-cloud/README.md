@@ -9,6 +9,7 @@
 | **Free tier** | ⏳ Trial credit (time-limited) |
 | **Card required** | yes |
 | **Terraform provider** | [`aliyun/alicloud`](https://registry.terraform.io/providers/aliyun/alicloud/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

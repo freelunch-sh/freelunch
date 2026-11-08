@@ -9,6 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | unknown |
 | **Terraform provider** | [`StatusCakeDev/statuscake`](https://registry.terraform.io/providers/StatusCakeDev/statuscake/latest) (stale) |
+| **Engine** | `guided` |
 | **Last verified** | 2026-10-19 |
 
 ## What's free

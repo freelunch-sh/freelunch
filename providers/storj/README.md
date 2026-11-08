@@ -9,6 +9,7 @@
 | **Free tier** | 💲 No free tier (paid) |
 | **Card required** | no |
 | **Terraform provider** | [`storj/storj`](https://registry.terraform.io/providers/storj/storj/latest) (stale) |
+| **Engine** | `guided` |
 | **Last verified** | 2026-10-19 |
 
 ## What's free

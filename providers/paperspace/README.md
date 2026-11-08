@@ -9,6 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | yes |
 | **Terraform provider** | [`paperspace/paperspace`](https://registry.terraform.io/providers/paperspace/paperspace/latest) (stale) |
+| **Engine** | `guided` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

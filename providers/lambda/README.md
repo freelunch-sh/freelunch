@@ -9,6 +9,7 @@
 | **Free tier** | 🎓 Startup / research programs only |
 | **Card required** | yes |
 | **Terraform provider** | [`elct9620/lambdalabs`](https://registry.terraform.io/providers/elct9620/lambdalabs/latest) (community) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

@@ -3266,6 +3266,18 @@ test_api_engine_checks_api_yaml() {
   contains "$out" "sample is refused: its API has no way to delete"
 }
 
+# The catalogue and the CLI work out a provider's engine separately (Terraform for the README,
+# bash for freelunch engine); they have to agree for every provider.
+test_engine_of_agrees_with_the_catalogue() {
+  local f name row
+  for f in "$ROOT"/providers/*/README.md; do
+    name="$(basename "$(dirname "$f")")"
+    row="$(sed -n 's/^| \*\*Engine\*\* | `\(.*\)` |$/\1/p' "$f")"
+    [[ -n "$row" ]] || continue
+    equals "$("$CLI" engine "$name")" "$row"
+  done
+}
+
 # A provider's engine is what its provider.yaml says, or what its iac implies.
 test_engine_of_defaults_from_iac() {
   equals "$("$CLI" engine render)" tofu

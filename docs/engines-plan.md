@@ -42,12 +42,12 @@ Tick a box when the step is built, tested and committed. Design: [engines.md](en
 
 ## 4. Catalogue
 
-- [ ] `engine` and `jobs` fields in `provider.yaml`
-- [ ] Validation: `engine: tofu` needs a stack, `api` needs `api.yaml`, `guided` needs neither
-- [ ] Engine and jobs shown in the generated README checklist
-- [ ] `verified: fake-api | live` shown per provider
-- [ ] Catalog tests for the new fields
-- [ ] `docs/adding-a-provider.md` updated
+- [x] `engine` and `jobs` fields in `provider.yaml`
+- [x] Validation: `engine: tofu` needs a stack, `api` needs `api.yaml`, `guided` needs neither
+- [x] Engine and jobs shown in the generated README checklist
+- [x] `verified: fake-api | live` shown per provider (when a provider states it; none of the existing ready providers does yet, since none has been checked against a live account)
+- [x] Catalog tests for the new fields
+- [x] `docs/adding-a-provider.md` updated
 
 ## 5. Actions as the runtime
 

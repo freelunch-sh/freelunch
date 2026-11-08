@@ -9,6 +9,7 @@
 | **Free tier** | 💲 No free tier (paid) |
 | **Card required** | yes |
 | **Terraform provider** | [`fly-apps/fly`](https://registry.terraform.io/providers/fly-apps/fly/latest) (stale) |
+| **Engine** | `guided` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

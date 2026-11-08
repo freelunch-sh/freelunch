@@ -9,6 +9,7 @@
 | **Free tier** | 💲 No free tier (paid) |
 | **Card required** | unknown |
 | **Terraform provider** | [`hashicorp/hcp`](https://registry.terraform.io/providers/hashicorp/hcp/latest) (official) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-19 |
 
 ## What's free

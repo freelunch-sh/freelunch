@@ -9,6 +9,7 @@
 | **Free tier** | ⏳ Trial credit (time-limited) |
 | **Card required** | no |
 | **Terraform provider** | [`redpanda-data/redpanda`](https://registry.terraform.io/providers/redpanda-data/redpanda/latest) (community) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-19 |
 
 ## What's free

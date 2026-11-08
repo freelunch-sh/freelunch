@@ -9,6 +9,7 @@
 | **Free tier** | ⏳ Trial credit (time-limited) |
 | **Card required** | unknown |
 | **Terraform provider** | [`elastic/ec`](https://registry.terraform.io/providers/elastic/ec/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

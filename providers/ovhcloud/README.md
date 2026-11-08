@@ -9,6 +9,7 @@
 | **Free tier** | 🎓 Startup / research programs only |
 | **Card required** | yes |
 | **Terraform provider** | [`ovh/ovh`](https://registry.terraform.io/providers/ovh/ovh/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

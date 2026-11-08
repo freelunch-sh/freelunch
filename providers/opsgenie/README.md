@@ -9,6 +9,7 @@
 | **Free tier** | 💲 No free tier (paid) |
 | **Card required** | unknown |
 | **Terraform provider** | [`opsgenie/opsgenie`](https://registry.terraform.io/providers/opsgenie/opsgenie/latest) (community) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-19 |
 
 ## What's free

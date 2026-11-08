@@ -9,6 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | [`louy/uptimerobot`](https://registry.terraform.io/providers/louy/uptimerobot/latest) (stale) |
+| **Engine** | `guided` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

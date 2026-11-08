@@ -9,6 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | [`celest-dev/turso`](https://registry.terraform.io/providers/celest-dev/turso/latest) (stale) |
+| **Engine** | `guided` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

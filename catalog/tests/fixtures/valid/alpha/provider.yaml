@@ -8,6 +8,8 @@ iac: partner
 free_tier_type: always-free
 free_tier: "1 tiny VM"
 recommended: true
+jobs: [provision, ci]
+verified: fake-api
 card_required: "no"
 url: "https://alpha.example/pricing"
 last_verified: "2026-10-18"
