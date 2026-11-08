@@ -213,3 +213,17 @@ run "a_route_without_a_host_and_no_default_fails" {
 
   expect_failures = [terraform_data.checks]
 }
+
+run "workers_and_pages_plan" {
+  command = plan
+
+  variables {
+    workers = { api = { script_file = "../modules/edge/fixtures/worker.js", hostname = "edge.example.com" } }
+    pages   = { site = { hostname = "www.example.com" } }
+  }
+
+  assert {
+    condition     = module.edge.workers["api"].name == "freelunch-api" && module.edge.pages["site"].name == "freelunch-site"
+    error_message = "The stack should plan a Worker and a Pages project through the edge module."
+  }
+}
