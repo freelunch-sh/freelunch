@@ -3482,6 +3482,511 @@ engine_render_check()       { doctor_render; }
 engine_render_token()       { setup_token RENDER_API_KEY "Render API key"; }
 engine_render_secrets()     { printf '%s\t%s\n' RENDER_API_KEY "Render API key"; }
 
+# --- The api engine ----------------------------------------------------------------------
+#
+# A provider with an HTTP or GraphQL API and no Terraform provider adds providers/<name>/api.yaml
+# (docs/api-adapter.md). One driver reads it and runs the lifecycle: check, list, deploy (find,
+# then create or update, then an optional deploy step and a wait), status and destroy. What it
+# made is written to the provider's record in the state store, when the project has a store.
+
+# api_yaml_json <file>: the subset of YAML api.yaml uses as JSON: nested maps, scalars (plain,
+# 'single' or "double" quoted), one-line [lists] and {maps}, and | blocks. awk turns each leaf
+# into [path, value]; jq puts them together.
+api_yaml_json() {
+  awk '
+    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    function esc(s,   i, c, o) {
+      o = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == BS) o = o BS BS
+        else if (c == "\"") o = o BS "\""
+        else if (c == "\t") o = o BS "t"
+        else if (c != "\r") o = o c
+      }
+      return o
+    }
+    function scalar(v,   i, c, out) {
+      v = trim(v)
+      if (substr(v, 1, 1) == "\"") {
+        out = ""
+        for (i = 2; i <= length(v); i++) {
+          c = substr(v, i, 1)
+          if (c == "\\") { out = out c substr(v, i + 1, 1); i++; continue }
+          if (c == "\"") break
+          out = out c
+        }
+        return "\"" out "\""
+      }
+      if (substr(v, 1, 1) == "\x27") {
+        out = ""
+        for (i = 2; i <= length(v); i++) {
+          c = substr(v, i, 1)
+          if (c == "\x27") { if (substr(v, i + 1, 1) == "\x27") { out = out c; i++; continue } break }
+          out = out c
+        }
+        return "\"" esc(out) "\""
+      }
+      sub(/[ \t]+#.*$/, "", v)
+      v = trim(v)
+      if (v ~ /^-?[0-9]+$/ || v == "true" || v == "false" || v == "null") return v
+      return "\"" esc(v) "\""
+    }
+    # split_top: s into parts[] at commas outside quotes and brackets; returns the count
+    function split_top(s, parts,   n, i, c, q, depth, cur) {
+      n = 0; cur = ""; q = ""; depth = 0
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (q != "") { cur = cur c; if (c == "\\" && q == "\"") { cur = cur substr(s, i + 1, 1); i++ } else if (c == q) q = ""; continue }
+        if (c == "\"" || c == "\x27") { q = c; cur = cur c; continue }
+        if (c == "[" || c == "{") depth++
+        if (c == "]" || c == "}") depth--
+        if (c == "," && depth == 0) { parts[++n] = cur; cur = ""; continue }
+        cur = cur c
+      }
+      if (trim(cur) != "") parts[++n] = cur
+      return n
+    }
+    function flow(v,   inner, parts, n, i, out, k, p, colon) {
+      v = trim(v); sub(/[ \t]+#.*$/, "", v)
+      inner = substr(v, 2, length(v) - 2)
+      n = split_top(inner, parts)
+      if (substr(v, 1, 1) == "[") {
+        out = "["
+        for (i = 1; i <= n; i++) out = out (i > 1 ? "," : "") scalar(parts[i])
+        return out "]"
+      }
+      out = "{"
+      for (i = 1; i <= n; i++) {
+        p = trim(parts[i]); colon = index(p, ":")
+        k = trim(substr(p, 1, colon - 1)); gsub(/^["\x27]|["\x27]$/, "", k)
+        out = out (i > 1 ? "," : "") "\"" esc(k) "\":" scalar(substr(p, colon + 1))
+      }
+      return out "}"
+    }
+    function path(extra,   i, out) {
+      out = ""
+      for (i = 1; i <= depth; i++) out = out "\"" keys[i] "\","
+      return "[" out "\"" extra "\"]"
+    }
+    function endblock(   i, out) {
+      if (!inblock) return
+      while (nblock > 0 && blocklines[nblock] == "") nblock--
+      out = ""
+      for (i = 1; i <= nblock; i++) out = out esc(blocklines[i]) BS "n"
+      if (chomp) out = substr(out, 1, length(out) - 2)
+      print "[" blockpath ",\"" out "\"]"
+      inblock = 0
+    }
+    BEGIN { depth = 0; inblock = 0; BS = sprintf("%c", 92) }
+    {
+      line = $0
+      match(line, /^ */); ind = RLENGTH
+      if (inblock) {
+        if (trim(line) == "" ) { blocklines[++nblock] = ""; next }
+        if (ind > blockind) {
+          if (blockbase < 0) blockbase = ind
+          blocklines[++nblock] = substr(line, blockbase + 1)
+          next
+        }
+        endblock()
+      }
+      if (trim(line) == "" || trim(line) ~ /^#/) next
+      if (!match(trim(line), /^[A-Za-z0-9_-]+:([ \t]|$)/)) { print "api.yaml: cannot read line " NR ": " line > "/dev/stderr"; bad = 1; next }
+      t = trim(line)
+      key = substr(t, 1, index(t, ":") - 1)
+      rest = trim(substr(t, index(t, ":") + 1))
+      while (depth > 0 && indent[depth] >= ind) depth--
+      if (rest == "" ) { depth++; keys[depth] = key; indent[depth] = ind; next }
+      if (rest ~ /^\|[-+]?$/) { inblock = 1; blockind = ind; blockbase = -1; nblock = 0; chomp = (rest ~ /-/); blockpath = path(key); next }
+      if (substr(rest, 1, 1) == "[" || substr(rest, 1, 1) == "{") print "[" path(key) "," flow(rest) "]"
+      else print "[" path(key) "," scalar(rest) "]"
+    }
+    END { endblock(); exit bad }
+  ' "$1" | jq -cn 'reduce inputs as [$p, $v] ({}; setpath($p; $v))'
+}
+
+# api_load <provider>: api.yaml as JSON in $TMP/api/<provider>.json, checked for what the
+# driver needs. A provider whose API can't delete is refused: destroy could not clean up.
+api_load() {
+  local p="$1" f="$PROVIDERS_DIR/$p/api.yaml" j path
+  command -v jq >/dev/null || die "jq is required for the api engine"
+  command -v curl >/dev/null || die "curl is required for the api engine"
+  [[ -f "$f" ]] || die "api: $p has no api.yaml (providers/$p/)"
+  # steps the format can't express are bash in providers/<p>/api.sh (see api_step)
+  # shellcheck disable=SC1090
+  [[ ! -f "$PROVIDERS_DIR/$p/api.sh" ]] || source "$PROVIDERS_DIR/$p/api.sh"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  mkdir -p "$TMP/api"
+  j="$TMP/api/$p.json"
+  [[ -f "$j" ]] && return 0
+  api_yaml_json "$f" > "$j.new" || die "api: can't read providers/$p/api.yaml"
+  for path in base_url auth.env auth.header check.request list.request list.items list.fields.id list.fields.name create.request create.body create.id; do
+    jq -e --arg p "$path" 'getpath($p | split(".")) | strings | length > 0' "$j.new" >/dev/null 2>&1 || die "api: providers/$p/api.yaml needs $path"
+  done
+  jq -e '.delete.request | strings | length > 0' "$j.new" >/dev/null 2>&1 \
+    || die "api: $p is refused: its API has no way to delete, so freelunch destroy could not clean up what it makes (providers/$p/api.yaml has no delete)"
+  mv "$j.new" "$j"
+}
+
+# api_cfg <provider> <jq path or filter>: a value of api.yaml, nothing when it isn't there
+api_cfg() { jq -r "$2 // empty" "$TMP/api/$1.json"; }
+api_has() { jq -e "$2 | . != null" "$TMP/api/$1.json" >/dev/null 2>&1; }
+
+# api_token <provider>: the API token, from the variable api.yaml names
+api_token() {
+  local var
+  var="$(api_cfg "$1" .auth.env)"
+  [[ -n "${!var:-}" ]] || die "api: $var is not set: export it, or put it in $(rel "$(state_root)")/.env (providers/$1/README.md)"
+  printf '%s' "${!var}"
+}
+
+# api_base <provider>: the vars every request and body can use: name_prefix and the settings
+# api.yaml lists, read from the provider's terraform.tfvars
+api_base() {
+  local p="$1" tfvars key value prefix out
+  tfvars="$(config_dir "$p")/terraform.tfvars"
+  prefix=""; [[ ! -f "$tfvars" ]] || prefix="$(tfvar "$tfvars" name_prefix)"
+  prefix="${prefix:-freelunch}"
+  out="$(jq -cn --arg prefix "$prefix" '{prefix: $prefix, settings: {}}')"
+  for key in $(jq -r '.settings[]?' "$TMP/api/$p.json"); do
+    value=""; [[ ! -f "$tfvars" ]] || value="$(tfvar "$tfvars" "$key")"
+    [[ -n "$value" ]] || die "api: $key is not set in $(rel "$tfvars")"
+    out="$(jq -c --arg k "$key" --arg v "$value" '.settings[$k] = $v' <<< "$out")"
+  done
+  echo "$out"
+}
+
+# api_secrets <provider> <vars file>: the values to leave out of what is printed: the token and
+# the app's environment values
+api_secrets() {
+  local p="$1"
+  (
+    API_SECRET_TOKEN="$(api_token "$p")"; export API_SECRET_TOKEN
+    jq -c '[(.env // {} | .[]? | strings), env.API_SECRET_TOKEN | select(length >= 4)]' "$2"
+  ) > "$TMP/api/$p.secrets" 2>/dev/null || echo '[]' > "$TMP/api/$p.secrets"
+}
+
+# api_expand <string> <vars file>: {name} in the string with the vars' values, URL-encoded.
+# A name with no value stops the run.
+api_expand() {
+  local out
+  out="$(jq -rn --arg s "$1" --slurpfile v "$2" '
+    ($v[0] + ($v[0].settings // {})) as $x
+    | reduce ($x | to_entries[] | select(.value | type | . == "string" or . == "number")) as $e ($s; gsub("\\{" + $e.key + "\\}"; $e.value | tostring | @uri))')"
+  if [[ "$out" =~ \{([a-z_]+)\} ]]; then die "api: '$1' needs {${BASH_REMATCH[1]}}, which has no value here"; fi
+  echo "$out"
+}
+
+# api_call <provider> <request> <vars file> [body file]: send "METHOD /path" to the API and
+# print the HTTP status (000 when it can't be reached). The answer is in $TMP/api/<provider>.out.
+# The token goes in a curl config file, not on the command line.
+api_call() {
+  local p="$1" request="$2" vars="$3" body="${4:-}" method path header cfg code args=() token
+  method="${request%% *}"
+  path="$(api_expand "${request#* }" "$vars")"
+  token="$(api_token "$p")"
+  header="$(api_cfg "$p" .auth.header)"
+  header="${header//\{token\}/$token}"
+  cfg="$TMP/api/$p.curl"
+  (umask 077; {
+    printf 'header = "%s"\n' "$(printf '%s' "$header" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+    printf 'header = "Accept: application/json"\n'
+    [[ -z "$body" ]] || printf 'header = "Content-Type: application/json"\n'
+  } > "$cfg")
+  [[ -z "$body" ]] || args=(--data-binary "@$body")
+  code="$(curl -sS --max-time 60 -o "$TMP/api/$p.out" -w '%{http_code}' -X "$method" -K "$cfg" ${args[@]+"${args[@]}"} "$(api_cfg "$p" .base_url)$path")" || code=000
+  rm -f "$cfg"
+  # GraphQL answers 200 with the failure in errors
+  if [[ "$code" == 2?? ]] && api_has "$p" .graphql && jq -e '(.errors // []) | length > 0' "$TMP/api/$p.out" >/dev/null 2>&1; then code=400; fi
+  echo "$code"
+}
+
+# api_ok <provider> <section> <code> [default list]: whether the status is one api.yaml calls
+# a success for that section
+api_ok() {
+  jq -e --argjson c "$3" --argjson d "${4:-[200,201,202,204]}" --arg s "$2" '(.[$s].ok // $d) | index($c) != null' "$TMP/api/$1.json" >/dev/null 2>&1
+}
+
+# api_error <provider>: why the last call failed, as the API put it, without the secrets
+api_error() {
+  local m
+  m="$(jq -r --slurpfile secrets "$TMP/api/$1.secrets" '
+    (if type == "object" then (.message // .error.message // (.error | strings) // .errors[0].message // .detail // empty) else empty end)
+    | tostring | reduce $secrets[0][] as $s (.; split($s) | join("<redacted>"))' "$TMP/api/$1.out" 2>/dev/null)" || m=""
+  echo "${m:-no answer it could read}"
+}
+
+# api_render <provider> <section> <vars file> <out file> [redact]: the section's body template
+# as JSON. The template sees $prefix $app $name $id $image $port $env and $settings. With
+# redact, the env values are <redacted>.
+api_render() {
+  local p="$1" section="$2" vars="$3" out="$4" redact="${5:-}" template prelude src="$3"
+  template="$(api_cfg "$p" ".$section.body")"
+  [[ -n "$template" ]] || return 1
+  if [[ -n "$redact" ]]; then
+    src="$TMP/api/$p.redacted.vars"
+    jq -c '.env |= (. // {} | map_values("<redacted>"))' "$vars" > "$src"
+  fi
+  prelude='. as $v | $v.prefix as $prefix | $v.app as $app | $v.name as $name | $v.id as $id | $v.image as $image | $v.port as $port | ($v.env // {}) as $env | ($v.settings // {}) as $settings | $v.deploy_id as $deploy_id | '
+  jq -c "$prelude$template" "$src" > "$out" 2> "$out.err" || die "api: the $section body in providers/$p/api.yaml doesn't render: $(head -c 300 "$out.err")"
+}
+
+# api_do <provider> <section> <vars file>: the section's request, with its body when api.yaml
+# gives one (every GraphQL call has one). Prints the HTTP status.
+api_do() {
+  local p="$1" sec="$2" vars="$3" body=""
+  if api_has "$p" ".$sec.body"; then
+    body="$TMP/api/$p.$sec.body"
+    api_render "$p" "$sec" "$vars" "$body"
+  fi
+  api_call "$p" "$(api_cfg "$p" ".$sec.request")" "$vars" "$body"
+}
+
+# api_check <provider>: whether the token works
+api_check() {
+  local p="$1" vars="$TMP/api/$1.vars" code
+  api_load "$p"; api_base "$p" > "$vars"; api_secrets "$p" "$vars"
+  code="$(api_do "$p" check "$vars")"
+  api_ok "$p" check "$code" '[200]' || die "api: $p doesn't take the token in $(api_cfg "$p" .auth.env) ($code): $(api_error "$p")"
+  log "$p: the token works"
+}
+
+# api_list <provider>: what the account has, as [{id, name, url, marker}] in
+# $TMP/api/<provider>.items.json
+api_list() {
+  local p="$1" vars="$TMP/api/$1.vars" code f id name url marker
+  [[ -f "$vars" ]] || { api_base "$p" > "$vars"; api_secrets "$p" "$vars"; }
+  code="$(api_do "$p" list "$vars")"
+  api_ok "$p" list "$code" || die "api: can't list what $p has ($code): $(api_error "$p")"
+  id="$(api_cfg "$p" .list.fields.id)"; name="$(api_cfg "$p" .list.fields.name)"
+  url="$(api_cfg "$p" .list.fields.url)"; marker="$(api_cfg "$p" .list.fields.marker)"
+  jq -c "[ ($(api_cfg "$p" .list.items)) | {id: ($id), name: ($name), url: (${url:-null}), marker: (${marker:-null})} ]" \
+    "$TMP/api/$p.out" > "$TMP/api/$p.items.json" 2> "$TMP/api/$p.items.err" \
+    || die "api: the list fields in providers/$p/api.yaml don't read what $p answered: $(head -c 300 "$TMP/api/$p.items.err")"
+}
+
+# api_ours <provider>: the listed items freelunch made, one JSON object a line: the name starts
+# with the prefix and the marker holds it
+api_ours() {
+  jq -c --arg pre "$(jq -r .prefix "$TMP/api/$1.vars")" '.[] | select((.name | startswith($pre + "-")) and .marker == $pre)' "$TMP/api/$1.items.json"
+}
+
+# --- records
+
+# api_record <provider> add|remove <id> [name]: the provider's record in the store, when the
+# project has one
+api_record() {
+  local p="$1" op="$2" id="$3" name="${4:-}" cur prefix rc=0
+  [[ -n "$(state_config)" ]] || return 0
+  prefix="$(jq -r .prefix "$TMP/api/$p.vars")"
+  cur="$(record_pull "$p")"
+  [[ -n "$cur" ]] || cur='{"engine":"api","resources":[]}'
+  case "$op" in
+    add)    jq -c --arg id "$id" --arg n "$name" --arg m "$prefix" --arg d "$(date -u +%Y-%m-%d)" \
+              '.resources = ((.resources // []) | map(select(.id != $id))) + [{id: $id, name: $n, kind: "app", marker: $m, created: $d}]' <<< "$cur" > "$TMP/api/$p.record" ;;
+    remove) jq -c --arg id "$id" '.resources |= map(select(.id != $id))' <<< "$cur" > "$TMP/api/$p.record" ;;
+  esac
+  record_push "$p" "$TMP/api/$p.record" || rc=$?
+  [[ $rc -ne 2 ]] || die "api: the store's record of $p changed while this ran (another machine or CI): run it again"
+  return $rc
+}
+
+# --- lifecycle
+
+# api_step <provider> <step> <vars file>: a custom function for the step when api.yaml names
+# one (custom: deno_deploy means api_custom_deno_deploy_<step>, defined in providers/<p>/api.sh,
+# which is handed the provider and the vars file and uses api_call itself); fails when there is
+# none, and the generic step runs
+api_step() {
+  local p="$1" step="$2" c; shift 2
+  c="$(api_cfg "$p" .custom)"
+  [[ -n "$c" ]] && declare -F "api_custom_${c}_$step" >/dev/null || return 1
+  "api_custom_${c}_$step" "$p" "$@"
+}
+
+# api_wait <provider> <vars file>: poll the deploy until api.yaml's done or failed statuses
+api_wait() {
+  local p="$1" vars="$2" name status code deadline timeout poll
+  api_has "$p" .wait.request || return 0
+  name="$(jq -r .name "$vars")"
+  timeout="${FREELUNCH_DEPLOY_TIMEOUT:-600}"; poll="${FREELUNCH_API_POLL:-5}"
+  deadline=$((SECONDS + timeout))
+  while true; do
+    code="$(api_do "$p" wait "$vars")"
+    api_ok "$p" wait "$code" || die "api: can't read the deploy of $name ($code): $(api_error "$p")"
+    status="$(jq -r "$(api_cfg "$p" .wait.status) | tostring" "$TMP/api/$p.out" 2>/dev/null)" || status=""
+    if jq -e --arg s "$status" '.wait.done | index($s) != null' "$TMP/api/$p.json" >/dev/null 2>&1; then return 0; fi
+    if jq -e --arg s "$status" '(.wait.failed // []) | index($s) != null' "$TMP/api/$p.json" >/dev/null 2>&1; then
+      die "api: the deploy of $name is $status (see $p's dashboard for its logs)"
+    fi
+    [[ $SECONDS -lt $deadline ]] || die "api: $name is still ${status:-unknown} after ${timeout}s (FREELUNCH_DEPLOY_TIMEOUT)"
+    sleep "$poll"
+  done
+}
+
+# api_deploy <provider> <app> <image> <port> <env file> <dry run 0|1>: find <prefix>-<app>;
+# create it when it isn't there, update it when freelunch made it, stop when somebody else did
+api_deploy() {
+  local p="$1" app="$2" image="$3" port="$4" envfile="$5" dry="$6" vars name id found code env url
+  api_load "$p"
+  vars="$TMP/api/$p.vars"
+  api_base "$p" > "$vars.base"
+  env='{}'; [[ -z "$envfile" ]] || env="$(env_json "$envfile")"
+  printf '%s' "$env" > "$TMP/api/$p.env"
+  name="$(jq -r .prefix "$vars.base")-$app"
+  jq -c --arg app "$app" --arg name "$name" --arg image "$image" --argjson port "${port:-8080}" --slurpfile env "$TMP/api/$p.env" \
+    '. + {app: $app, name: $name, image: $image, port: $port, env: $env[0]}' "$vars.base" > "$vars"
+  if [[ "$dry" == 1 ]]; then
+    log "$p: $name: would, with the token left out and the environment's values as <redacted>:"
+    echo "  find:   $(api_cfg "$p" .list.request)"
+    api_render "$p" create "$vars" "$TMP/api/$p.dry" redact
+    echo "  create: $(api_cfg "$p" .create.request) (when $name isn't there)  $(cat "$TMP/api/$p.dry")"
+    if api_has "$p" .update.body; then
+      api_render "$p" update "$vars" "$TMP/api/$p.dry" redact
+      echo "  update: $(api_cfg "$p" .update.request) (when freelunch made it)  $(cat "$TMP/api/$p.dry")"
+    fi
+    if api_has "$p" .deploy.request; then echo "  deploy: $(api_cfg "$p" .deploy.request)"; fi
+    if api_has "$p" .wait.request; then echo "  wait:   $(api_cfg "$p" .wait.request) until $(api_cfg "$p" '.wait.done | join(" or ")')"; fi
+    return 0
+  fi
+  api_secrets "$p" "$vars"
+  api_list "$p"
+  found="$(jq -c --arg n "$name" 'map(select(.name == $n)) | first // empty' "$TMP/api/$p.items.json")"
+  if [[ -n "$found" ]]; then
+    id="$(jq -r .id <<< "$found")"
+    if [[ "$(jq -r '.marker // ""' <<< "$found")" != "$(jq -r .prefix "$vars")" ]]; then
+      die "api: $p has a service $name already, which freelunch didn't make. Pick another name_prefix in $(rel "$(config_dir "$p")/terraform.tfvars"), or rename that service"
+    fi
+    jq -c --arg id "$id" '. + {id: $id}' "$vars" > "$vars.new" && mv "$vars.new" "$vars"
+    if api_step "$p" update "$vars"; then :
+    elif api_has "$p" .update.request; then
+      code="$(api_do "$p" update "$vars")"
+      api_ok "$p" update "$code" || die "api: can't update $name ($code): $(api_error "$p")"
+    fi
+    log "$p: $name: updated"
+  else
+    if api_step "$p" create "$vars"; then :
+    else
+      code="$(api_do "$p" create "$vars")"
+      api_ok "$p" create "$code" || die "api: can't make $name ($code): $(api_error "$p")"
+      id="$(jq -r "$(api_cfg "$p" .create.id) | tostring" "$TMP/api/$p.out" 2>/dev/null)" || id=""
+      [[ -n "$id" && "$id" != null ]] || die "api: $p made $name but its answer has no id at $(api_cfg "$p" .create.id)"
+      jq -c --arg id "$id" '. + {id: $id}' "$vars" > "$vars.new" && mv "$vars.new" "$vars"
+    fi
+    api_record "$p" add "$id" "$name"
+    log "$p: $name: made"
+  fi
+  if api_step "$p" deploy "$vars"; then :
+  elif api_has "$p" .deploy.request; then
+    code="$(api_do "$p" deploy "$vars")"
+    api_ok "$p" deploy "$code" || die "api: can't start the deploy of $name ($code): $(api_error "$p")"
+    if api_has "$p" .deploy.id; then
+      jq -c --arg d "$(jq -r "$(api_cfg "$p" .deploy.id) | tostring" "$TMP/api/$p.out")" '. + {deploy_id: $d}' "$vars" > "$vars.new" && mv "$vars.new" "$vars"
+    fi
+  fi
+  api_wait "$p" "$vars"
+  api_list "$p"
+  url="$(jq -r --arg n "$name" 'map(select(.name == $n)) | first | .url // empty' "$TMP/api/$p.items.json")"
+  if [[ -n "$url" ]]; then
+    api_has "$p" .url && url="$(api_expand "$(api_cfg "$p" .url)" <(jq -cn --arg url "$url" '{url: $url}'))"
+    report_url "$p" "$url" "$app"
+  fi
+}
+
+# api_destroy <provider>: delete what freelunch made: the listed services with its prefix and
+# marker, and those its record names. A service of the same name that it didn't make stays.
+api_destroy() {
+  local p="$1" vars="$TMP/api/$1.vars" item id name code rec ids="" foreign
+  api_load "$p"
+  api_base "$p" > "$vars"; api_secrets "$p" "$vars"
+  api_list "$p"
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    id="$(jq -r .id <<< "$item")"; name="$(jq -r .name <<< "$item")"
+    api_delete_one "$p" "$id" "$name"
+    ids="$ids $id "
+  done < <(api_ours "$p")
+  foreign="$(jq -r --arg pre "$(jq -r .prefix "$vars")" '.[] | select((.name | startswith($pre + "-")) and .marker != $pre) | .name' "$TMP/api/$p.items.json")"
+  [[ -z "$foreign" ]] || log "$p: left alone, as freelunch didn't make them: $(paste -sd' ' - <<< "$foreign")"
+  if [[ -n "$(state_config)" ]]; then
+    rec="$(record_pull "$p")"; rec="${rec:-"{}"}"
+    while IFS=$'\t' read -r id name; do
+      [[ -n "$id" && "$ids" != *" $id "* ]] || continue
+      api_delete_one "$p" "$id" "$name"
+    done < <(jq -r '.resources[]? | [.id, .name] | @tsv' <<< "$rec")
+  fi
+  [[ -n "$ids" ]] || log "$p: nothing of freelunch's to delete"
+}
+
+# api_delete_one <provider> <id> <name>: delete it; already gone is a success
+api_delete_one() {
+  local p="$1" id="$2" name="$3" vars="$TMP/api/$1.vars" code
+  jq -c --arg id "$id" --arg name "$name" '. + {id: $id, name: $name}' "$vars" > "$vars.del"
+  if api_step "$p" delete "$vars.del"; then :
+  else
+    code="$(api_do "$p" delete "$vars.del")"
+    api_ok "$p" delete "$code" '[200,202,204,404]' || die "api: can't delete $name ($code): $(api_error "$p")"
+  fi
+  log "$p: deleted $name"
+  api_record "$p" remove "$id"
+}
+
+# api_status <provider>: what is there
+api_status() {
+  local p="$1" vars="$TMP/api/$1.vars" item rec id name
+  api_load "$p"
+  api_base "$p" > "$vars"; api_secrets "$p" "$vars"
+  api_list "$p"
+  echo "Apps on $p ($(jq -r .prefix "$vars")-*)"
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    printf '  %-20s %s\n' "$(jq -r '.name' <<< "$item")" "$(jq -r '.url // "no address yet"' <<< "$item")"
+  done < <(api_ours "$p")
+  [[ -n "$(api_ours "$p")" ]] || echo "  nothing deployed yet (freelunch api $p deploy)"
+  if [[ -n "$(state_config)" ]]; then
+    rec="$(record_pull "$p")"
+    if [[ -z "$rec" ]]; then echo "  record in the store: none"
+    else
+      echo "  record in the store: $(jq -r '.resources | length' <<< "$rec") resources"
+      while IFS=$'\t' read -r id name; do
+        jq -e --arg id "$id" 'any(.[]; .id == $id)' "$TMP/api/$p.items.json" >/dev/null || echo "  $name is in the record but $p doesn't list it"
+      done < <(jq -r '.resources[]? | [.id, .name] | @tsv' <<< "$rec")
+    fi
+  fi
+}
+
+# cmd_api <provider> check|list|status|destroy | deploy <app> --image <ref> [--port n] [--env-file f] [--dry-run]
+cmd_api() {
+  local p="${1:-}" sub="${2:-}" app="" image="" port="" envfile="" dry=0
+  [[ -n "$p" && -n "$sub" ]] || die "api: freelunch api <provider> check | list | status | destroy | deploy <app> --image <ref>"
+  [[ -f "$PROVIDERS_DIR/$p/api.yaml" ]] || die "api: $p has no api.yaml"
+  shift 2
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if [[ -n "$(state_config)" ]]; then state_setup; fi
+  case "$sub" in
+    check)   api_check "$p" ;;
+    list)    api_load "$p"; api_base "$p" > "$TMP/api/$p.vars"; api_secrets "$p" "$TMP/api/$p.vars"; api_list "$p"; jq -r '.[] | [.id, .name, (.url // ""), (.marker // "")] | @tsv' "$TMP/api/$p.items.json" ;;
+    status)  api_status "$p" ;;
+    destroy) api_destroy "$p" ;;
+    deploy)
+      app="${1:-}"; [[ -n "$app" ]] || die "api deploy: give the app's name"; shift
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --image)    [[ $# -gt 1 ]] || die "api deploy: --image takes an image"; image="$2"; shift ;;
+          --port)     [[ $# -gt 1 && "$2" =~ ^[0-9]+$ ]] || die "api deploy: --port takes a number"; port="$2"; shift ;;
+          --env-file) [[ $# -gt 1 && -f "$2" ]] || die "api deploy: --env-file takes a file"; envfile="$2"; shift ;;
+          --dry-run)  dry=1 ;;
+          *)          die "api deploy: unknown option $1" ;;
+        esac
+        shift
+      done
+      [[ -n "$image" ]] || die "api deploy: --image is needed"
+      api_deploy "$p" "$app" "$image" "$port" "$envfile" "$dry" ;;
+    *) die "api: check, list, status, destroy or deploy" ;;
+  esac
+}
+
 is_platform() { [[ "$(meta "$1" layer)" == "platform" ]]; }
 
 # platform_field <provider> <field>: a field of the stack's target (the platform contract),
@@ -7569,6 +8074,7 @@ main() {
     inventory)            cmd_inventory ;;
     output)               cmd_output "$@" ;;
     catalog)              cmd_catalog ;;
+    api)                  resolve_state_refs; cmd_api "$@" ;;
     engine)               [[ -d "$PROVIDERS_DIR/${1:-}" ]] || die "engine: freelunch engine <provider> [kind]"; engine_of "$@" ;;
     test)                 cmd_test "$@" ;;
     fmt)                  cmd_fmt "$@" ;;

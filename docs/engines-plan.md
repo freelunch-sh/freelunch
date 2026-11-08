@@ -28,17 +28,17 @@ Tick a box when the step is built, tested and committed. Design: [engines.md](en
 
 ## 3. `api` engine
 
-- [ ] `api.yaml` loader and validation
-- [ ] Request runner: auth header, body in a file, secret redaction, status handling
-- [ ] `check`, `list`, `create`, `update`, `deploy`, `wait`, `delete`
-- [ ] Find-before-create and ownership marker rules
-- [ ] 404 on delete counts as success
-- [ ] Dry run prints redacted requests
-- [ ] GraphQL support (`body` templates)
-- [ ] `custom:` hook for steps the format can't express
-- [ ] Records written on create, read on destroy and status
-- [ ] Generic lifecycle test over every `providers/*/api.yaml` with fixtures
-- [ ] Clean-directory test: only the store, nothing local
+- [x] `api.yaml` loader and validation
+- [x] Request runner: auth header, body in a file, secret redaction, status handling
+- [x] `check`, `list`, `create`, `update`, `deploy`, `wait`, `delete`
+- [x] Find-before-create and ownership marker rules
+- [x] 404 on delete counts as success
+- [x] Dry run prints redacted requests
+- [x] GraphQL support (`body` templates)
+- [x] `custom:` hook for steps the format can't express (`custom: <name>` in `api.yaml`, bash in `providers/<p>/api.sh`)
+- [x] Records written on create, read on destroy and status
+- [x] Generic lifecycle test over every `providers/*/api.yaml` with fixtures (`tests/fixtures/<name>/scenario.json`; `sample` is a made-up provider until Deno Deploy lands)
+- [x] Clean-directory test: only the store, nothing local
 
 ## 4. Catalogue
 

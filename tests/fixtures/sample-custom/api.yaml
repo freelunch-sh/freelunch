@@ -1,0 +1,19 @@
+# A step the format can't express: deploy is bash in api.sh.
+custom: demo
+base_url: https://api.custom.test/v1
+auth:
+  env: CUSTOM_TOKEN
+  header: "Authorization: Bearer {token}"
+check:
+  request: GET /me
+list:
+  request: GET /apps
+  items: ".[]"
+  fields: { id: ".id", name: ".name", url: ".url", marker: ".marker" }
+create:
+  request: POST /apps
+  body: "{ name: $name, marker: $prefix }"
+  id: ".id"
+delete:
+  request: DELETE /apps/{id}
+url: "https://{url}"

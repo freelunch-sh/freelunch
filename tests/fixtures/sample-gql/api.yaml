@@ -1,0 +1,24 @@
+# GraphQL: one route, a query or mutation in every body, and failures that come back as 200.
+graphql: true
+base_url: https://api.gql.test
+auth:
+  env: GQL_TOKEN
+  header: "Authorization: Bearer {token}"
+check:
+  request: POST /graphql
+  body: '{ query: "{ me { id } }" }'
+  ok: [200]
+list:
+  request: POST /graphql
+  body: '{ query: "{ services { id name url labels } }" }'
+  items: ".data.services[]"
+  fields: { id: ".id", name: ".name", url: ".url", marker: ".labels.freelunch" }
+create:
+  request: POST /graphql
+  body: |
+    { query: "mutation($n: String!, $i: String!, $e: JSON) { createService(name: $n, image: $i, env: $e) { id } }",
+      variables: { n: $name, i: $image, e: $env } }
+  id: ".data.createService.id"
+delete:
+  request: POST /graphql
+  body: '{ query: "mutation($id: ID!) { deleteService(id: $id) }", variables: { id: $id } }'

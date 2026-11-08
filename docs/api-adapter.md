@@ -1,6 +1,7 @@
 # API adapter: providers without Terraform
 
-Status: design, not built. Render is hand-written in `bin/freelunch` (`render_*`) and stays that way.
+Status: the driver is built (`freelunch api <provider> ...`); no provider uses it yet, Deno Deploy is
+the first (see [engines-plan.md](engines-plan.md)). Render is hand-written in `bin/freelunch` (`render_*`) and stays that way.
 The adapter is for new providers with an HTTP API and no maintained Terraform provider
 (Deno Deploy, Zeabur and the Phase 6 API-only providers).
 
@@ -62,17 +63,33 @@ Each adapter provider states its maturity in `provider.yaml` through the existin
 `verified` line in the README: `fake-api` (tested only against the test double) or `live` (a real
 account has run apply, deploy and destroy). New adapters start as `fake-api`.
 
+## How it works
+
+- `freelunch api <provider> check | list | status | destroy | deploy <app> --image <ref> [--port n]
+  [--env-file f] [--dry-run]` runs the lifecycle. Config comes from the provider's `terraform.tfvars`
+  (`name_prefix`, and each key `settings:` lists).
+- `api.yaml` is a small YAML subset: nested maps, plain, `'single'` or `"double"` quoted scalars,
+  one-line `[lists]` and `{maps}`, and `|` blocks. Any section can have a `body` (GraphQL needs
+  one on every call). With `graphql: true`, an `errors` array in a 200 answer is a failure.
+- The token goes to curl in a config file, never on the command line. Bodies travel in files.
+- When the project has a state store, create writes the service to the provider's record
+  (`record-<provider>`, see [architecture.md](architecture.md#engine-records)), destroy deletes
+  what the record names as well as what the listing shows, and `status` says where they differ.
+- A step the format can't express: `custom: <name>` in `api.yaml`, and `providers/<p>/api.sh`
+  defines `api_custom_<name>_<step>` (`create`, `update`, `deploy`, `delete`), which gets the
+  provider and the vars file. It uses `api_call` for its own requests.
+
 ## Limits of the format
 
 - GraphQL: allowed. `request: POST /graphql` with the query in `body`.
 - Uploads and multi-step deploys (Deno source deploy): not expressible. A provider that needs them
-  names a custom function in `api.yaml` (`custom: deno_deploy`) and implements it in bash.
+  names a custom step in `api.yaml` (`custom: deno_deploy`) and implements it in `providers/<p>/api.sh`.
 - No delete in the API (SnapDeploy): the adapter refuses the provider, since `destroy` could not clean up.
 
 ## Tests
 
-`tests/cli.sh` gets one generic lifecycle test that loops over every `providers/*/api.yaml` using
-`tests/fixtures/<name>/api-responses.json` (route, status, body) in the existing fake curl:
+`tests/cli.sh` has one generic lifecycle test that loops over every `providers/*/api.yaml` (and the made-up `tests/fixtures/sample`) using
+`tests/fixtures/<name>/scenario.json` (per phase, an ordered list of route, status, body) in a fake curl:
 apply and deploy create, a second deploy updates, a foreign service is left alone, a failed wait
 stops with the provider's status, and destroy deletes only ours.
 

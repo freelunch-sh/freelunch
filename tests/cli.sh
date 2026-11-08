@@ -3085,6 +3085,187 @@ state_store() {
 # with_ip <state file> <ip>: the state as an apply that moved oci-main to <ip> leaves it
 with_ip() { jq --arg ip "$2" '.serial += 1 | .outputs.hosts.value[0].public_ip = $ip' "$1" > "$1.new" && mv "$1.new" "$1"; }
 
+# --- the api engine ---------------------------------------------------------------------
+
+# A fake HTTP API for the api engine, in its own PATH folder. It serves the phase named in
+# FAKE_API_PHASE from tests/fixtures/<name>/scenario.json: an ordered list of {match, status,
+# body, times}, where match is "METHOD /path" (the query left out); each entry is used up in turn (once
+# unless it says times), and the last one that matches goes on answering. A request nothing
+# matches gets a 599. It logs "METHOD /path", and keeps the request bodies and the headers
+# the config file gave curl.
+mkdir -p "$WORK/api-bin"
+cat > "$WORK/api-bin/curl" <<'EOF'
+#!/usr/bin/env bash
+method=GET out=/dev/null cfg="" data=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -w|--max-time) shift 2 ;;
+    -X) method="$2"; shift 2 ;;
+    -K) cfg="$2"; shift 2 ;;
+    --data-binary) data="${2#@}"; shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+path="/${url#*://*/}"; path="${path%%\?*}"
+echo "$method $path" >> "$FAKE_API_DIR/log"
+echo "$*" >> "$FAKE_API_DIR/argv"
+[[ -z "$cfg" ]] || grep '^header' "$cfg" >> "$FAKE_API_DIR/headers"
+[[ -z "$data" ]] || { cat "$data" >> "$FAKE_API_DIR/bodies"; echo >> "$FAKE_API_DIR/bodies"; }
+scenario="$FAKE_API_DIR/scenario.json"
+touch "$FAKE_API_DIR/used"
+matches="$(jq -r --arg r "$method $path" --arg phase "$FAKE_API_PHASE" '.[$phase] | to_entries[] | select(.value.match == $r) | .key' "$scenario")"
+pick=""
+for i in $matches; do
+  times="$(jq -r --arg phase "$FAKE_API_PHASE" ".[\$phase][$i].times // 1" "$scenario")"
+  used="$(grep -c "^$i\$" "$FAKE_API_DIR/used" || true)"
+  if [[ "$used" -lt "$times" ]]; then pick="$i"; break; fi
+  pick="$i"
+done
+if [[ -z "$pick" ]]; then echo '{"message":"no such route in the scenario"}' > "$out"; echo 599; exit 0; fi
+echo "$pick" >> "$FAKE_API_DIR/used"
+jq -c --arg phase "$FAKE_API_PHASE" ".[\$phase][$pick].body" "$scenario" > "$out"
+jq -r --arg phase "$FAKE_API_PHASE" ".[\$phase][$pick].status" "$scenario"
+EOF
+chmod +x "$WORK/api-bin/curl"
+
+# api_checkout <dir> <name>: a copy of the CLI whose providers folder has that provider's
+# api.yaml: its fixture's, for the made-up one
+api_checkout() {
+  local dir="$1" name="$2"
+  mkdir -p "$dir/bin" "$dir/providers/$name"
+  cp "$CLI" "$dir/bin/"
+  if [[ -f "$ROOT/tests/fixtures/$name/api.yaml" ]]; then cp "$ROOT/tests/fixtures/$name/"api.* "$dir/providers/$name/"; else cp "$ROOT/providers/$name/"api.* "$dir/providers/$name/"; fi
+}
+
+# api_run <checkout> <name> <phase> <args...>: freelunch api <name> <args> against the fake,
+# with a fresh log. The token is the scenario's, in the variable api.yaml names.
+api_run() {
+  local dir="$1" name="$2" phase="$3" var; shift 3
+  rm -rf "$dir/fake"; mkdir -p "$dir/fake"
+  cp "$ROOT/tests/fixtures/$name/scenario.json" "$dir/fake/scenario.json"
+  var="$(sed -n 's/^  env: *//p' "$dir/providers/$name/api.yaml" | head -1)"
+  (cd "${API_CWD:-$dir}" && env "$var=$(jq -r .token "$ROOT/tests/fixtures/$name/scenario.json")" PATH="$WORK/api-bin:$PATH" \
+    FAKE_API_DIR="$dir/fake" FAKE_API_PHASE="$phase" FREELUNCH_API_POLL=0 "$dir/bin/freelunch" api "$name" "$@")
+}
+
+# The same lifecycle for every provider that has an api.yaml, from its fixture: a first deploy
+# makes the service, a second updates it, one somebody else made is left alone, a failed deploy
+# stops with the provider's status, an API error hides the app's secrets, and destroy deletes
+# only what freelunch made. A provider with an api.yaml and no fixture fails here.
+test_api_engine_lifecycle_for_every_provider() {
+  local f name dir out fake token
+  printf 'SECRET_KEY=supersecretvalue\nPLAIN=1\n' > "$WORK/api.env"
+  for f in "$ROOT"/providers/*/api.yaml "$ROOT"/tests/fixtures/*/api.yaml; do
+    [[ -f "$f" ]] || continue
+    name="$(basename "$(dirname "$f")")"
+    exists "$ROOT/tests/fixtures/$name/scenario.json"
+    [[ "$(jq -r '.generic == false' "$ROOT/tests/fixtures/$name/scenario.json")" == false ]] || continue
+    dir="$WORK/api-$name"; fake="$dir/fake"
+    token="$(jq -r .token "$ROOT/tests/fixtures/$name/scenario.json")"
+    api_checkout "$dir" "$name"
+    # create: the token goes in the config file, never on curl's command line
+    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --port 8080 --env-file "$WORK/api.env" 2>&1)"
+    contains "$out" "$name: freelunch-web: made"
+    contains "$(cat "$fake/headers")" "$token"
+    lacks "$(cat "$fake/argv")" "$token"
+    contains "$(cat "$fake/bodies")" '"SECRET_KEY":"supersecretvalue"'
+    lacks "$out" supersecretvalue
+    # update: a service of ours is there, so it is changed, not made again
+    out="$(api_run "$dir" "$name" update deploy web --image ghcr.io/me/web:2 --env-file "$WORK/api.env" 2>&1)"
+    contains "$out" "$name: freelunch-web: updated"
+    lacks "$out" ": made"
+    # a service of that name that freelunch didn't make is never touched
+    if out="$(api_run "$dir" "$name" foreign deploy web --image ghcr.io/me/web:1 2>&1)"; then echo "$name: deploy over a foreign service should fail"; return 1; fi
+    contains "$out" "which freelunch didn't make"
+    equals "$(grep -vc '^GET ' "$fake/log" || true)" 0
+    # a deploy that ends badly stops with the provider's status
+    if out="$(api_run "$dir" "$name" failed deploy web --image ghcr.io/me/web:1 2>&1)"; then echo "$name: a failed deploy should fail"; return 1; fi
+    contains "$out" "$(jq -r '.failed_says' "$ROOT/tests/fixtures/$name/scenario.json")"
+    # an API error doesn't repeat the app's secrets
+    if out="$(api_run "$dir" "$name" rejected deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api.env" 2>&1)"; then echo "$name: a rejected create should fail"; return 1; fi
+    contains "$out" "bad value <redacted> in env"
+    lacks "$out" supersecretvalue
+    # destroy: only ours (a 404 says it was gone already); the other two stay
+    out="$(api_run "$dir" "$name" destroy destroy 2>&1)"
+    contains "$out" "deleted freelunch-web"
+    contains "$out" "left alone"
+    equals "$(grep -c '^DELETE ' "$fake/log")" 1
+    lacks "$(cat "$fake/log")" "DELETE /v1/services/x9"
+    lacks "$(cat "$fake/log")" "DELETE /v1/services/y3"
+    # dry run: nothing is sent, and the env value is hidden
+    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api.env" --dry-run 2>&1)"
+    contains "$out" "would"
+    lacks "$out" supersecretvalue
+    [[ ! -e "$fake/log" ]] || { echo "$name: a dry run sent requests"; return 1; }
+  done
+}
+
+# GraphQL: every call has a body, and an error inside a 200 is a failure.
+test_api_engine_speaks_graphql() {
+  local dir="$WORK/api-gql" out
+  printf 'SECRET_KEY=supersecretvalue\n' > "$WORK/api.env"
+  api_checkout "$dir" sample-gql
+  contains "$(api_run "$dir" sample-gql check check 2>&1)" "the token works"
+  out="$(api_run "$dir" sample-gql create deploy web --image img:1 --env-file "$WORK/api.env" 2>&1)"
+  contains "$out" "freelunch-web: made"
+  contains "$(cat "$dir/fake/bodies")" '"variables":{"n":"freelunch-web","i":"img:1","e":{"SECRET_KEY":"supersecretvalue"}}'
+  equals "$(grep -c '^POST /graphql$' "$dir/fake/log")" 3
+  if out="$(api_run "$dir" sample-gql quota deploy web --image img:1 --env-file "$WORK/api.env" 2>&1)"; then echo "a GraphQL error should fail"; return 1; fi
+  contains "$out" "can't make freelunch-web (400): quota exceeded for <redacted>"
+  lacks "$out" supersecretvalue
+}
+
+# A step the format can't express is bash in the provider's api.sh, named by custom:.
+test_api_engine_runs_a_custom_step() {
+  local dir="$WORK/api-custom" out
+  api_checkout "$dir" sample-custom
+  out="$(api_run "$dir" sample-custom create deploy web --image img:7 2>&1)"
+  contains "$out" "freelunch-web: made"
+  equals "$(cat "$dir/fake/custom")" "uploaded img:7 for a1"
+  contains "$out" "web: https://web.custom.test"
+}
+
+# The provider's record in the store: written on create, read by status and destroy, and a
+# project with nothing but the store's settings can do all of it.
+test_api_engine_keeps_a_record_in_the_store() {
+  local p="$WORK/api-rec" dir="$WORK/api-rec-co" out
+  mkdir -p "$p/.freelunch"
+  state_store "$p"
+  printf 'SECRET_KEY=supersecretvalue\n' > "$WORK/api.env"
+  api_checkout "$dir" sample
+  export API_CWD="$p"
+  api_run "$dir" sample create deploy web --image img:1 >/dev/null 2>&1
+  exists "$p-store/record-sample.tfstate"
+  out="$(in_dir "$p" "$CLI" state record pull sample 2>/dev/null)"
+  equals "$(jq -r '.resources[0] | "\(.id) \(.name) \(.kind) \(.marker)"' <<< "$out")" "s1 freelunch-web app freelunch"
+  # status reads it, and says what the provider no longer lists
+  out="$(api_run "$dir" sample foreign status 2>&1)"
+  contains "$out" "record in the store: 1 resources"
+  contains "$out" "freelunch-web is in the record but sample doesn't list it"
+  # destroy deletes what the record names even when the listing doesn't show it, then clears it
+  out="$(api_run "$dir" sample record_only destroy 2>&1)"
+  contains "$out" "deleted freelunch-web"
+  equals "$(grep -c '^DELETE /v1/services/s1' "$dir/fake/log")" 1
+  equals "$(in_dir "$p" "$CLI" state record pull sample 2>/dev/null | jq -c .resources)" "[]"
+  unset API_CWD
+}
+
+# api.yaml is checked when it is read: a missing field says which, and a provider whose API
+# can't delete is refused, since destroy could not clean up after it.
+test_api_engine_checks_api_yaml() {
+  local dir="$WORK/api-bad" out
+  api_checkout "$dir" sample
+  grep -v '^  fields:' "$dir/providers/sample/api.yaml" > "$dir/x" && mv "$dir/x" "$dir/providers/sample/api.yaml"
+  if out="$(api_run "$dir" sample create status 2>&1)"; then echo "a missing field should fail"; return 1; fi
+  contains "$out" "providers/sample/api.yaml needs list.fields.id"
+  api_checkout "$dir" sample
+  sed -i.bak '/^delete:/,/^  ok:/d' "$dir/providers/sample/api.yaml"
+  if out="$(api_run "$dir" sample create status 2>&1)"; then echo "no delete should be refused"; return 1; fi
+  contains "$out" "sample is refused: its API has no way to delete"
+}
+
 # A provider's engine is what its provider.yaml says, or what its iac implies.
 test_engine_of_defaults_from_iac() {
   equals "$("$CLI" engine render)" tofu

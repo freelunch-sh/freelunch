@@ -1,0 +1,9 @@
+{
+  "generic": false,
+  "token": "custom-token-9",
+  "create": [
+    {"match": "GET /v1/apps", "status": 200, "body": []},
+    {"match": "POST /v1/apps", "status": 201, "body": {"id": "a1"}},
+    {"match": "GET /v1/apps", "status": 200, "body": [{"id": "a1", "name": "freelunch-web", "url": "web.custom.test", "marker": "freelunch"}]}
+  ]
+}
