@@ -55,15 +55,15 @@ Tick a box when the step is built, tested and committed. Design: [engines.md](en
 - [x] One concurrency group per project (provision and deploy share `freelunch`; the capacity wait keeps its own on purpose, so a deploy can run beside a wait)
 - [x] Provisioning only from trusted refs, never forks
 - [x] Per-secret passing is the default; bundle stays optional
-- [ ] `ci init`: guided token steps per provider (where to get it, what scope)
-- [ ] `ci init`: create the state store and store its credentials as secrets
-- [ ] `ci init`: `gh secret set`, repository variables, workflow files (secrets done: `ci init` asks set-now or print, `--set-secrets` / `--print-secrets` skip the question; variables and the workflows are left)
-- [ ] `ci init`: first dry run in Actions so the user sees it work
+- [x] `ci init`: guided token steps per provider (where to get it, what scope)
+- [x] `ci init`: create the state store and store its credentials as secrets
+- [x] `ci init`: `gh secret set`, repository variables, workflow files (secrets and variables asked first: set now or print; only `CLOUDFLARE_ACCOUNT_ID` is a variable so far)
+- [x] `ci init`: first dry run in Actions so the user sees it work (`doctor`, started only when asked and when GitHub has the workflows)
 - [x] OIDC (keyless) for AWS (`freelunch ci oidc aws`; the role has no permissions unless `--policy-arn` is given)
 - [x] OIDC (keyless) for GCP (`freelunch ci oidc gcp`; no permissions unless `--role` is given)
 - [x] OIDC (keyless) for Azure (`freelunch ci oidc azure`; no permissions unless `--role` is given)
 - [x] `doctor` runs in Actions and reports missing or bad secrets
-- [ ] Docs: Actions is the default path, local is optional
+- [x] Docs: Actions is the default path, local is optional
 - [x] Tests: generated workflows per job
 
 ## 6. First `api` providers

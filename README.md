@@ -52,6 +52,15 @@ Read [docs/architecture.md](docs/architecture.md) for the reasoning.
 
 ## Quick start: deploy your project
 
+**GitHub Actions is the main path; your own machine is optional.** `freelunch ci init` is the
+helper: it writes one workflow per job (provision, CI, deploy), says where to get each token and
+what it needs to be allowed to do, creates the state store on request, puts the secrets and
+settings in your repository with `gh` (asking whether to set them or only print the commands),
+sets up keyless sign-in to AWS, Google Cloud or Azure with `freelunch ci oidc`, and can start a
+first `doctor` run in Actions. After that a push to `main` provisions and deploys, and nothing
+runs on your computer. Everything below works locally too, which is how you try it out.
+[How to set it up](docs/ci.md).
+
 Put your backend's container on an Always Free Oracle Cloud VM and serve it at
 `https://api.example.com` through a Cloudflare Tunnel, with no port open except SSH.
 freelunch is a command you install once. Your repository gets only a `.freelunch/` folder
@@ -176,7 +185,7 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 | `freelunch domain add\|status <name>` | Put the name on Cloudflare and print the nameservers to set at its provider; say when they are set and the zone is active |
 | `freelunch state [push\|pull]`, `state init <store>` | Keep an encrypted copy of every stack's state where CI and your other machines reach it: OCI Object Storage (`state init oci` makes the bucket), R2, B2 or GitLab. Commands copy it on their own ([docs/ci.md](docs/ci.md#1-keep-the-state-in-a-store)) |
 | `freelunch agent` / `check` | Instructions for Claude Code, Codex, Cursor and Copilot that write the CI/CD workflow with freelunch as a step ([workflow template](docs/workflow-template.yml)); an offline config check for pull requests |
-| `freelunch ci init\|secrets\|wait` | Run the project from CI: workflows that wait for capacity on a schedule and deploy each new image, the secret `FREELUNCH_BUNDLE` with what git doesn't have, and a wait for capacity handed to GitHub Actions with the plan you reviewed ([docs/ci.md](docs/ci.md)) |
+| `freelunch ci init\|oidc\|secrets\|wait` | Run the project from CI: a workflow per job (provision, CI, deploy), the secrets and settings put in the repository with `gh` when you say so, keyless sign-in to AWS, Google Cloud and Azure (`ci oidc`), a wait for capacity handed to GitHub Actions with the plan you reviewed, and `FREELUNCH_BUNDLE` for one-secret setups ([docs/ci.md](docs/ci.md)) |
 | `freelunch list` | Every provider with category, status, layer, IaC support and deployment state |
 | `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts and platforms → services → hybrid → glue). A platform's `apply` makes the target there (the Northflank project) and `destroy` deletes it with what `deploy` put in it. `plan --show-user-data` prints each host's cloud-init with secrets left out, `plan --out <file>` saves a plan and `apply --plan <file>` applies it without a prompt. `apply --wait-for-capacity` retries hosts while OCI is out of capacity, `--detach` in the background ([how](providers/oci/README.md#waiting-for-capacity)) |
 | `freelunch status` | One screen after setup: hosts and platforms, the apps on each one and whether they run, tunnels and their URLs, service token expiry, capacity waits |

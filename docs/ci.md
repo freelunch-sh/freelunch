@@ -1,5 +1,25 @@
 # Run freelunch from CI
 
+**This is the main way to run freelunch.** Provisioning, CI and deploys run in GitHub Actions;
+your machine is only needed once, to run the helper, and can stay off afterwards. Running
+`apply` or `deploy` locally still works and is how you try things out, but nothing needs it.
+
+The short version, on a project with a `.freelunch/` folder in a GitHub repository:
+
+```bash
+freelunch ci init       # asks before it creates a state store, sets secrets or starts a run
+git add -A && git commit -m "freelunch workflows" && git push
+```
+
+`ci init` creates the state store if you pick one (`--state=git` keeps it in a branch of the
+repository), writes the workflows, says where to get each token and what it needs to be allowed
+to do, and asks whether to set the secrets and variables in the repository with `gh` or print
+the commands (`--set-secrets` and `--print-secrets` skip the question). For AWS, Google Cloud
+and Azure, [`freelunch ci oidc`](#keyless-sign-in-to-aws-google-cloud-and-azure) replaces stored
+keys. Once the workflows are pushed, `freelunch ci init --first-run` runs `doctor` in Actions, to
+see that the secrets and tools are right; it only starts when GitHub has the workflows, and only
+when you ask (or say yes when asked). The rest of this page is the detail.
+
 Everything in the [walkthrough](deploy-a-container.md) runs on your machine, which is fine
 until it has to stay on. Waiting for Oracle's Arm capacity can take days, and a laptop
 sleeps when its lid closes: `caffeinate` keeps a Mac awake only while the lid is open, so a

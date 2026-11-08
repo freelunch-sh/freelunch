@@ -110,6 +110,9 @@ CI:
                           Then the secrets they pass on: --set-secrets runs gh secret set for each,
                           --print-secrets only prints what to run; without either it asks (and
                           prints when nobody can answer)
+                          --state=<git|oci|r2|b2|gitlab> creates the state store if there is none,
+                          --jobs=provision,ci,cd picks workflows, --first-run starts doctor in
+                          Actions (once the workflows are pushed)
   ci oidc aws|gcp|azure [--run|--print] [--policy-arn <arn> | --role <role>]
                           Sign in to AWS, Google Cloud or Azure from Actions without a stored key:
                           an identity only this repository's main branch and pull requests can use. Asks whether to run the cloud's commands or print
@@ -7244,26 +7247,60 @@ ci_secret_names() {
   for var in $(tfvars_map "$PROJECT/apps.tfvars" registries password_env | cut -f2); do
     emit "$var" "the read-only token for a private registry (apps.tfvars)"
   done
+  # what the state store itself needs to be reached (FREELUNCH_STATE_AWS_ACCESS_KEY_ID, ...)
+  if [[ -n "$(state_config)" ]]; then
+    for var in $(compgen -v FREELUNCH_STATE_ || true); do
+      [[ "$var" != FREELUNCH_STATE_PASSPHRASE && "$var" != FREELUNCH_STATE_KEY_MADE && -n "${!var:-}" ]] || continue
+      emit "$var" "the state store's credential (freelunch state init made it)"
+    done
+  fi
+}
+
+# ci_variable_names: the settings the workflows pass on that are not secrets, which go in the
+# repository's variables: NAME, then what it is. Only those that are set here.
+ci_variable_names() {
+  [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]] || printf '%s\t%s\n' CLOUDFLARE_ACCOUNT_ID "your Cloudflare account ID (not a secret)"
+}
+
+# ci_token_help <name>: where to get the secret and what it needs to be allowed to do, from the
+# provider READMEs, as one line
+ci_token_help() {
+  case "$1" in
+    FREELUNCH_STATE_PASSPHRASE) echo "the FREELUNCH_STATE_PASSPHRASE line in .freelunch/.env (16 characters or more); keep a copy somewhere safe too, as without it nobody can read the state" ;;
+    CLOUDFLARE_API_TOKEN)   echo "dash.cloudflare.com > My Profile > API Tokens > Create Token, a custom one with Zone:Read, DNS:Edit and Cloudflare Tunnel:Edit (and Access or R2 only if a route uses them), limited to your zone and account (providers/cloudflare/README.md#api-token)" ;;
+    NORTHFLANK_API_TOKEN)   echo "your Northflank team's settings > API > Tokens, with a role that can create, read, update and delete projects and services, and update their secrets (providers/northflank/README.md#api-token)" ;;
+    SCW_SECRET_KEY)         echo "console.scaleway.com > IAM > API keys, for a user or application that can manage Serverless Containers in the project; the secret key (providers/scaleway/README.md#api-key)" ;;
+    RENDER_API_KEY)         echo "dashboard.render.com > Account settings > API Keys (providers/render/README.md#api-key)" ;;
+    NEON_API_KEY)           echo "the Neon console > Account settings > API keys (providers/neon/README.md#api-key)" ;;
+    SUPABASE_ACCESS_TOKEN)  echo "supabase.com/dashboard/account/tokens (providers/supabase/README.md#access-token)" ;;
+    CLOUD_RUN_ACCESS_TOKEN) echo "gcloud auth application-default print-access-token, from an account that can use Cloud Run in the project; it expires within the hour, so for CI freelunch ci oidc gcp is better (providers/cloud-run/README.md)" ;;
+    AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY) echo "AWS console > IAM > Users > Security credentials > Create access key; or better, no key at all: freelunch ci oidc aws" ;;
+    FREELUNCH_OCI_CONFIG)   echo "the profile block the OCI console shows when you add an API key (Profile > API keys > Add API key); ci init takes it from ~/.oci/config" ;;
+    FREELUNCH_OCI_KEY)      echo "the .pem private key the OCI console gave you when you added the API key; ci init takes it from the profile's key_file" ;;
+    FREELUNCH_SSH_PRIVATE_KEY) echo "a key without a passphrase (ssh-keygen -t ed25519 -N ''), whose .pub is in ssh_public_keys; ci init takes ~/.ssh/id_* when it matches" ;;
+    FREELUNCH_STATE_*)      echo "the state store's key, which freelunch state init wrote to .freelunch/.env" ;;
+    B2_APPLICATION_KEY_ID|B2_APPLICATION_KEY) echo "backblaze.com > App Keys > Add a New Application Key (providers/backblaze-b2/README.md)" ;;
+    *)                      echo "see the provider's README under providers/ for where to get it and what it may do" ;;
+  esac
 }
 
 # ci_env_block <indent>: the env: lines that hand those secrets to a step
 ci_env_block() {
-  local name what extra="${2:-}"
-  if [[ -n "$extra" ]]; then
-    printf '%senv:\n' "$1"
-    printf '%s  %s\n' "$1" "$extra"
-  else
-    while IFS=$'\t' read -r name what; do
-      [[ -n "$name" ]] || continue
-      printf '%senv:\n' "$1"
-      break
-    done < <(ci_secret_names)
-  fi
+  local indent="$1" extra="${2:-}" name what lines=()
+  [[ -z "$extra" ]] || lines+=("$extra")
   while IFS=$'\t' read -r name what; do
     [[ -n "$name" ]] || continue
     # shellcheck disable=SC2016 # a GitHub expression, not ours
-    printf '%s  %s: ${{ secrets.%s }}\n' "$1" "$name" "$name"
+    lines+=("$(printf '%s: ${{ secrets.%s }}' "$name" "$name")")
   done < <(ci_secret_names)
+  while IFS=$'\t' read -r name what; do
+    [[ -n "$name" ]] || continue
+    # shellcheck disable=SC2016 # a GitHub expression, not ours
+    lines+=("$(printf '%s: ${{ vars.%s }}' "$name" "$name")")
+  done < <(ci_variable_names)
+  [[ ${#lines[@]} -gt 0 ]] || return 0
+  printf '%senv:\n' "$indent"
+  for name in "${lines[@]}"; do printf '%s  %s\n' "$indent" "$name"; done
 }
 
 # ci_restore_env: write the files that secrets carry as text: the OCI profile and key, and the
@@ -7586,10 +7623,53 @@ pipeline_workflow() {
   fi
 }
 
+# ci_offer_state_store <kind>: CI needs the state in a store both it and this machine reach. When
+# the project has none, create one: the kind that was asked for, or whichever whoever is there
+# picks (git is a branch of this repository; the others are buckets, which take an account). With
+# nobody to answer it only says what to run.
+ci_offer_state_store() {
+  local kind="$1"
+  [[ -z "$(state_config)" ]] || return 0
+  if [[ -z "$kind" ]] && interactive; then
+    kind="$(ask "CI needs the state in a store, and this project has none. Create one now? (git, oci, r2, b2, gitlab, or no)" no)"
+    [[ "$kind" =~ ^(git|oci|r2|b2|gitlab)$ ]] || kind=""
+  fi
+  [[ -n "$kind" ]] || return 0
+  # shellcheck disable=SC2046 # the store's own words
+  cmd_state init "$kind"
+}
+
+# ci_offer_first_run <yes|no|ask>: run doctor in Actions, so the first run shows the secrets and
+# tools are right. It needs the workflows on the repository's default branch, so it only starts
+# when gh can see them there. Asks first; nothing runs unasked.
+ci_offer_first_run() {
+  local how="$1" base repo a
+  [[ "$how" != no ]] || return 0
+  if [[ "$how" == ask ]]; then
+    interactive || return 0
+    a="$(ask "Run freelunch doctor in GitHub Actions now, to see it work? (yes/no)" no)"
+    [[ "$a" =~ ^(y|yes)$ ]] || return 0
+  fi
+  base="$(dirname "$PROJECT")"
+  command -v gh >/dev/null || { log "ci init: the first run takes gh (https://cli.github.com); or Actions > freelunch-provision > Run workflow > doctor"; return 0; }
+  repo="$(cd "$base" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" || { log "ci init: gh can't tell which repository this is, so no first run"; return 0; }
+  if ! (cd "$base" && gh workflow list --repo "$repo" --json name -q '.[].name' 2>/dev/null) | grep -qx freelunch-provision; then
+    log "ci init: GitHub doesn't have the workflows yet: commit and push them, then freelunch ci init --first-run (or Actions > freelunch-provision > Run workflow > doctor)"
+    return 0
+  fi
+  (cd "$base" && gh workflow run "$CI_PROVISION_WORKFLOW" --repo "$repo" -f action=doctor) >/dev/null \
+    || { log "ci init: gh couldn't start the workflow (see above)"; return 0; }
+  log "started freelunch doctor in $repo; watch it with: gh run watch --repo $repo, or on the Actions tab"
+}
+
 ci_init() {
-  local where="github" base a given=0 pipeline=0 secrets=ask jobs="provision,ci,cd"
+  local where="github" base a given=0 pipeline=0 secrets=ask jobs="provision,ci,cd" state_kind="" first_run=ask
   for a in "$@"; do
     case "$a" in
+      --state=*)       state_kind="${a#--state=}"
+                       [[ "$state_kind" =~ ^(git|oci|r2|b2|gitlab)$ ]] || die "ci init: --state takes git, oci, r2, b2 or gitlab" ;;
+      --first-run)     first_run=yes ;;
+      --no-first-run)  first_run=no ;;
       --jobs=*)        jobs="${a#--jobs=}"
                        [[ "$jobs" =~ ^(provision|ci|cd)(,(provision|ci|cd))*$ ]] || die "ci init: --jobs takes provision, ci and cd, separated by commas" ;;
       --set-secrets)   secrets=set ;;
@@ -7603,6 +7683,7 @@ ci_init() {
   [[ -n "$PROJECT" ]] || die "ci init: run it in a project, where its .freelunch/ folder is (freelunch init makes one)"
   need_tf
   base="$(dirname "$PROJECT")"
+  ci_offer_state_store "$state_kind"
   case "$where" in
     github) if [[ $pipeline -eq 1 ]]; then [[ $CI_BUNDLE_MODE -eq 0 ]] || die "ci init: --pipeline hands secrets over one by one, not as a bundle"; pipeline_workflow "$base"; else [[ ",$jobs," != *,cd,* ]] || github_workflows "$base"; job_workflows "$base" "$jobs"; fi ;;
     gitlab) CI_BUNDLE_MODE=1; gitlab_pipeline "$base" ;;
@@ -7615,6 +7696,7 @@ ci_init() {
     echo "  $i. the secrets:" >&2
     ci_hand_over_secrets "$secrets"
     echo "  $((i + 1)). commit and push .freelunch/ and the workflows" >&2
+    ci_offer_first_run "$first_run"
   elif [[ "$where" == "github" ]]; then
     echo "  $i. freelunch ci secrets: what CI needs and git doesn't have, in the secret FREELUNCH_BUNDLE" >&2
     echo "  $((i + 1)). commit and push the workflows, then freelunch ci wait <stack> --plan <file> to wait for capacity there" >&2
@@ -7996,14 +8078,15 @@ ci_secret_value() {
 # command line; print only says what to run. ask lets whoever is there choose, and prints
 # when nobody can answer: putting secrets in a repository is not something to do unasked.
 ci_hand_over_secrets() {
-  local how="$1" base repo name what n=0 answer set=0 skipped="" cmd
+  local how="$1" base repo name what n=0 v=0 answer set=0 skipped="" cmd
   base="$(dirname "$PROJECT")"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   while IFS=$'\t' read -r name what; do [[ -z "$name" ]] || n=$((n + 1)); done < <(ci_secret_names)
-  [[ $n -gt 0 ]] || return 0
+  while IFS=$'\t' read -r name what; do [[ -z "$name" ]] || v=$((v + 1)); done < <(ci_variable_names)
+  [[ $n -gt 0 || $v -gt 0 ]] || return 0
   if [[ "$how" == ask ]]; then
     if interactive && command -v gh >/dev/null; then
-      answer="$(ask "Set the $n secrets the workflows pass on in the GitHub repository now with gh, or print the commands for you to run? (set/print)" print)"
+      answer="$(ask "Set the $n secrets and $v variables the workflows pass on in the GitHub repository now with gh, or print the commands for you to run? (set/print)" print)"
       case "$answer" in set|s|S|y|yes) how=set ;; *) how=print ;; esac
     else
       how=print
@@ -8023,10 +8106,16 @@ ci_hand_over_secrets() {
         set=$((set + 1))
       else
         skipped="$skipped $name"
-        log "$name: nothing to put in it here ($what): set it in the shell or $(rel "$PROJECT")/.env and run ci init again, or gh secret set $name"
+        log "$name: nothing to put in it here ($what). Get it from: $(ci_token_help "$name"). Then put it in the shell or $(rel "$PROJECT")/.env and run ci init again, or gh secret set $name"
       fi
       rm -f "$TMP/secret.value"
     done < <(ci_secret_names)
+    while IFS=$'\t' read -r name what; do
+      [[ -n "$name" ]] || continue
+      (cd "$base" && gh variable set "$name" --repo "$repo" --body "${!name}") >/dev/null \
+        || die "ci init: gh couldn't set the variable $name in $repo (see above)"
+      log "set the variable $name in $repo ($what)"
+    done < <(ci_variable_names)
     log "$set of $n secrets set in $repo${skipped:+; still to set:$skipped}"
     return 0
   fi
@@ -8038,8 +8127,14 @@ ci_hand_over_secrets() {
       FREELUNCH_OCI_CONFIG|FREELUNCH_OCI_KEY|FREELUNCH_SSH_PRIVATE_KEY) cmd="freelunch ci init --set-secrets  # sets $name from its file" ;;
     esac
     echo "       $name: $what" >&2
+    echo "           get it from: $(ci_token_help "$name")" >&2
     echo "           $cmd" >&2
   done < <(ci_secret_names)
+  while IFS=$'\t' read -r name what; do
+    [[ -n "$name" ]] || continue
+    echo "       $name (a variable, not a secret): $what" >&2
+    echo "           gh variable set $name --body \"\$$name\"" >&2
+  done < <(ci_variable_names)
 }
 
 # bundle_put <path in the bundle> <file>: add a file to the bundle in TMP, as one line of

@@ -270,6 +270,7 @@ case "$1 $2" in
     mkdir -p "$FAKE_GH"
     name="$3"; body=""; while [[ $# -gt 0 ]]; do [[ "$1" == "--body" ]] && body="$2"; shift; done
     printf '%s' "$body" > "$FAKE_GH/var-$name" ;;
+  "workflow list") printf '%s\n' ${FAKE_WORKFLOWS:-} ;;
   "workflow enable"|"workflow disable"|"workflow run") ;;
   "run list") echo "${FAKE_RUNS:-[]}" ;;
   "api users/"*) echo 4242 ;;
@@ -3868,6 +3869,65 @@ test_ci_oidc_azure_sets_up_keyless_sign_in() {
   fails grep -q '^az ad app create' "$p/fake.log"
   if out="$(ci_in "$p" ci oidc nonesuch 2>&1)"; then echo "an unknown cloud should fail"; return 1; fi
   contains "$out" "aws, gcp or azure"
+}
+
+# ci init says where each secret comes from, passes on the state store's own credentials, puts
+# the settings that are no secret in the repository's variables, creates the state store when asked,
+# and starts a first doctor run in Actions only when asked.
+test_ci_init_guides_the_secrets_and_the_first_run() {
+  local p="$WORK/ci-guide" out
+  doctor_project "$p"
+  state_store "$p"
+  printf 'FREELUNCH_STATE_AWS_ACCESS_KEY_ID=ak-state\nCLOUDFLARE_ACCOUNT_ID=acc-123\n' >> "$p/.freelunch/.env"
+  # where to get each, in what is printed and in what is left unset
+  out="$(ci_in "$p" ci init --print-secrets 2>&1)"
+  contains "$out" "get it from: dash.cloudflare.com > My Profile > API Tokens"
+  contains "$out" "get it from: the FREELUNCH_STATE_PASSPHRASE line in .freelunch/.env"
+  # the state store's credentials are secrets of their own, and the account ID a variable
+  contains "$out" "FREELUNCH_STATE_AWS_ACCESS_KEY_ID: the state store's credential"
+  contains "$out" "CLOUDFLARE_ACCOUNT_ID (a variable, not a secret)"
+  grep -q 'FREELUNCH_STATE_AWS_ACCESS_KEY_ID: \${{ secrets.FREELUNCH_STATE_AWS_ACCESS_KEY_ID }}' "$p/.github/workflows/freelunch.yml"
+  grep -q 'CLOUDFLARE_ACCOUNT_ID: \${{ vars.CLOUDFLARE_ACCOUNT_ID }}' "$p/.github/workflows/freelunch.yml"
+  fails grep -q 'secrets.CLOUDFLARE_ACCOUNT_ID' "$p/.github/workflows/freelunch.yml"
+  if command -v actionlint >/dev/null; then actionlint "$p"/.github/workflows/*.yml; fi
+  rm -r "$p/.github"
+  out="$(ci_in "$p" ci init --set-secrets 2>&1)"
+  equals "$(cat "$p/gh/FREELUNCH_STATE_AWS_ACCESS_KEY_ID")" ak-state
+  equals "$(cat "$p/gh/var-CLOUDFLARE_ACCOUNT_ID")" acc-123
+  contains "$out" "Get it from: dash.cloudflare.com > My Profile > API Tokens"
+  # the first run: not unless asked; not before GitHub has the workflows
+  fails grep -q '^gh workflow run' "$p/fake.log"
+  rm -r "$p/.github"
+  out="$(ci_in "$p" ci init --print-secrets --first-run 2>&1)"
+  contains "$out" "GitHub doesn't have the workflows yet"
+  fails grep -q '^gh workflow run' "$p/fake.log"
+  rm -r "$p/.github"
+  FAKE_WORKFLOWS="freelunch-provision freelunch" ci_in "$p" ci init --print-secrets --first-run >/dev/null 2>&1
+  grep -qx 'gh workflow run freelunch-provision.yml --repo me/shop -f action=doctor' "$p/fake.log"
+  : > "$p/fake.log"; rm -r "$p/.github"
+  printf 'no\n' | FREELUNCH_INTERACTIVE=1 FAKE_WORKFLOWS="freelunch-provision" ci_in "$p" ci init --print-secrets >/dev/null 2>&1
+  fails grep -q '^gh workflow run' "$p/fake.log"
+  rm -r "$p/.github"
+  FAKE_WORKFLOWS="freelunch-provision" ci_in "$p" ci init --print-secrets --no-first-run >/dev/null 2>&1
+  fails grep -q '^gh workflow run' "$p/fake.log"
+}
+
+# With no state store, ci init creates one when told which (--state=git is a branch of the
+# repository), and its passphrase is then among the secrets.
+test_ci_init_creates_the_state_store_when_asked() {
+  local p="$WORK/ci-store" out
+  CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu || return 0
+  git_project "$p"
+  # nothing asked, nobody to answer: no store, and it says what to run
+  out="$(ci_in "$p" ci init --print-secrets < /dev/null 2>&1)"
+  absent "$p/.freelunch/state.git.tfbackend"
+  contains "$out" "freelunch state init git (or oci, r2, b2, gitlab)"
+  rm -r "$p/.github"
+  out="$(ci_in "$p" ci init --print-secrets --state=git 2>&1)"
+  exists "$p/.freelunch/state.git.tfbackend"
+  contains "$out" "FREELUNCH_STATE_PASSPHRASE"
+  grep -q 'contents: write' "$p/.github/workflows/freelunch.yml"
+  if ci_in "$p" ci init --state=dropbox >/dev/null 2>&1; then echo "an unknown store should fail"; return 1; fi
 }
 
 # ci restore writes the files the secrets carry, and the key that goes with the profile.
