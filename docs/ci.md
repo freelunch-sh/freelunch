@@ -330,6 +330,26 @@ service account key as `GOOGLE_CREDENTIALS` (`jq -c . key.json` puts it on one l
 AWS, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; for Azure, a service principal as
 `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET`, `ARM_TENANT_ID` and `ARM_SUBSCRIPTION_ID`.
 
+### AWS without a stored key
+
+```bash
+freelunch ci oidc aws
+```
+
+Instead of `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in secrets, a workflow can ask GitHub
+for a short-lived token and trade it for AWS credentials. That needs a trust set up once in
+your account: an IAM OIDC provider for GitHub, and a role that only this repository's `main`
+branch and its own pull requests (never a fork's) can take. The command asks whether to run
+the `aws` commands for it or print them (`--run` and `--print` skip the question; with nobody
+to answer it prints). The role starts with no permissions: pass `--policy-arn` to attach one,
+or attach what the aws stack needs yourself, since how much of your account CI may change is
+your call. The role's ARN and the region go to the repository as variables `AWS_ROLE_ARN` and
+`AWS_REGION` (not secrets: they are not sensitive), and `.freelunch/oidc` records that the
+project signs in this way. Run `freelunch ci init` again: the workflows then get
+`id-token: write` and an `aws-actions/configure-aws-credentials` step, and the two key secrets
+disappear from the list. GCP and Azure have the same option to come; until then they use the
+credentials above.
+
 ## Troubleshooting
 
 | Symptom | Look at |

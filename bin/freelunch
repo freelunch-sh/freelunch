@@ -110,6 +110,10 @@ CI:
                           Then the secrets they pass on: --set-secrets runs gh secret set for each,
                           --print-secrets only prints what to run; without either it asks (and
                           prints when nobody can answer)
+  ci oidc aws [--run|--print] [--policy-arn <arn>]
+                          Sign in to AWS from Actions without a stored key: an IAM role only this
+                          repository's main branch and pull requests can take. Asks whether to run
+                          the aws commands or print them; --run and --print skip the question
   ci secrets [--print]    Put what CI needs that git doesn't have (tfvars, .env, app env files,
                           known_hosts, the OCI API key, the SSH key deploy uses) in the secret
                           FREELUNCH_BUNDLE with gh, or print it for another CI system
@@ -3432,6 +3436,7 @@ engine_oci_secrets() {
   printf '%s\t%s\n' FREELUNCH_OCI_KEY "the OCI API private key (the .pem file the console gave you)"
 }
 engine_aws_secrets() {
+  ci_oidc_on aws && return 0
   printf '%s\t%s\n' AWS_ACCESS_KEY_ID "AWS access key ID"
   printf '%s\t%s\n' AWS_SECRET_ACCESS_KEY "AWS secret access key"
 }
@@ -7322,8 +7327,10 @@ tool_version() { CHECKPOINT_DISABLE=1 "$TF" version -json 2>/dev/null | jq -r '.
 # ci_uses <command> [env line]: the steps of a job that runs freelunch with the action, with
 # the secrets as its environment and one more line of it when given (NAME: value)
 ci_uses() {
+  echo "      - uses: actions/checkout@v7"
+  # keyless sign-in to the clouds the project set up (freelunch ci oidc), before freelunch runs
+  if [[ -z "${CI_CHECK_ONLY:-}" ]]; then ci_oidc_steps; fi
   cat <<EOF
-      - uses: actions/checkout@v7
       - uses: $(action_ref)
         with:
           run: $1
@@ -7368,7 +7375,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: $contents # write when the state is kept in a branch of this repository
+  contents: $contents # write when the state is kept in a branch of this repository$(ci_oidc_perm)
   actions: write # to turn this workflow off when the wait is over
 
 # One attempt at a time. A run of freelunch.yml may go alongside: a deploy only reads the
@@ -7404,7 +7411,7 @@ on:$trigger
         default: up
 
 permissions:
-  contents: $contents # write when the state is kept in a branch of this repository
+  contents: $contents # write when the state is kept in a branch of this repository$(ci_oidc_perm)
 
 # One run at a time; a second waits for the first.
 concurrency:
@@ -7463,7 +7470,7 @@ on:
         default: ""
 
 permissions:
-  contents: $contents # write when the state is kept in a branch of this repository
+  contents: $contents # write when the state is kept in a branch of this repository$(ci_oidc_perm)
 
 concurrency:
   group: freelunch
@@ -7614,6 +7621,151 @@ ci_init() {
   else
     echo "  $i. freelunch ci secrets --print, into the CI/CD variable FREELUNCH_BUNDLE" >&2
     echo "  $((i + 1)). commit and push the pipeline" >&2
+  fi
+}
+
+# --- keyless sign-in from Actions (OIDC) -------------------------------------------------
+#
+# Instead of a long-lived key in a secret, a workflow asks GitHub for a short-lived token that
+# says which repository and ref it runs for, and the cloud trades it for credentials, if a trust
+# set up beforehand allows that repository and ref. freelunch ci oidc <cloud> sets the trust up
+# (asking first: it runs the cloud's CLI against your account, or prints what to run) and
+# remembers it in .freelunch/oidc, which the workflows read: they get id-token: write, a sign-in
+# step, and no key secret for that cloud.
+
+# ci_oidc_on <cloud>: whether the project signs in to the cloud keylessly
+ci_oidc_on() { [[ -n "$PROJECT" ]] && grep -qx "$1" "$PROJECT/oidc" 2>/dev/null; }
+
+# ci_oidc_perm: the permission a workflow needs for it, as the end of a permissions line
+ci_oidc_perm() {
+  if [[ -n "$PROJECT" && -s "$PROJECT/oidc" ]]; then printf '\n  id-token: write # keyless sign-in to the cloud (freelunch ci oidc)'; fi
+}
+
+# ci_oidc_steps: the sign-in steps of a job, for each cloud with OIDC
+ci_oidc_steps() {
+  if ci_oidc_on aws; then
+    # shellcheck disable=SC2016 # GitHub expressions, not ours
+    cat <<'EOF'
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+EOF
+  fi
+}
+
+# ci_oidc_remember <cloud>: the project signs in keylessly to it from now on
+ci_oidc_remember() {
+  ci_oidc_on "$1" || echo "$1" >> "$PROJECT/oidc"
+}
+
+# ci_oidc_run <how: run|print> <command...>: run a command of the cloud's CLI, or print it
+ci_oidc_run() {
+  local how="$1"; shift
+  if [[ "$how" == print ]]; then printf '  %s\n' "$*" >&2; return 0; fi
+  "$@"
+}
+
+ci_oidc() {
+  local cloud="${1:-}"
+  [[ $# -eq 0 ]] || shift
+  case "$cloud" in
+    aws) ci_oidc_aws "$@" ;;
+    gcp|azure) die "ci oidc: $cloud isn't built yet (aws is); until then give CI its own credentials (docs/ci.md#other-clouds)" ;;
+    *) die "ci oidc: aws (gcp and azure to come): freelunch ci oidc aws [--run|--print] [--policy-arn <arn>] [--region <region>] [--role-name <name>]" ;;
+  esac
+}
+
+# ci_oidc_aws: an IAM OIDC provider for GitHub and a role that only this repository's main branch
+# and its own pull requests can take, then the repository variables the sign-in step reads. The
+# role gets the permissions of --policy-arn and none without it: freelunch won't guess how much
+# of your account the workflows may change.
+ci_oidc_aws() {
+  local how=ask a repo owner policy="" region="" role="" branch=main account provider trust arn tfvars existing
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run)        how=run ;;
+      --print)      how=print ;;
+      --policy-arn) [[ $# -gt 1 ]] || die "ci oidc: --policy-arn takes an ARN"; policy="$2"; shift ;;
+      --region)     [[ $# -gt 1 ]] || die "ci oidc: --region takes a region"; region="$2"; shift ;;
+      --role-name)  [[ $# -gt 1 ]] || die "ci oidc: --role-name takes a name"; role="$2"; shift ;;
+      --branch)     [[ $# -gt 1 ]] || die "ci oidc: --branch takes a branch"; branch="$2"; shift ;;
+      *)            die "ci oidc aws: unknown option $1" ;;
+    esac
+    shift
+  done
+  [[ -n "$PROJECT" ]] || die "ci oidc: run it in a project, where its .freelunch/ folder is (freelunch init makes one)"
+  command -v jq >/dev/null || die "jq is required for ci oidc"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  command -v gh >/dev/null || die "ci oidc: the role's ARN goes to the repository as a variable with gh (https://cli.github.com), signed in"
+  repo="$(cd "$(dirname "$PROJECT")" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" \
+    || die "ci oidc: gh can't tell which GitHub repository this is (gh auth login, and an origin on github.com)"
+  tfvars="$(config_dir aws)/terraform.tfvars"
+  [[ -n "$region" ]] || { [[ ! -f "$tfvars" ]] || region="$(tfvar "$tfvars" region)"; }
+  region="${region:-${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}}"
+  role="${role:-freelunch-${repo//\//-}}"
+  account="<ACCOUNT_ID>"
+  if command -v aws >/dev/null && account="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" && [[ -n "$account" ]]; then :
+  else
+    account="<ACCOUNT_ID>"
+    [[ "$how" == print ]] || { [[ "$how" != run ]] || die "ci oidc: the aws CLI can't reach an account (aws configure, or aws sso login); or --print"; }
+    how=print
+  fi
+  if [[ "$how" == ask ]]; then
+    if interactive; then
+      a="$(ask "Create the IAM role $role in AWS account $account now with the aws CLI, or print the commands for you to run? (run/print)" print)"
+      case "$a" in run|r|y|yes) how=run ;; *) how=print ;; esac
+    else
+      how=print
+    fi
+  fi
+  provider="arn:aws:iam::$account:oidc-provider/token.actions.githubusercontent.com"
+  arn="arn:aws:iam::$account:role/$role"
+  trust="$TMP/aws-trust.json"
+  jq -n --arg p "$provider" --arg r "$repo" --arg b "$branch" '{
+    Version: "2012-10-17",
+    Statement: [{
+      Effect: "Allow",
+      Principal: {Federated: $p},
+      Action: "sts:AssumeRoleWithWebIdentity",
+      Condition: {
+        StringEquals: {"token.actions.githubusercontent.com:aud": "sts.amazonaws.com"},
+        StringLike: {"token.actions.githubusercontent.com:sub": ["repo:\($r):ref:refs/heads/\($b)", "repo:\($r):pull_request"]}
+      }
+    }]}' > "$trust"
+  if [[ "$how" == print ]]; then
+    log "run these in AWS account $account (the trust policy is in $trust, and below):"
+    cat "$trust" >&2
+  fi
+  existing=""
+  if [[ "$how" == run ]]; then
+    existing="$(aws iam list-open-id-connect-providers --query 'OpenIDConnectProviderList[].Arn' --output text 2>/dev/null || true)"
+  fi
+  if [[ "$existing" == *"oidc-provider/token.actions.githubusercontent.com"* ]]; then
+    log "aws: the OIDC provider for GitHub is there already"
+  else
+    ci_oidc_run "$how" aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com >/dev/null
+  fi
+  if [[ "$how" == run ]] && aws iam get-role --role-name "$role" >/dev/null 2>&1; then
+    ci_oidc_run "$how" aws iam update-assume-role-policy --role-name "$role" --policy-document "file://$trust"
+    log "aws: the role $role is there already; its trust is now this repository's $branch and pull requests"
+  else
+    ci_oidc_run "$how" aws iam create-role --role-name "$role" --assume-role-policy-document "file://$trust" >/dev/null
+  fi
+  if [[ -n "$policy" ]]; then
+    ci_oidc_run "$how" aws iam attach-role-policy --role-name "$role" --policy-arn "$policy"
+  else
+    log "aws: the role has no permissions yet: attach what freelunch's aws stack needs (aws iam attach-role-policy --role-name $role --policy-arn <arn>), or run this again with --policy-arn"
+  fi
+  if [[ "$how" == run ]]; then
+    (cd "$(dirname "$PROJECT")" && gh variable set AWS_ROLE_ARN --repo "$repo" --body "$arn" && gh variable set AWS_REGION --repo "$repo" --body "$region") >/dev/null \
+      || die "ci oidc: gh couldn't set the variables AWS_ROLE_ARN and AWS_REGION in $repo (see above)"
+    ci_oidc_remember aws
+    log "aws: $repo signs in as $arn from now on: the workflows get id-token: write and a sign-in step, and need no AWS key secrets. Run freelunch ci init again to rewrite them"
+  else
+    echo "  gh variable set AWS_ROLE_ARN --repo $repo --body $arn" >&2
+    echo "  gh variable set AWS_REGION --repo $repo --body $region" >&2
+    echo "  echo aws >> $(rel "$PROJECT")/oidc   # then freelunch ci init, to rewrite the workflows" >&2
   fi
 }
 
@@ -8135,11 +8287,12 @@ cmd_ci() {
   case "$sub" in
     init)    ci_init "$@" ;;
     secrets) ci_secrets "$@" ;;
+    oidc)    ci_oidc "$@" ;;
     wait)    ci_wait "$@" ;;
     restore) [[ $# -le 1 ]] || die "ci restore takes --force at most"; ci_restore "$@" ;;
     resume)  [[ $# -eq 0 ]] || die "ci resume takes no arguments"; ci_resume ;;
     needs)   [[ $# -eq 0 ]] || die "ci needs takes no arguments"; ci_needs ;;
-    *)       die "ci: init, secrets, wait, or in a CI job restore and resume (freelunch help)" ;;
+    *)       die "ci: init, secrets, oidc, wait, or in a CI job restore and resume (freelunch help)" ;;
   esac
 }
 

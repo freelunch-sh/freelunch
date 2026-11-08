@@ -266,6 +266,10 @@ case "$1 $2" in
     if [[ "$*" == *visibility* ]]; then echo "${FAKE_VISIBILITY:-PRIVATE}"; else echo "me/shop"; fi ;;
   "secret set")
     mkdir -p "$FAKE_GH" && cat > "$FAKE_GH/$3" ;;
+  "variable set")
+    mkdir -p "$FAKE_GH"
+    name="$3"; body=""; while [[ $# -gt 0 ]]; do [[ "$1" == "--body" ]] && body="$2"; shift; done
+    printf '%s' "$body" > "$FAKE_GH/var-$name" ;;
   "workflow enable"|"workflow disable"|"workflow run") ;;
   "run list") echo "${FAKE_RUNS:-[]}" ;;
   "api users/"*) echo 4242 ;;
@@ -282,7 +286,21 @@ cat > "$WORK/bin/slow-tf" <<'EOF'
 if [[ "$*" == "version" ]]; then v="$("$REAL_TF" version)"; echo "${v%%$'\n'*}"; sleep 0.3; echo "${v#*$'\n'}"; exit 0; fi
 exec "$REAL_TF" "$@"
 EOF
-chmod +x "$WORK/sleepy-bin/"* "$WORK/gh-bin/gh" "$WORK/bin/slow-tf"
+# An aws that logs what it is asked (account 123456789012). FAKE_AWS_OIDC=1: the GitHub OIDC
+# provider exists already; FAKE_AWS_ROLE=1: so does the role. The trust policy a role is made
+# with is kept in $FAKE_GH/aws-trust.json.
+cat > "$WORK/gh-bin/aws" <<'EOF'
+#!/usr/bin/env bash
+echo "aws $*" >> "$FAKE_LOG"
+case "$1 $2" in
+  "sts get-caller-identity") echo 123456789012 ;;
+  "iam list-open-id-connect-providers") [[ "${FAKE_AWS_OIDC:-}" != 1 ]] || echo "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com" ;;
+  "iam get-role") [[ "${FAKE_AWS_ROLE:-}" == 1 ]] || exit 254 ;;
+  "iam create-role"|"iam update-assume-role-policy")
+    for a in "$@"; do [[ "$a" == file://* ]] && { mkdir -p "$FAKE_GH"; cp "${a#file://}" "$FAKE_GH/aws-trust.json"; }; done ;;
+esac
+EOF
+chmod +x "$WORK/sleepy-bin/"* "$WORK/gh-bin/gh" "$WORK/gh-bin/aws" "$WORK/bin/slow-tf"
 mkdir -p "$WORK/nf-bin" && ln -s "$WORK/wait-bin/sleep" "$WORK/nf-bin/sleep"
 # Secret stores: 1Password's op knows op://Private/GHCR/token, the macOS keychain knows
 # freelunch-cloudflare. Both log what they are asked.
@@ -3655,6 +3673,64 @@ test_ci_init_writes_a_workflow_per_job() {
   ci_in "$p" ci init --print-secrets --jobs=ci >/dev/null 2>&1
   exists "$check"; absent "$prov"; absent "$p/.github/workflows/freelunch.yml"; absent "$p/.github/workflows/freelunch-wait.yml"
   if ci_in "$p" ci init --jobs=deploy >/dev/null 2>&1; then echo "an unknown job should fail"; return 1; fi
+}
+
+# Keyless sign-in to AWS: ci oidc aws asks (or is told) whether to run the aws commands or print
+# them; the role it makes trusts this repository's main branch and its pull requests only, and has
+# no permissions unless --policy-arn says which. Once set up, the workflows sign in with it and
+# the AWS key secrets are no longer asked for.
+test_ci_oidc_aws_sets_up_keyless_sign_in() {
+  local p="$WORK/ci-oidc" out w
+  doctor_project "$p"
+  state_store "$p"
+  (cd "$p" && "$CLI" init aws) >/dev/null 2>&1
+  # before: the keys are secrets
+  out="$(ci_in "$p" ci init --print-secrets 2>&1)"
+  contains "$out" "AWS_ACCESS_KEY_ID"
+  rm -r "$p/.github"
+  # print: the commands and the trust policy, nothing run, nothing remembered
+  out="$(ci_in "$p" ci oidc aws --print 2>&1)"
+  contains "$out" "aws iam create-role --role-name freelunch-me-shop"
+  contains "$out" "repo:me/shop:ref:refs/heads/main"
+  contains "$out" "gh variable set AWS_ROLE_ARN --repo me/shop --body arn:aws:iam::123456789012:role/freelunch-me-shop"
+  fails grep -q '^aws iam create' "$p/fake.log"
+  absent "$p/.freelunch/oidc"
+  # nobody to answer: print as well
+  ci_in "$p" ci oidc aws < /dev/null >/dev/null 2>&1
+  fails grep -q '^aws iam create' "$p/fake.log"
+  # run: the provider, the role with its trust, the policy asked for, the variables
+  out="$(ci_in "$p" ci oidc aws --run --policy-arn arn:aws:iam::aws:policy/PowerUserAccess 2>&1)"
+  grep -q '^aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com' "$p/fake.log"
+  grep -q '^aws iam create-role --role-name freelunch-me-shop' "$p/fake.log"
+  grep -q '^aws iam attach-role-policy --role-name freelunch-me-shop --policy-arn arn:aws:iam::aws:policy/PowerUserAccess' "$p/fake.log"
+  equals "$(jq -c '.Statement[0].Condition.StringLike["token.actions.githubusercontent.com:sub"]' "$p/gh/aws-trust.json")" '["repo:me/shop:ref:refs/heads/main","repo:me/shop:pull_request"]'
+  equals "$(jq -r '.Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:aud"]' "$p/gh/aws-trust.json")" sts.amazonaws.com
+  equals "$(cat "$p/gh/var-AWS_ROLE_ARN")" "arn:aws:iam::123456789012:role/freelunch-me-shop"
+  grep -qx aws "$p/.freelunch/oidc"
+  # the workflows sign in with it, and the keys are no longer secrets
+  ci_in "$p" ci init --print-secrets >/dev/null 2>&1
+  for w in freelunch freelunch-wait freelunch-provision; do
+    grep -q 'id-token: write' "$p/.github/workflows/$w.yml"
+    grep -q 'uses: aws-actions/configure-aws-credentials@v4' "$p/.github/workflows/$w.yml"
+    fails grep -q 'AWS_ACCESS_KEY_ID' "$p/.github/workflows/$w.yml"
+  done
+  fails grep -q 'id-token\|aws-actions' "$p/.github/workflows/freelunch-ci.yml"
+  grep -q 'role-to-assume: \${{ vars.AWS_ROLE_ARN }}' "$p/.github/workflows/freelunch.yml"
+  if command -v actionlint >/dev/null; then actionlint "$p"/.github/workflows/*.yml; fi
+  # again, with the provider and the role there already: nothing is made twice
+  : > "$p/fake.log"
+  FAKE_AWS_OIDC=1 FAKE_AWS_ROLE=1 ci_in "$p" ci oidc aws --run >/dev/null 2>&1
+  fails grep -q '^aws iam create' "$p/fake.log"
+  grep -q '^aws iam update-assume-role-policy --role-name freelunch-me-shop' "$p/fake.log"
+  # asked, interactively
+  rm "$p/.freelunch/oidc"; : > "$p/fake.log"
+  printf 'print\n' | FREELUNCH_INTERACTIVE=1 ci_in "$p" ci oidc aws >/dev/null 2>&1
+  fails grep -q '^aws iam create' "$p/fake.log"
+  printf 'run\n' | FREELUNCH_INTERACTIVE=1 ci_in "$p" ci oidc aws >/dev/null 2>&1
+  grep -q '^aws iam create-role' "$p/fake.log"
+  # the others aren't built yet, and say so
+  if out="$(ci_in "$p" ci oidc gcp 2>&1)"; then echo "gcp should not be built yet"; return 1; fi
+  contains "$out" "gcp isn't built yet"
 }
 
 # ci restore writes the files the secrets carry, and the key that goes with the profile.
