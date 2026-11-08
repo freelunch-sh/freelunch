@@ -16,15 +16,15 @@ Tick a box when the step is built, tested and committed. Design: [engines.md](en
 
 ## 2. Engine dispatch (no behaviour change)
 
-- [ ] Engine interface: `check`, `apply`, `outputs`, `deploy`, `status`, `destroy`
-- [ ] `engine_of <provider> [kind]` reads `engine:` from `provider.yaml`, defaulting from `iac`
-- [ ] Move Render behind the interface
-- [ ] Move Northflank behind the interface
-- [ ] Move Cloud Run behind the interface
-- [ ] Move Scaleway behind the interface
-- [ ] `tofu` engine wraps the existing stack flow
-- [ ] Remove the per-provider `case` lists (status, up, destroy, deploy, doctor, setup, emit)
-- [ ] Full CLI suite passes unchanged
+- [x] Engine interface: `check`, `apply`, `outputs`, `deploy`, `status`, `destroy`
+- [x] `engine_of <provider> [kind]` reads `engine:` from `provider.yaml`, defaulting from `iac`
+- [x] Move Render behind the interface
+- [x] Move Northflank behind the interface
+- [x] Move Cloud Run behind the interface
+- [x] Move Scaleway behind the interface
+- [ ] `tofu` engine wraps the existing stack flow (done for platforms: `engine_apply`, `engine_destroy`; hosts such as OCI still call the stack flow directly)
+- [ ] Remove the per-provider `case` lists (status, up, destroy, deploy, doctor, setup, emit) (done for those verbs; left: the database providers' token names in `ci_secret_names`, which move to `provider.yaml` in section 4, and the arch and registry special cases)
+- [x] Full CLI suite passes unchanged
 
 ## 3. `api` engine
 

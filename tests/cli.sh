@@ -3085,6 +3085,15 @@ state_store() {
 # with_ip <state file> <ip>: the state as an apply that moved oci-main to <ip> leaves it
 with_ip() { jq --arg ip "$2" '.serial += 1 | .outputs.hosts.value[0].public_ip = $ip' "$1" > "$1.new" && mv "$1.new" "$1"; }
 
+# A provider's engine is what its provider.yaml says, or what its iac implies.
+test_engine_of_defaults_from_iac() {
+  equals "$("$CLI" engine render)" tofu
+  equals "$("$CLI" engine neon)" tofu
+  equals "$("$CLI" engine back4app)" guided
+  equals "$("$CLI" engine render platform)" tofu
+  if "$CLI" engine nonesuch >/dev/null 2>&1; then echo "engine nonesuch should fail"; return 1; fi
+}
+
 # An engine's record goes to the store as a state of its own, and works with nothing local
 # but the store's settings: a clean directory reads it, changes it, and its cache is optional.
 test_records_round_trip_through_the_store() {

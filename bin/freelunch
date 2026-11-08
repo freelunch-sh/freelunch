@@ -1808,8 +1808,7 @@ cmd_lifecycle() { # plan|apply|destroy
       done
       # A platform stack declares the target; its API then makes it (the Northflank project).
       for a in ${platforms[@]+"${platforms[@]}"}; do
-        apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}
-        platform_up "$a"
+        engine_apply "$a" "$plan_file" ${extra[@]+"${extra[@]}"}
       done
       for a in ${services[@]+"${services[@]}"}; do apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; done
       [[ ${#hosts[@]} -eq 0 && ${#platforms[@]} -eq 0 ]] || cmd_hybrid
@@ -1818,7 +1817,7 @@ cmd_lifecycle() { # plan|apply|destroy
     destroy)
       for a in ${hosts[@]+"${hosts[@]}"}; do ci_wait_guard "$a" ""; done
       for a in ${glue[@]+"${glue[@]}"} ${services[@]+"${services[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
-      for a in ${platforms[@]+"${platforms[@]}"}; do destroy_platform "$a" ${extra[@]+"${extra[@]}"}; done
+      for a in ${platforms[@]+"${platforms[@]}"}; do engine_destroy "$a" ${extra[@]+"${extra[@]}"}; done
       for a in ${hosts[@]+"${hosts[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
       [[ ${#hosts[@]} -eq 0 && ${#platforms[@]} -eq 0 ]] || cmd_hybrid ;;
   esac
@@ -1979,12 +1978,7 @@ status_apps() {
   for host in $(jq -r 'keys[]' "$TMP/targets.json"); do
     # A platform says how its apps run through its API.
     if [[ "$(jq -r --arg h "$host" '.[$h].kind' "$TMP/targets.json")" == "platform" ]]; then
-      case "$(jq -r --arg h "$host" '.[$h].provider' "$TMP/targets.json")" in
-        northflank) northflank_status "$host" ;;
-        cloud-run)  cloud_run_status "$host" ;;
-        scaleway)   scaleway_status "$host" ;;
-        render)     render_status "$host" ;;
-      esac
+      engine_call "$(jq -r --arg h "$host" '.[$h].provider' "$TMP/targets.json")" status "$host"
       continue
     fi
     address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
@@ -2838,7 +2832,7 @@ cmd_deploy() {
   if [[ "${FREELUNCH_SSH_STRICT:-0}" == "1" ]]; then ssh_options yes; else ssh_options accept-new; fi
   token_reminders
   for h in "${hosts[@]}"; do
-    if [[ "$(jq -r --arg h "$h" '.[$h].kind' "$TMP/targets.json")" == "platform" ]]; then deploy_platform "$h" "$dry_run"; else deploy_host "$h" "$dry_run"; fi
+    if [[ "$(jq -r --arg h "$h" '.[$h].kind' "$TMP/targets.json")" == "platform" ]]; then engine_deploy "$h" "$dry_run"; else deploy_host "$h" "$dry_run"; fi
   done
 }
 
@@ -2921,49 +2915,12 @@ setup_value() {
 # setup_stack <provider> <name prefix>: terraform.tfvars from the example, with what can be
 # found filled in. Prints what is still to fill in.
 setup_stack() {
-  local s="$1" file value profile
+  local s="$1" file
   file="$(config_dir "$s")/terraform.tfvars"
   [[ -f "$file" ]] || cp "$(config_dir "$s")/terraform.tfvars.example" "$file"
-  case "$s" in
-    oci)
-      local cfg="$HOME/.oci/config"
-      profile=DEFAULT
-      if [[ -f "$cfg" ]] && ! grep -q '^\[DEFAULT\]' "$cfg" && grep -q '^\[freelunch\]' "$cfg"; then profile=freelunch; fi
-      if placeholder "$file" tenancy_ocid; then
-        value="$(setup_value "$(ini_value "$cfg" "$profile" tenancy)" "OCI tenancy OCID (grep tenancy ~/.oci/config):")"
-        [[ -z "$value" ]] || set_tfvar "$file" tenancy_ocid "$value"
-      fi
-      if grep -q '^region *= *"eu-frankfurt-1"' "$file"; then
-        value="$(ini_value "$cfg" "$profile" region)"
-        [[ -z "$value" ]] || set_tfvar "$file" region "$value"
-      fi
-      if [[ "$profile" != DEFAULT ]] && ! grep -q '^oci_config_profile' "$file"; then echo "oci_config_profile = \"$profile\"" >> "$file"; fi ;;
-    gcp|cloud-run)
-      if placeholder "$file" project_id; then
-        value="$(setup_value "$(command -v gcloud >/dev/null && gcloud config get-value project 2>/dev/null || true)" "Google Cloud project ID (gcloud projects list):")"
-        [[ -z "$value" ]] || set_tfvar "$file" project_id "$value"
-      fi ;;
-    scaleway)
-      if placeholder "$file" project_id; then
-        value="$(setup_value "${SCW_DEFAULT_PROJECT_ID:-}" "Scaleway project ID (console.scaleway.com > Project settings):")"
-        [[ -z "$value" ]] || set_tfvar "$file" project_id "$value"
-      fi ;;
-    render)
-      if placeholder "$file" owner_id; then
-        value="$(setup_value "" "Render workspace ID (dashboard > workspace settings, usr-... or tea-...):")"
-        [[ -z "$value" ]] || set_tfvar "$file" owner_id "$value"
-      fi ;;
-    azure)
-      if placeholder "$file" subscription_id; then
-        value="$(setup_value "$(command -v az >/dev/null && az account show --query id -o tsv 2>/dev/null || true)" "Azure subscription ID (az account show):")"
-        [[ -z "$value" ]] || set_tfvar "$file" subscription_id "$value"
-      fi ;;
-  esac
+  engine_call "$s" setup "$file"
   fill_ssh_keys "$file" || echo "$(rel "$file"): an SSH public key (ssh-keygen -t ed25519 makes one)"
-  if placeholder "$file" tenancy_ocid && [[ "$s" == oci ]]; then echo "$(rel "$file"): tenancy_ocid"; fi
-  if [[ "$s" =~ ^(gcp|cloud-run|scaleway)$ ]] && placeholder "$file" project_id; then echo "$(rel "$file"): project_id"; fi
-  if [[ "$s" == render ]] && placeholder "$file" owner_id; then echo "$(rel "$file"): owner_id"; fi
-  if [[ "$s" == azure ]] && placeholder "$file" subscription_id; then echo "$(rel "$file"): subscription_id"; fi
+  engine_call "$s" todo "$file"
   return 0
 }
 
@@ -3062,11 +3019,7 @@ cmd_setup() {
   local todo=() line
   for t in "${targets[@]}"; do
     while IFS= read -r line; do [[ -z "$line" ]] || todo+=("$line"); done < <(setup_stack "$t")
-    case "$t" in
-      northflank) while IFS= read -r line; do [[ -z "$line" ]] || todo+=("$line"); done < <(setup_token NORTHFLANK_API_TOKEN "Northflank API token") ;;
-      scaleway)   while IFS= read -r line; do [[ -z "$line" ]] || todo+=("$line"); done < <(setup_token SCW_SECRET_KEY "Scaleway secret key") ;;
-      render)     while IFS= read -r line; do [[ -z "$line" ]] || todo+=("$line"); done < <(setup_token RENDER_API_KEY "Render API key") ;;
-    esac
+    while IFS= read -r line; do [[ -z "$line" ]] || todo+=("$line"); done < <(engine_call "$t" token)
   done
   if [[ -n "$domain" ]]; then
     local cf="$PROJECT/cloudflare/terraform.tfvars"
@@ -3359,6 +3312,176 @@ report_url() {
 # provider's API does the rest: apply makes the target, deploy puts a service per app in
 # it, destroy deletes both. Northflank is the first, then Cloud Run and Scaleway.
 
+# --- Engines --------------------------------------------------------------------------
+#
+# An engine makes and removes what a provider's stack or API declares. Every provider has one:
+# engine: in provider.yaml, or by default what its iac says (engine_of). The verbs are check,
+# apply, outputs, deploy, status and destroy; a provider's engine implements the ones it has as
+# engine_<provider>_<verb> (dashes become underscores), and engine_call runs them, so nothing
+# else names a provider. Hooks beyond the six: target (what destroy will need, read before the
+# stack is gone), setup and todo (tfvars to fill in), token and secrets (credentials).
+#
+# The tofu engine is the stack flow itself: apply and destroy run the stack through
+# run_stack, then the provider's hook does what the stack can't (the Northflank project, the
+# Scaleway registry namespace).
+
+# engine_of <provider> [kind]: tofu, api, cli or guided. A kind (database, platform) can have
+# its own: engine_<kind>: in provider.yaml.
+engine_of() {
+  local e=""
+  [[ -z "${2:-}" ]] || e="$(meta "$1" "engine_$2")"
+  [[ -n "$e" ]] || e="$(meta "$1" engine)"
+  if [[ -z "$e" ]]; then
+    case "$(meta "$1" iac)" in
+      stale|none) e=guided ;;
+      *)          e=tofu ;;
+    esac
+  fi
+  echo "$e"
+}
+
+engine_fn() { echo "engine_${1//-/_}_$2"; }
+engine_defined() { declare -F "$(engine_fn "$1" "$2")" >/dev/null; }
+# engine_call <provider> <verb> [args]: the provider's hook, nothing when it has none
+engine_call() {
+  local p="$1" v="$2"; shift 2
+  if engine_defined "$p" "$v"; then "$(engine_fn "$p" "$v")" "$@"; fi
+}
+
+# engine_providers: the providers with a stack in this checkout, oci first, then by name
+engine_providers() {
+  local p
+  echo oci
+  for p in $(all_providers); do [[ "$p" == oci ]] || echo "$p"; done
+}
+
+# platform_target <provider> <project field> <tfvars name>: id, region, project and label of a
+# platform's target, separated by \x1f, from its state, or from the tfvars when the state has
+# none yet (a destroy that was interrupted, or an apply that never finished)
+platform_target() {
+  local p="$1" id region label project tfvars
+  tfvars="$(config_dir "$p")/terraform.tfvars"
+  id="$(platform_field "$p" id)"
+  region="$(platform_field "$p" region)"; label="$(platform_field "$p" settings.label)"; project="$(platform_field "$p" "$2")"
+  if [[ -z "$id" && -f "$(config_dir "$p")/terraform.tfstate" ]]; then
+    id="$(tfvar "$tfvars" name_prefix 2>/dev/null || true)"; id="${id:-freelunch}"
+    region="$(tfvar "$tfvars" region 2>/dev/null || true)"; region="${region:-fr-par}"
+    project="$(tfvar "$tfvars" "$3" 2>/dev/null || true)"
+  fi
+  printf '%s\x1f%s\x1f%s\x1f%s\n' "$id" "$region" "$project" "$label"
+}
+
+# setup hooks: the questions a provider's terraform.tfvars needs answered, asked of whoever
+# is there (setup_value), with what can be found filled in. todo hooks say what is still empty.
+engine_oci_setup() {
+  local file="$1" value profile
+  local cfg="$HOME/.oci/config"
+  profile=DEFAULT
+  if [[ -f "$cfg" ]] && ! grep -q '^\[DEFAULT\]' "$cfg" && grep -q '^\[freelunch\]' "$cfg"; then profile=freelunch; fi
+  if placeholder "$file" tenancy_ocid; then
+    value="$(setup_value "$(ini_value "$cfg" "$profile" tenancy)" "OCI tenancy OCID (grep tenancy ~/.oci/config):")"
+    [[ -z "$value" ]] || set_tfvar "$file" tenancy_ocid "$value"
+  fi
+  if grep -q '^region *= *"eu-frankfurt-1"' "$file"; then
+    value="$(ini_value "$cfg" "$profile" region)"
+    [[ -z "$value" ]] || set_tfvar "$file" region "$value"
+  fi
+  if [[ "$profile" != DEFAULT ]] && ! grep -q '^oci_config_profile' "$file"; then echo "oci_config_profile = \"$profile\"" >> "$file"; fi
+}
+engine_cloud_run_setup() {
+  local file="$1" value profile
+  if placeholder "$file" project_id; then
+    value="$(setup_value "$(command -v gcloud >/dev/null && gcloud config get-value project 2>/dev/null || true)" "Google Cloud project ID (gcloud projects list):")"
+    [[ -z "$value" ]] || set_tfvar "$file" project_id "$value"
+  fi
+}
+engine_gcp_setup() { engine_cloud_run_setup "$@"; }
+engine_scaleway_setup() {
+  local file="$1" value profile
+  if placeholder "$file" project_id; then
+    value="$(setup_value "${SCW_DEFAULT_PROJECT_ID:-}" "Scaleway project ID (console.scaleway.com > Project settings):")"
+    [[ -z "$value" ]] || set_tfvar "$file" project_id "$value"
+  fi
+}
+engine_render_setup() {
+  local file="$1" value profile
+  if placeholder "$file" owner_id; then
+    value="$(setup_value "" "Render workspace ID (dashboard > workspace settings, usr-... or tea-...):")"
+    [[ -z "$value" ]] || set_tfvar "$file" owner_id "$value"
+  fi
+}
+engine_azure_setup() {
+  local file="$1" value profile
+  if placeholder "$file" subscription_id; then
+    value="$(setup_value "$(command -v az >/dev/null && az account show --query id -o tsv 2>/dev/null || true)" "Azure subscription ID (az account show):")"
+    [[ -z "$value" ]] || set_tfvar "$file" subscription_id "$value"
+  fi
+}
+engine_oci_todo()        { placeholder "$1" tenancy_ocid && echo "$(rel "$1"): tenancy_ocid"; return 0; }
+engine_gcp_todo()        { placeholder "$1" project_id && echo "$(rel "$1"): project_id"; return 0; }
+engine_cloud_run_todo()  { engine_gcp_todo "$@"; }
+engine_scaleway_todo()   { engine_gcp_todo "$@"; }
+engine_render_todo()     { placeholder "$1" owner_id && echo "$(rel "$1"): owner_id"; return 0; }
+engine_azure_todo()      { placeholder "$1" subscription_id && echo "$(rel "$1"): subscription_id"; return 0; }
+engine_oci_check()       { doctor_oci; }
+engine_oci_secrets() {
+  printf '%s\t%s\n' FREELUNCH_OCI_CONFIG "the profile block of ~/.oci/config (the console shows it when you add an API key)"
+  printf '%s\t%s\n' FREELUNCH_OCI_KEY "the OCI API private key (the .pem file the console gave you)"
+}
+engine_aws_secrets() {
+  printf '%s\t%s\n' AWS_ACCESS_KEY_ID "AWS access key ID"
+  printf '%s\t%s\n' AWS_SECRET_ACCESS_KEY "AWS secret access key"
+}
+
+# Northflank
+engine_northflank_apply()   { northflank_up "$(platform_field northflank id)" "$(platform_field northflank region)"; }
+engine_northflank_target()  { platform_target northflank settings.project_id project_id; }
+engine_northflank_destroy() { northflank_down "$1"; }
+engine_northflank_status()  { northflank_status "$@"; }
+engine_northflank_deploy()  { northflank_deploy "$@"; }
+engine_northflank_check()   { doctor_northflank; }
+engine_northflank_token()   { setup_token NORTHFLANK_API_TOKEN "Northflank API token"; }
+engine_northflank_secrets() { printf '%s\t%s\n' NORTHFLANK_API_TOKEN "Northflank API token"; }
+
+# Cloud Run
+engine_cloud_run_apply()    { cloud_run_up "$(platform_field cloud-run id)" "$(platform_field cloud-run region)"; }
+engine_cloud_run_target() {
+  local id region label tfvars
+  id="$(platform_field cloud-run id)"; region="$(platform_field cloud-run region)"; label="$(platform_field cloud-run settings.label)"
+  if [[ -z "$id" && -f "$(config_dir cloud-run)/terraform.tfstate" ]]; then
+    tfvars="$(config_dir cloud-run)/terraform.tfvars"
+    id="$(tfvar "$tfvars" project_id 2>/dev/null || true)"
+    region="$(tfvar "$tfvars" region 2>/dev/null || true)"; region="${region:-us-central1}"
+    label="$(tfvar "$tfvars" name_prefix 2>/dev/null || true)"; label="${label:-freelunch}"
+  fi
+  printf '%s\x1f%s\x1f\x1f%s\n' "$id" "$region" "$label"
+}
+engine_cloud_run_destroy()  { cloud_run_down "$1" "$2" "$4"; }
+engine_cloud_run_status()   { cloud_run_status "$@"; }
+engine_cloud_run_deploy()   { cloud_run_deploy "$@"; }
+engine_cloud_run_check()    { doctor_cloud_run; }
+engine_cloud_run_secrets()  { printf '%s\t%s\n' CLOUD_RUN_ACCESS_TOKEN "Google access token for Cloud Run"; }
+
+# Scaleway
+engine_scaleway_apply()     { scaleway_up "$(platform_field scaleway id)" "$(platform_field scaleway region)" "$(platform_field scaleway settings.project_id)"; }
+engine_scaleway_target()    { platform_target scaleway settings.project_id project_id; }
+engine_scaleway_destroy()   { scaleway_down "$1" "$2" "$3"; }
+engine_scaleway_status()    { scaleway_status "$@"; }
+engine_scaleway_deploy()    { scaleway_deploy "$@"; }
+engine_scaleway_check()     { doctor_scaleway; }
+engine_scaleway_token()     { setup_token SCW_SECRET_KEY "Scaleway secret key"; }
+engine_scaleway_secrets()   { printf '%s\t%s\n' SCW_SECRET_KEY "Scaleway secret key"; }
+
+# Render
+engine_render_apply()       { render_up "$(platform_field render id)" "$(platform_field render settings.owner_id)"; }
+engine_render_target()      { platform_target render settings.owner_id owner_id; }
+engine_render_destroy()     { render_down "$1" "$3"; }
+engine_render_status()      { render_status "$@"; }
+engine_render_deploy()      { render_deploy "$@"; }
+engine_render_check()       { doctor_render; }
+engine_render_token()       { setup_token RENDER_API_KEY "Render API key"; }
+engine_render_secrets()     { printf '%s\t%s\n' RENDER_API_KEY "Render API key"; }
+
 is_platform() { [[ "$(meta "$1" layer)" == "platform" ]]; }
 
 # platform_field <provider> <field>: a field of the stack's target (the platform contract),
@@ -3367,58 +3490,33 @@ platform_field() {
   jq -r --arg f "$2" '.outputs.platforms.value[0] | getpath($f | split(".")) // empty' "$(config_dir "$1")/terraform.tfstate" 2>/dev/null || true
 }
 
-platform_up() { # platform_up <provider>: make the target the stack declares
-  case "$1" in
-    northflank) northflank_up "$(platform_field northflank id)" "$(platform_field northflank region)" ;;
-    cloud-run)  cloud_run_up "$(platform_field cloud-run id)" "$(platform_field cloud-run region)" ;;
-    scaleway)   scaleway_up "$(platform_field scaleway id)" "$(platform_field scaleway region)" "$(platform_field scaleway settings.project_id)" ;;
-    render)     render_up "$(platform_field render id)" "$(platform_field render settings.owner_id)" ;;
-  esac
+# engine_apply <provider> <plan file> [args]: the tofu engine's apply: the stack declares the
+# target, then the provider's hook makes it (the Northflank project)
+engine_apply() {
+  local p="$1" plan="$2"; shift 2
+  apply_once "$p" "$plan" "$@"
+  engine_call "$p" apply
 }
 
-# destroy_platform <provider> [extra args]: destroy the stack, then what apply and deploy
+# engine_destroy <provider> [extra args]: destroy the stack, then what apply and deploy
 # made at the provider. tofu/terraform fail when you decline, so that only happens after
 # a yes. A destroyed stack keeps its state file and tfvars, so a second run finishes what
 # an interrupted one left.
-destroy_platform() {
-  local p="$1" id state region="" label="" project=""; shift
-  state="$(config_dir "$p")/terraform.tfstate"
-  id="$(platform_field "$p" id)"
-  region="$(platform_field "$p" region)"; label="$(platform_field "$p" settings.label)"; project="$(platform_field "$p" settings.project_id)"
-  [[ "$p" != render ]] || project="$(platform_field render settings.owner_id)"
-  if [[ -z "$id" && -f "$state" ]]; then
-    if [[ "$p" == cloud-run ]]; then
-      id="$(tfvar "$(config_dir "$p")/terraform.tfvars" project_id 2>/dev/null || true)"
-      region="$(tfvar "$(config_dir "$p")/terraform.tfvars" region 2>/dev/null || true)"; region="${region:-us-central1}"
-      label="$(tfvar "$(config_dir "$p")/terraform.tfvars" name_prefix 2>/dev/null || true)"; label="${label:-freelunch}"
-    else
-      id="$(tfvar "$(config_dir "$p")/terraform.tfvars" name_prefix 2>/dev/null || true)"
-      id="${id:-freelunch}"
-      region="$(tfvar "$(config_dir "$p")/terraform.tfvars" region 2>/dev/null || true)"; region="${region:-fr-par}"
-      project="$(tfvar "$(config_dir "$p")/terraform.tfvars" project_id 2>/dev/null || true)"
-      [[ "$p" != render ]] || project="$(tfvar "$(config_dir "$p")/terraform.tfvars" owner_id 2>/dev/null || true)"
-    fi
-  fi
+engine_destroy() {
+  local p="$1" target id region project label; shift
+  # What to delete at the provider is read first: the stack's state goes with the destroy.
+  target="$(engine_call "$p" target)"
+  IFS=$'\x1f' read -r id region project label <<< "$target" || true
   run_stack destroy "$p" "$@"
   [[ -n "$id" ]] || return 0
-  case "$p" in
-    northflank) northflank_down "$id" ;;
-    cloud-run)  cloud_run_down "$id" "$region" "$label" ;;
-    scaleway)   scaleway_down "$id" "$region" "$project" ;;
-    render)     render_down "$id" "$project" ;;
-  esac
+  engine_call "$p" destroy "$id" "$region" "$project" "$label"
 }
 
-deploy_platform() { # deploy_platform <target> <dry run 0|1>
+engine_deploy() { # engine_deploy <target> <dry run 0|1>
   local provider
   provider="$(jq -r --arg h "$1" '.[$h].provider' "$TMP/targets.json")"
-  case "$provider" in
-    northflank) northflank_deploy "$@" ;;
-    cloud-run)  cloud_run_deploy "$@" ;;
-    scaleway)   scaleway_deploy "$@" ;;
-    render)     render_deploy "$@" ;;
-    *)          die "$1: freelunch can't deploy to $provider yet" ;;
-  esac
+  engine_defined "$provider" deploy || die "$1: freelunch can't deploy to $provider yet"
+  engine_call "$provider" deploy "$@"
 }
 
 # env_json <dotenv file>: its KEY=value lines as a JSON object, read the way docker compose
@@ -5869,11 +5967,10 @@ cmd_doctor() {
   doctor_config
   if [[ ${#ENV_REFS[@]} -gt 0 ]]; then echo "Secrets ($(rel "$(state_root)")/.env)"; resolve_env_refs report; fi
   doctor_state
-  if [[ -d "$(stack_dir oci)" ]] && is_configured oci; then doctor_oci; fi
-  if [[ -d "$(stack_dir northflank)" ]] && is_configured northflank; then doctor_northflank; fi
-  if [[ -d "$(stack_dir cloud-run)" ]] && is_configured cloud-run; then doctor_cloud_run; fi
-  if [[ -d "$(stack_dir scaleway)" ]] && is_configured scaleway; then doctor_scaleway; fi
-  if [[ -d "$(stack_dir render)" ]] && is_configured render; then doctor_render; fi
+  local engine
+  for engine in $(engine_providers); do
+    if engine_defined "$engine" check && [[ -d "$(stack_dir "$engine")" ]] && is_configured "$engine"; then engine_call "$engine" check; fi
+  done
   doctor_ssh
   doctor_images
   doctor_cloudflare
@@ -6605,7 +6702,7 @@ SSH_KEY_BUNDLED=""
 
 # ci_secret_names: the secrets this project's workflows need, one per line: NAME, then what it is
 ci_secret_names() {
-  local s var seen=" "
+  local s var what seen=" "
   emit() { [[ "$seen" != *" $1 "* ]] || return 0; seen="$seen$1 "; printf '%s\t%s\n' "$1" "$2"; }
   if [[ -n "$(state_config)" && "${FREELUNCH_STATE_PASSPHRASE:-}" != "none" ]]; then
     emit FREELUNCH_STATE_PASSPHRASE "the passphrase that encrypts the state (the line in .freelunch/.env)"
@@ -6613,9 +6710,6 @@ ci_secret_names() {
   for s in $(project_stacks); do
     case "$s" in
       cloudflare)   emit CLOUDFLARE_API_TOKEN "Cloudflare API token" ;;
-      northflank)   emit NORTHFLANK_API_TOKEN "Northflank API token" ;;
-      scaleway)     emit SCW_SECRET_KEY "Scaleway secret key" ;;
-      render)       emit RENDER_API_KEY "Render API key" ;;
       neon)         emit NEON_API_KEY "Neon API key" ;;
       supabase)     emit SUPABASE_ACCESS_TOKEN "Supabase access token" ;;
       upstash)           emit UPSTASH_EMAIL "Upstash account email"; emit UPSTASH_API_KEY "Upstash API key" ;;
@@ -6629,12 +6723,9 @@ ci_secret_names() {
       yugabyte)          emit YBM_API_KEY "YugabyteDB Aeon API key" ;;
       neo4j-aura)        emit AURA_CLIENT_ID "Neo4j Aura client ID"; emit AURA_CLIENT_SECRET "Neo4j Aura client secret" ;;
       motherduck)        emit MOTHERDUCK_TOKEN "MotherDuck token"; emit MOTHERDUCK_ADMIN_TOKEN "MotherDuck admin token" ;;
-      cloud-run)    emit CLOUD_RUN_ACCESS_TOKEN "Google access token for Cloud Run" ;;
       backblaze-b2) emit B2_APPLICATION_KEY_ID "Backblaze key ID"; emit B2_APPLICATION_KEY "Backblaze application key" ;;
-      oci)          emit FREELUNCH_OCI_CONFIG "the profile block of ~/.oci/config (the console shows it when you add an API key)"
-                    emit FREELUNCH_OCI_KEY "the OCI API private key (the .pem file the console gave you)" ;;
-      aws)          emit AWS_ACCESS_KEY_ID "AWS access key ID"; emit AWS_SECRET_ACCESS_KEY "AWS secret access key" ;;
     esac
+    while IFS=$'\t' read -r var what; do [[ -z "$var" ]] || emit "$var" "$what"; done < <(engine_call "$s" secrets)
     [[ "$(meta "$s" layer)" != "host" ]] || emit FREELUNCH_SSH_PRIVATE_KEY "the private SSH key deploy signs in to the hosts with (without a passphrase)"
   done
   for var in $(tfvars_map "$PROJECT/apps.tfvars" registries password_env | cut -f2); do
@@ -7478,6 +7569,7 @@ main() {
     inventory)            cmd_inventory ;;
     output)               cmd_output "$@" ;;
     catalog)              cmd_catalog ;;
+    engine)               [[ -d "$PROVIDERS_DIR/${1:-}" ]] || die "engine: freelunch engine <provider> [kind]"; engine_of "$@" ;;
     test)                 cmd_test "$@" ;;
     fmt)                  cmd_fmt "$@" ;;
     help|-h|--help)       usage ;;
