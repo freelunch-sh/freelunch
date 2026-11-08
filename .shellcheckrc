@@ -1,2 +1,0 @@
-# CI runs shellcheck on bin/freelunch and the scripts; info-level notices (quoting style, A && B || C) do not fail it.
-severity=warning
