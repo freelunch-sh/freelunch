@@ -75,6 +75,10 @@ account has run apply, deploy and destroy). New adapters start as `fake-api`.
 - When the project has a state store, create writes the service to the provider's record
   (`record-<provider>`, see [architecture.md](architecture.md#engine-records)), destroy deletes
   what the record names as well as what the listing shows, and `status` says where they differ.
+- A provider that deploys source, not an image, takes `deploy <app> --source <folder>`; the folder
+  is in the vars as `source`, for its custom step. A custom deploy step that starts a revision sets
+  `deploy_id` in the vars file, and the generic `wait` polls it. `wait.url` (a jq filter over the
+  last answer of the wait) says where the app is, for providers whose list doesn't ([Deno Deploy](../providers/deno-deploy/README.md)).
 - A step the format can't express: `custom: <name>` in `api.yaml`, and `providers/<p>/api.sh`
   defines `api_custom_<name>_<step>` (`create`, `update`, `deploy`, `delete`), which gets the
   provider and the vars file. It uses `api_call` for its own requests.

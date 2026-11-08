@@ -3827,7 +3827,11 @@ api_wait() {
     code="$(api_do "$p" wait "$vars")"
     api_ok "$p" wait "$code" || die "api: can't read the deploy of $name ($code): $(api_error "$p")"
     status="$(jq -r "$(api_cfg "$p" .wait.status) | tostring" "$TMP/api/$p.out" 2>/dev/null)" || status=""
-    if jq -e --arg s "$status" '.wait.done | index($s) != null' "$TMP/api/$p.json" >/dev/null 2>&1; then return 0; fi
+    if jq -e --arg s "$status" '.wait.done | index($s) != null' "$TMP/api/$p.json" >/dev/null 2>&1; then
+      # where the app is, when the answer says (wait.url: a jq filter)
+      if api_has "$p" .wait.url; then jq -r "$(api_cfg "$p" .wait.url) // empty" "$TMP/api/$p.out" > "$TMP/api/$p.waiturl" 2>/dev/null || : > "$TMP/api/$p.waiturl"; fi
+      return 0
+    fi
     if jq -e --arg s "$status" '(.wait.failed // []) | index($s) != null' "$TMP/api/$p.json" >/dev/null 2>&1; then
       die "api: the deploy of $name is $status (see $p's dashboard for its logs)"
     fi
@@ -3836,18 +3840,21 @@ api_wait() {
   done
 }
 
-# api_deploy <provider> <app> <image> <port> <env file> <dry run 0|1>: find <prefix>-<app>;
-# create it when it isn't there, update it when freelunch made it, stop when somebody else did
+# api_deploy <provider> <app> <image> <port> <env file> <dry run 0|1> [source folder]: find
+# <prefix>-<app>; create it when it isn't there, update it when freelunch made it, stop when
+# somebody else did. A provider that deploys source, not an image, gets the folder in the vars
+# (source), for its custom deploy step.
 api_deploy() {
-  local p="$1" app="$2" image="$3" port="$4" envfile="$5" dry="$6" vars name id found code env url
+  local p="$1" app="$2" image="$3" port="$4" envfile="$5" dry="$6" source="${7:-}" vars name id found code env url
   api_load "$p"
   vars="$TMP/api/$p.vars"
   api_base "$p" > "$vars.base"
   env='{}'; [[ -z "$envfile" ]] || env="$(env_json "$envfile")"
   printf '%s' "$env" > "$TMP/api/$p.env"
   name="$(jq -r .prefix "$vars.base")-$app"
-  jq -c --arg app "$app" --arg name "$name" --arg image "$image" --argjson port "${port:-8080}" --slurpfile env "$TMP/api/$p.env" \
-    '. + {app: $app, name: $name, image: $image, port: $port, env: $env[0]}' "$vars.base" > "$vars"
+  [[ -z "$source" ]] || source="$(abs_path "$source")"
+  jq -c --arg app "$app" --arg name "$name" --arg image "$image" --arg source "$source" --argjson port "${port:-8080}" --slurpfile env "$TMP/api/$p.env" \
+    '. + {app: $app, name: $name, image: $image, source: $source, port: $port, env: $env[0]}' "$vars.base" > "$vars"
   if [[ "$dry" == 1 ]]; then
     log "$p: $name: would, with the token left out and the environment's values as <redacted>:"
     echo "  find:   $(api_cfg "$p" .list.request)"
@@ -3857,7 +3864,8 @@ api_deploy() {
       api_render "$p" update "$vars" "$TMP/api/$p.dry" redact
       echo "  update: $(api_cfg "$p" .update.request) (when freelunch made it)  $(cat "$TMP/api/$p.dry")"
     fi
-    if api_has "$p" .deploy.request; then echo "  deploy: $(api_cfg "$p" .deploy.request)"; fi
+    if api_has "$p" .deploy.request; then echo "  deploy: $(api_cfg "$p" .deploy.request)"
+    elif [[ -n "$(api_cfg "$p" .custom)" ]]; then echo "  deploy: a custom step ($(api_cfg "$p" .custom)) uploads ${source:-the source folder}"; fi
     if api_has "$p" .wait.request; then echo "  wait:   $(api_cfg "$p" .wait.request) until $(api_cfg "$p" '.wait.done | join(" or ")')"; fi
     return 0
   fi
@@ -3896,9 +3904,11 @@ api_deploy() {
       jq -c --arg d "$(jq -r "$(api_cfg "$p" .deploy.id) | tostring" "$TMP/api/$p.out")" '. + {deploy_id: $d}' "$vars" > "$vars.new" && mv "$vars.new" "$vars"
     fi
   fi
+  : > "$TMP/api/$p.waiturl"
   api_wait "$p" "$vars"
   api_list "$p"
   url="$(jq -r --arg n "$name" 'map(select(.name == $n)) | first | .url // empty' "$TMP/api/$p.items.json")"
+  [[ -n "$url" ]] || url="$(cat "$TMP/api/$p.waiturl" 2>/dev/null || true)"
   if [[ -n "$url" ]]; then
     api_has "$p" .url && url="$(api_expand "$(api_cfg "$p" .url)" <(jq -cn --arg url "$url" '{url: $url}'))"
     report_url "$p" "$url" "$app"
@@ -3967,9 +3977,9 @@ api_status() {
   fi
 }
 
-# cmd_api <provider> check|list|status|destroy | deploy <app> --image <ref> [--port n] [--env-file f] [--dry-run]
+# cmd_api <provider> check|list|status|destroy | deploy <app> --image <ref> | --source <folder> [--port n] [--env-file f] [--dry-run]
 cmd_api() {
-  local p="${1:-}" sub="${2:-}" app="" image="" port="" envfile="" dry=0
+  local p="${1:-}" sub="${2:-}" app="" image="" port="" envfile="" dry=0 source=""
   [[ -n "$p" && -n "$sub" ]] || die "api: freelunch api <provider> check | list | status | destroy | deploy <app> --image <ref>"
   [[ -f "$PROVIDERS_DIR/$p/api.yaml" ]] || die "api: $p has no api.yaml"
   shift 2
@@ -3987,13 +3997,14 @@ cmd_api() {
           --image)    [[ $# -gt 1 ]] || die "api deploy: --image takes an image"; image="$2"; shift ;;
           --port)     [[ $# -gt 1 && "$2" =~ ^[0-9]+$ ]] || die "api deploy: --port takes a number"; port="$2"; shift ;;
           --env-file) [[ $# -gt 1 && -f "$2" ]] || die "api deploy: --env-file takes a file"; envfile="$2"; shift ;;
+          --source)   [[ $# -gt 1 && -d "$2" ]] || die "api deploy: --source takes the folder with the app's source"; source="$2"; shift ;;
           --dry-run)  dry=1 ;;
           *)          die "api deploy: unknown option $1" ;;
         esac
         shift
       done
-      [[ -n "$image" ]] || die "api deploy: --image is needed"
-      api_deploy "$p" "$app" "$image" "$port" "$envfile" "$dry" ;;
+      [[ -n "$image" || -n "$source" ]] || die "api deploy: --image (a container image) or --source (a folder of source code) is needed"
+      api_deploy "$p" "$app" "$image" "$port" "$envfile" "$dry" "$source" ;;
     *) die "api: check, list, status, destroy or deploy" ;;
   esac
 }

@@ -3214,7 +3214,7 @@ api_run() {
 # stops with the provider's status, an API error hides the app's secrets, and destroy deletes
 # only what freelunch made. A provider with an api.yaml and no fixture fails here.
 test_api_engine_lifecycle_for_every_provider() {
-  local f name dir out fake token
+  local f name dir out fake token scen src=() ours foreign other
   printf 'SECRET_KEY=supersecretvalue\nPLAIN=1\n' > "$WORK/api-lifecycle.env"
   for f in "$ROOT"/providers/*/api.yaml "$ROOT"/tests/fixtures/*/api.yaml; do
     [[ -f "$f" ]] || continue
@@ -3222,28 +3222,39 @@ test_api_engine_lifecycle_for_every_provider() {
     exists "$ROOT/tests/fixtures/$name/scenario.json"
     [[ "$(jq -r '.generic == false' "$ROOT/tests/fixtures/$name/scenario.json")" == false ]] || continue
     dir="$WORK/api-$name"; fake="$dir/fake"
-    token="$(jq -r .token "$ROOT/tests/fixtures/$name/scenario.json")"
+    scen="$ROOT/tests/fixtures/$name/scenario.json"
+    token="$(jq -r .token "$scen")"
+    ours="$(jq -r .ours_id "$scen")"; foreign="$(jq -r .foreign_id "$scen")"; other="$(jq -r .other_id "$scen")"
+    # a provider that deploys source gets a folder of it
+    src=()
+    if jq -e '.source_files' "$scen" >/dev/null; then
+      rm -rf "$WORK/src-$name"; mkdir -p "$WORK/src-$name"
+      while IFS= read -r f; do
+        mkdir -p "$WORK/src-$name/$(dirname "$f")"; jq -r --arg f "$f" '.source_files[$f]' "$scen" > "$WORK/src-$name/$f"
+      done < <(jq -r '.source_files | keys[]' "$scen")
+      src=(--source "$WORK/src-$name")
+    fi
     api_checkout "$dir" "$name"
     # create: the token goes in the config file, never on curl's command line
-    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --port 8080 --env-file "$WORK/api-lifecycle.env" 2>&1)"
+    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --port 8080 --env-file "$WORK/api-lifecycle.env" ${src[@]+"${src[@]}"} 2>&1)"
     contains "$out" "$name: freelunch-web: made"
     contains "$(cat "$fake/headers")" "$token"
     lacks "$(cat "$fake/argv")" "$token"
-    contains "$(cat "$fake/bodies")" '"SECRET_KEY":"supersecretvalue"'
+    contains "$(cat "$fake/bodies")" supersecretvalue
     lacks "$out" supersecretvalue
     # update: a service of ours is there, so it is changed, not made again
-    out="$(api_run "$dir" "$name" update deploy web --image ghcr.io/me/web:2 --env-file "$WORK/api-lifecycle.env" 2>&1)"
+    out="$(api_run "$dir" "$name" update deploy web --image ghcr.io/me/web:2 --env-file "$WORK/api-lifecycle.env" ${src[@]+"${src[@]}"} 2>&1)"
     contains "$out" "$name: freelunch-web: updated"
     lacks "$out" ": made"
     # a service of that name that freelunch didn't make is never touched
-    if out="$(api_run "$dir" "$name" foreign deploy web --image ghcr.io/me/web:1 2>&1)"; then echo "$name: deploy over a foreign service should fail"; return 1; fi
+    if out="$(api_run "$dir" "$name" foreign deploy web --image ghcr.io/me/web:1 ${src[@]+"${src[@]}"} 2>&1)"; then echo "$name: deploy over a foreign service should fail"; return 1; fi
     contains "$out" "which freelunch didn't make"
     equals "$(grep -vc '^GET ' "$fake/log" || true)" 0
     # a deploy that ends badly stops with the provider's status
-    if out="$(api_run "$dir" "$name" failed deploy web --image ghcr.io/me/web:1 2>&1)"; then echo "$name: a failed deploy should fail"; return 1; fi
+    if out="$(api_run "$dir" "$name" failed deploy web --image ghcr.io/me/web:1 ${src[@]+"${src[@]}"} 2>&1)"; then echo "$name: a failed deploy should fail"; return 1; fi
     contains "$out" "$(jq -r '.failed_says' "$ROOT/tests/fixtures/$name/scenario.json")"
     # an API error doesn't repeat the app's secrets
-    if out="$(api_run "$dir" "$name" rejected deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api-lifecycle.env" 2>&1)"; then echo "$name: a rejected create should fail"; return 1; fi
+    if out="$(api_run "$dir" "$name" rejected deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api-lifecycle.env" ${src[@]+"${src[@]}"} 2>&1)"; then echo "$name: a rejected create should fail"; return 1; fi
     contains "$out" "bad value <redacted> in env"
     lacks "$out" supersecretvalue
     # destroy: only ours (a 404 says it was gone already); the other two stay
@@ -3251,10 +3262,11 @@ test_api_engine_lifecycle_for_every_provider() {
     contains "$out" "deleted freelunch-web"
     contains "$out" "left alone"
     equals "$(grep -c '^DELETE ' "$fake/log")" 1
-    lacks "$(cat "$fake/log")" "DELETE /v1/services/x9"
-    lacks "$(cat "$fake/log")" "DELETE /v1/services/y3"
+    contains "$(grep '^DELETE ' "$fake/log")" "$ours"
+    lacks "$(cat "$fake/log")" "$foreign"
+    lacks "$(cat "$fake/log")" "$other"
     # dry run: nothing is sent, and the env value is hidden
-    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api-lifecycle.env" --dry-run 2>&1)"
+    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api-lifecycle.env" ${src[@]+"${src[@]}"} --dry-run 2>&1)"
     contains "$out" "would"
     lacks "$out" supersecretvalue
     [[ ! -e "$fake/log" ]] || { echo "$name: a dry run sent requests"; return 1; }
@@ -3335,6 +3347,43 @@ test_engine_of_agrees_with_the_catalogue() {
     [[ -n "$row" ]] || continue
     equals "$("$CLI" engine "$name")" "$row"
   done
+}
+
+# Deno Deploy takes source, not an image: the files go up inline as base64 under their relative
+# paths, with the entrypoint in the config; the app carries a freelunch label that marks it as
+# ours; its address comes from the revision.
+test_deno_deploy_uploads_the_source() {
+  local dir="$WORK/api-deno-src" src="$WORK/deno-src" out body
+  mkdir -p "$src/lib" "$src/.git" "$src/node_modules/x"
+  printf "Deno.serve(() => new Response('hi'));\n" > "$src/main.ts"
+  printf 'export const x = 1;\n' > "$src/lib/util.ts"
+  echo secret > "$src/.git/config"; echo dep > "$src/node_modules/x/index.js"
+  printf 'SECRET_KEY=supersecretvalue\n' > "$WORK/api-deno.env"
+  api_checkout "$dir" deno-deploy
+  out="$(api_run "$dir" deno-deploy create deploy web --source "$src" --env-file "$WORK/api-deno.env" 2>&1)"
+  contains "$out" "deno-deploy: freelunch-web: made"
+  contains "$out" "deno-deploy: web: https://freelunch-web.me.deno.net"
+  # the app is made with its label and its environment
+  body="$(sed -n 1p "$dir/fake/bodies")"
+  equals "$(jq -c '{slug, labels}' <<< "$body")" '{"slug":"freelunch-web","labels":{"freelunch":"freelunch"}}'
+  equals "$(jq -c '.env_vars' <<< "$body")" '[{"key":"SECRET_KEY","value":"supersecretvalue","secret":true}]'
+  # the deploy: the two source files and nothing from .git or node_modules
+  body="$(grep -m1 '"assets"' "$dir/fake/bodies")"
+  equals "$(jq -c '.assets | keys' <<< "$body")" '["lib/util.ts","main.ts"]'
+  equals "$(jq -r '.assets["main.ts"] | "\(.kind) \(.encoding)"' <<< "$body")" "file base64"
+  equals "$(jq -r '.assets["main.ts"].content' <<< "$body" | base64 -d)" "Deno.serve(() => new Response('hi'));"
+  equals "$(jq -c '.config' <<< "$body")" '{"runtime":{"type":"dynamic","entrypoint":"main.ts"}}'
+  equals "$(jq -r '.production' <<< "$body")" true
+  # a deploy without source, and without the entrypoint, says what is missing
+  if out="$(api_run "$dir" deno-deploy create deploy web --image x:1 2>&1)"; then echo "no source should fail"; return 1; fi
+  contains "$out" "a deploy uploads source code: pass the app's folder with --source"
+  rm "$src/main.ts"
+  if out="$(api_run "$dir" deno-deploy create deploy web --source "$src" 2>&1)"; then echo "no entrypoint should fail"; return 1; fi
+  contains "$out" "the entrypoint main.ts isn't in"
+  # the dry run says what it would do and uploads nothing
+  out="$(api_run "$dir" deno-deploy create deploy web --source "$src" --dry-run 2>&1)"
+  contains "$out" "a custom step (deno_deploy) uploads"
+  [[ ! -e "$dir/fake/log" ]] || { echo "a dry run sent requests"; return 1; }
 }
 
 # A provider's engine is what its provider.yaml says, or what its iac implies.
