@@ -60,8 +60,8 @@ Tick a box when the step is built, tested and committed. Design: [engines.md](en
 - [ ] `ci init`: `gh secret set`, repository variables, workflow files (secrets done: `ci init` asks set-now or print, `--set-secrets` / `--print-secrets` skip the question; variables and the workflows are left)
 - [ ] `ci init`: first dry run in Actions so the user sees it work
 - [x] OIDC (keyless) for AWS (`freelunch ci oidc aws`; the role has no permissions unless `--policy-arn` is given)
-- [ ] OIDC (keyless) for GCP
-- [ ] OIDC (keyless) for Azure
+- [x] OIDC (keyless) for GCP (`freelunch ci oidc gcp`; no permissions unless `--role` is given)
+- [x] OIDC (keyless) for Azure (`freelunch ci oidc azure`; no permissions unless `--role` is given)
 - [x] `doctor` runs in Actions and reports missing or bad secrets
 - [ ] Docs: Actions is the default path, local is optional
 - [x] Tests: generated workflows per job

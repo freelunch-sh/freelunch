@@ -330,25 +330,31 @@ service account key as `GOOGLE_CREDENTIALS` (`jq -c . key.json` puts it on one l
 AWS, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; for Azure, a service principal as
 `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET`, `ARM_TENANT_ID` and `ARM_SUBSCRIPTION_ID`.
 
-### AWS without a stored key
+### Keyless sign-in to AWS, Google Cloud and Azure
 
 ```bash
-freelunch ci oidc aws
+freelunch ci oidc aws     # or gcp, or azure
 ```
 
-Instead of `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in secrets, a workflow can ask GitHub
-for a short-lived token and trade it for AWS credentials. That needs a trust set up once in
-your account: an IAM OIDC provider for GitHub, and a role that only this repository's `main`
-branch and its own pull requests (never a fork's) can take. The command asks whether to run
-the `aws` commands for it or print them (`--run` and `--print` skip the question; with nobody
-to answer it prints). The role starts with no permissions: pass `--policy-arn` to attach one,
-or attach what the aws stack needs yourself, since how much of your account CI may change is
-your call. The role's ARN and the region go to the repository as variables `AWS_ROLE_ARN` and
-`AWS_REGION` (not secrets: they are not sensitive), and `.freelunch/oidc` records that the
-project signs in this way. Run `freelunch ci init` again: the workflows then get
-`id-token: write` and an `aws-actions/configure-aws-credentials` step, and the two key secrets
-disappear from the list. GCP and Azure have the same option to come; until then they use the
-credentials above.
+Instead of a long-lived key in a secret, a workflow can ask GitHub for a short-lived token and
+trade it for the cloud's credentials. That needs a trust set up once in your account, which
+only this repository's `main` branch and its own pull requests (never a fork's) can use:
+
+| Cloud | What gets made | Variables set on the repository |
+|---|---|---|
+| AWS | an IAM OIDC provider for GitHub, and a role | `AWS_ROLE_ARN`, `AWS_REGION` |
+| Google Cloud | a Workload Identity pool and provider, a service account, and the binding between them | `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_SERVICE_ACCOUNT` |
+| Azure | an app registration in Entra with two federated credentials, and its service principal | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` |
+
+Each command asks whether to run the cloud's CLI against your account or print the commands
+(`--run` and `--print` skip the question; with nobody to answer it prints, and anything that
+exists already is reused, not made twice). The identity starts with **no permissions**: pass
+`--policy-arn` (AWS) or `--role` (Google Cloud, Azure; repeatable) to grant some, or grant what
+the stack needs yourself. How much of your account CI may change is your call, so freelunch
+doesn't default to something broad. The variables are not secrets (none of them is sensitive).
+`.freelunch/oidc` records which clouds the project signs in to this way. Run `freelunch ci init`
+again: the workflows get `id-token: write` and the cloud's sign-in step, and the AWS key
+secrets disappear from the list. The CI check workflow never signs in.
 
 ## Troubleshooting
 

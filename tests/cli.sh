@@ -300,7 +300,37 @@ case "$1 $2" in
     for a in "$@"; do [[ "$a" == file://* ]] && { mkdir -p "$FAKE_GH"; cp "${a#file://}" "$FAKE_GH/aws-trust.json"; }; done ;;
 esac
 EOF
-chmod +x "$WORK/sleepy-bin/"* "$WORK/gh-bin/gh" "$WORK/gh-bin/aws" "$WORK/bin/slow-tf"
+# A gcloud that logs what it is asked (project number 123456789). Every describe fails, as if
+# nothing were there yet, unless FAKE_GCP_EXISTS=1.
+cat > "$WORK/gh-bin/gcloud" <<'EOF'
+#!/usr/bin/env bash
+echo "gcloud $*" >> "$FAKE_LOG"
+case "$*" in
+  "projects describe"*) echo 123456789 ;;
+  *" describe "*) [[ "${FAKE_GCP_EXISTS:-}" == 1 ]] || exit 1 ;;
+esac
+EOF
+# An az that logs what it is asked (tenant tenant-3333, subscription sub-4444, a new app is
+# app-1111 with object id obj-2222). FAKE_AZ_EXISTS=1: the app, its principal and its "main"
+# federated credential are there. A credential it is given is kept in $FAKE_GH/azure-cred-<name>.json.
+cat > "$WORK/gh-bin/az" <<'EOF'
+#!/usr/bin/env bash
+echo "az $*" >> "$FAKE_LOG"
+case "$*" in
+  "account show --query tenantId"*) echo tenant-3333 ;;
+  "account show --query id"*) echo sub-4444 ;;
+  "ad app list"*) [[ "${FAKE_AZ_EXISTS:-}" != 1 ]] || echo app-1111 ;;
+  "ad app create"*) echo app-1111 ;;
+  "ad app show"*) echo obj-2222 ;;
+  "ad sp show"*) [[ "${FAKE_AZ_EXISTS:-}" == 1 ]] || exit 1 ;;
+  "ad app federated-credential list"*) [[ "${FAKE_AZ_EXISTS:-}" != 1 ]] || echo main ;;
+  "ad app federated-credential create"*)
+    for a in "$@"; do
+      if [[ "$a" == @* ]]; then mkdir -p "$FAKE_GH"; cp "${a#@}" "$FAKE_GH/azure-cred-$(jq -r .name "${a#@}").json"; fi
+    done ;;
+esac
+EOF
+chmod +x "$WORK/sleepy-bin/"* "$WORK/gh-bin/gh" "$WORK/gh-bin/aws" "$WORK/gh-bin/gcloud" "$WORK/gh-bin/az" "$WORK/bin/slow-tf"
 mkdir -p "$WORK/nf-bin" && ln -s "$WORK/wait-bin/sleep" "$WORK/nf-bin/sleep"
 # Secret stores: 1Password's op knows op://Private/GHCR/token, the macOS keychain knows
 # freelunch-cloudflare. Both log what they are asked.
@@ -1047,17 +1077,27 @@ exists()   { [ -e "$1" ] || { echo "missing: $1"; return 1; }; }
 absent()   { [ ! -e "$1" ] || { echo "should not exist: $1"; return 1; }; }
 between()  { { [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]; } || { echo "expected $2 to $3, got: $1"; return 1; }; }
 
-run_test() { # run_test <name>: run test_<name> in a subshell with errexit on
-  local rc
+run_test() { # run_test <name>: run test_<name> in a subshell with errexit on; its result in $WORK/results/<name>
+  local rc start=$SECONDS
   set +e
   (set -e; "test_$1") > "$WORK/$1.log" 2>&1
   rc=$?
   set -e
+  mkdir -p "$WORK/results"
+  printf '%s %s\n' "$rc" "$((SECONDS - start))" > "$WORK/results/$1.new" && mv "$WORK/results/$1.new" "$WORK/results/$1"
+}
+
+# report_test <name>: say how a finished test went, and count it
+report_test() {
+  local rc secs
+  read -r rc secs < "$WORK/results/$1"
   if [[ $rc -eq 0 ]]; then
     passed=$((passed + 1)); echo "  ok    $1"
   else
     failed=$((failed + 1)); echo "  FAIL  $1"; sed 's/^/        /' "$WORK/$1.log"
   fi
+  reported=" $reported$1 "
+  [[ -z "${SLOW:-}" ]] || printf '%s %s\n' "$secs" "$1" >> "$WORK/times"
 }
 
 # A copy of the CLI with the real deploy and hybrid modules and the oci, northflank and
@@ -3174,7 +3214,7 @@ api_run() {
 # only what freelunch made. A provider with an api.yaml and no fixture fails here.
 test_api_engine_lifecycle_for_every_provider() {
   local f name dir out fake token
-  printf 'SECRET_KEY=supersecretvalue\nPLAIN=1\n' > "$WORK/api.env"
+  printf 'SECRET_KEY=supersecretvalue\nPLAIN=1\n' > "$WORK/api-lifecycle.env"
   for f in "$ROOT"/providers/*/api.yaml "$ROOT"/tests/fixtures/*/api.yaml; do
     [[ -f "$f" ]] || continue
     name="$(basename "$(dirname "$f")")"
@@ -3184,14 +3224,14 @@ test_api_engine_lifecycle_for_every_provider() {
     token="$(jq -r .token "$ROOT/tests/fixtures/$name/scenario.json")"
     api_checkout "$dir" "$name"
     # create: the token goes in the config file, never on curl's command line
-    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --port 8080 --env-file "$WORK/api.env" 2>&1)"
+    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --port 8080 --env-file "$WORK/api-lifecycle.env" 2>&1)"
     contains "$out" "$name: freelunch-web: made"
     contains "$(cat "$fake/headers")" "$token"
     lacks "$(cat "$fake/argv")" "$token"
     contains "$(cat "$fake/bodies")" '"SECRET_KEY":"supersecretvalue"'
     lacks "$out" supersecretvalue
     # update: a service of ours is there, so it is changed, not made again
-    out="$(api_run "$dir" "$name" update deploy web --image ghcr.io/me/web:2 --env-file "$WORK/api.env" 2>&1)"
+    out="$(api_run "$dir" "$name" update deploy web --image ghcr.io/me/web:2 --env-file "$WORK/api-lifecycle.env" 2>&1)"
     contains "$out" "$name: freelunch-web: updated"
     lacks "$out" ": made"
     # a service of that name that freelunch didn't make is never touched
@@ -3202,7 +3242,7 @@ test_api_engine_lifecycle_for_every_provider() {
     if out="$(api_run "$dir" "$name" failed deploy web --image ghcr.io/me/web:1 2>&1)"; then echo "$name: a failed deploy should fail"; return 1; fi
     contains "$out" "$(jq -r '.failed_says' "$ROOT/tests/fixtures/$name/scenario.json")"
     # an API error doesn't repeat the app's secrets
-    if out="$(api_run "$dir" "$name" rejected deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api.env" 2>&1)"; then echo "$name: a rejected create should fail"; return 1; fi
+    if out="$(api_run "$dir" "$name" rejected deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api-lifecycle.env" 2>&1)"; then echo "$name: a rejected create should fail"; return 1; fi
     contains "$out" "bad value <redacted> in env"
     lacks "$out" supersecretvalue
     # destroy: only ours (a 404 says it was gone already); the other two stay
@@ -3213,7 +3253,7 @@ test_api_engine_lifecycle_for_every_provider() {
     lacks "$(cat "$fake/log")" "DELETE /v1/services/x9"
     lacks "$(cat "$fake/log")" "DELETE /v1/services/y3"
     # dry run: nothing is sent, and the env value is hidden
-    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api.env" --dry-run 2>&1)"
+    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api-lifecycle.env" --dry-run 2>&1)"
     contains "$out" "would"
     lacks "$out" supersecretvalue
     [[ ! -e "$fake/log" ]] || { echo "$name: a dry run sent requests"; return 1; }
@@ -3223,14 +3263,14 @@ test_api_engine_lifecycle_for_every_provider() {
 # GraphQL: every call has a body, and an error inside a 200 is a failure.
 test_api_engine_speaks_graphql() {
   local dir="$WORK/api-gql" out
-  printf 'SECRET_KEY=supersecretvalue\n' > "$WORK/api.env"
+  printf 'SECRET_KEY=supersecretvalue\n' > "$WORK/api-graphql.env"
   api_checkout "$dir" sample-gql
   contains "$(api_run "$dir" sample-gql check check 2>&1)" "the token works"
-  out="$(api_run "$dir" sample-gql create deploy web --image img:1 --env-file "$WORK/api.env" 2>&1)"
+  out="$(api_run "$dir" sample-gql create deploy web --image img:1 --env-file "$WORK/api-graphql.env" 2>&1)"
   contains "$out" "freelunch-web: made"
   contains "$(cat "$dir/fake/bodies")" '"variables":{"n":"freelunch-web","i":"img:1","e":{"SECRET_KEY":"supersecretvalue"}}'
   equals "$(grep -c '^POST /graphql$' "$dir/fake/log")" 3
-  if out="$(api_run "$dir" sample-gql quota deploy web --image img:1 --env-file "$WORK/api.env" 2>&1)"; then echo "a GraphQL error should fail"; return 1; fi
+  if out="$(api_run "$dir" sample-gql quota deploy web --image img:1 --env-file "$WORK/api-graphql.env" 2>&1)"; then echo "a GraphQL error should fail"; return 1; fi
   contains "$out" "can't make freelunch-web (400): quota exceeded for <redacted>"
   lacks "$out" supersecretvalue
 }
@@ -3251,7 +3291,7 @@ test_api_engine_keeps_a_record_in_the_store() {
   local p="$WORK/api-rec" dir="$WORK/api-rec-co" out
   mkdir -p "$p/.freelunch"
   state_store "$p"
-  printf 'SECRET_KEY=supersecretvalue\n' > "$WORK/api.env"
+  printf 'SECRET_KEY=supersecretvalue\n' > "$WORK/api-record.env"
   api_checkout "$dir" sample
   export API_CWD="$p"
   api_run "$dir" sample create deploy web --image img:1 >/dev/null 2>&1
@@ -3729,8 +3769,105 @@ test_ci_oidc_aws_sets_up_keyless_sign_in() {
   printf 'run\n' | FREELUNCH_INTERACTIVE=1 ci_in "$p" ci oidc aws >/dev/null 2>&1
   grep -q '^aws iam create-role' "$p/fake.log"
   # the others aren't built yet, and say so
-  if out="$(ci_in "$p" ci oidc gcp 2>&1)"; then echo "gcp should not be built yet"; return 1; fi
-  contains "$out" "gcp isn't built yet"
+}
+
+# Keyless sign-in to Google Cloud: a pool and a provider that only take this repository's main
+# branch and pull requests, a service account with no roles unless --role says, and the
+# variables the sign-in step reads.
+test_ci_oidc_gcp_sets_up_keyless_sign_in() {
+  local p="$WORK/ci-oidc-gcp" out w line
+  doctor_project "$p"
+  state_store "$p"
+  # no project known: say so
+  if out="$(ci_in "$p" ci oidc gcp --print 2>&1)"; then echo "a missing project should fail"; return 1; fi
+  contains "$out" "which Google Cloud project?"
+  # print: in an order that works, quoted so it can be pasted, nothing run
+  out="$(ci_in "$p" ci oidc gcp --print --project my-proj 2>&1)"
+  contains "$out" "gcloud iam workload-identity-pools create freelunch --project my-proj"
+  contains "$out" "gcloud iam service-accounts create freelunch-ci --project my-proj"
+  # the printed command, read back by a shell, hands gcloud the condition whole
+  line="$(grep 'providers create-oidc' <<< "$out" | head -1)"
+  eval "set -- $line"
+  while [[ "$1" != --attribute-condition ]]; do shift; done
+  equals "$2" "assertion.repository == 'me/shop' && (assertion.ref == 'refs/heads/main' || assertion.event_name == 'pull_request')"
+  contains "$out" "gh variable set GCP_SERVICE_ACCOUNT --repo me/shop --body freelunch-ci@my-proj.iam.gserviceaccount.com"
+  [[ "${out%%providers create-oidc*}" == *"pools create freelunch"*"service-accounts create"* ]] || { echo "the pool and the account come before the provider"; return 1; }
+  fails grep -q '^gcloud iam .* create' "$p/fake.log"
+  absent "$p/.freelunch/oidc"
+  # run
+  out="$(ci_in "$p" ci oidc gcp --run --project my-proj --role roles/run.admin 2>&1)"
+  grep -q '^gcloud iam workload-identity-pools create freelunch --project my-proj' "$p/fake.log"
+  grep -q "^gcloud iam workload-identity-pools providers create-oidc github .*--attribute-condition assertion.repository == 'me/shop' && (assertion.ref == 'refs/heads/main' || assertion.event_name == 'pull_request')" "$p/fake.log"
+  grep -q '^gcloud iam service-accounts add-iam-policy-binding freelunch-ci@my-proj.iam.gserviceaccount.com .*--role roles/iam.workloadIdentityUser --member principalSet://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/freelunch/attribute.repository/me/shop' "$p/fake.log"
+  grep -q '^gcloud projects add-iam-policy-binding my-proj --member serviceAccount:freelunch-ci@my-proj.iam.gserviceaccount.com --role roles/run.admin' "$p/fake.log"
+  equals "$(cat "$p/gh/var-GCP_WORKLOAD_IDENTITY_PROVIDER")" "projects/123456789/locations/global/workloadIdentityPools/freelunch/providers/github"
+  grep -qx gcp "$p/.freelunch/oidc"
+  # the workflows sign in with it
+  ci_in "$p" ci init --print-secrets >/dev/null 2>&1
+  for w in freelunch freelunch-wait freelunch-provision; do
+    grep -q 'id-token: write' "$p/.github/workflows/$w.yml"
+    grep -q 'uses: google-github-actions/auth@v2' "$p/.github/workflows/$w.yml"
+  done
+  fails grep -q 'google-github-actions' "$p/.github/workflows/freelunch-ci.yml"
+  grep -q 'workload_identity_provider: \${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}' "$p/.github/workflows/freelunch.yml"
+  if command -v actionlint >/dev/null; then actionlint "$p"/.github/workflows/*.yml; fi
+  # what is there already is not made twice; the provider is updated
+  : > "$p/fake.log"
+  FAKE_GCP_EXISTS=1 ci_in "$p" ci oidc gcp --run --project my-proj >/dev/null 2>&1
+  fails grep -q 'pools create\|service-accounts create' "$p/fake.log"
+  grep -q 'providers update-oidc github' "$p/fake.log"
+  # the project from the stack's tfvars
+  mkdir -p "$p/.freelunch/gcp" && echo 'project_id = "from-tfvars"' > "$p/.freelunch/gcp/terraform.tfvars"
+  contains "$(ci_in "$p" ci oidc gcp --print 2>&1)" "--project from-tfvars"
+}
+
+# Keyless sign-in to Azure: an app registration with federated credentials for this repository's
+# main branch and pull requests, no roles unless --role says, and the variables azure/login reads.
+test_ci_oidc_azure_sets_up_keyless_sign_in() {
+  local p="$WORK/ci-oidc-azure" out w
+  doctor_project "$p"
+  state_store "$p"
+  # print: the commands, nothing run
+  out="$(ci_in "$p" ci oidc azure --print --role Contributor 2>&1)"
+  contains "$out" "az ad app create --display-name 'freelunch-me-shop'"
+  contains "$out" '"subject":"repo:me/shop:ref:refs/heads/main"'
+  contains "$out" '"subject":"repo:me/shop:pull_request"'
+  contains "$out" "az role assignment create --assignee \"\$APP_ID\" --role 'Contributor' --scope /subscriptions/sub-4444"
+  fails grep -q '^az ad app create' "$p/fake.log"
+  absent "$p/.freelunch/oidc"
+  # run
+  out="$(ci_in "$p" ci oidc azure --run --role Contributor 2>&1)"
+  grep -q '^az ad app create --display-name freelunch-me-shop' "$p/fake.log"
+  grep -q '^az ad sp create --id app-1111' "$p/fake.log"
+  equals "$(jq -r '.subject' "$p/gh/azure-cred-main.json")" "repo:me/shop:ref:refs/heads/main"
+  equals "$(jq -r '.subject' "$p/gh/azure-cred-pull-request.json")" "repo:me/shop:pull_request"
+  equals "$(jq -r '.audiences[0]' "$p/gh/azure-cred-main.json")" "api://AzureADTokenExchange"
+  grep -q '^az role assignment create --assignee app-1111 --role Contributor --scope /subscriptions/sub-4444' "$p/fake.log"
+  equals "$(cat "$p/gh/var-AZURE_CLIENT_ID")" app-1111
+  equals "$(cat "$p/gh/var-AZURE_TENANT_ID")" tenant-3333
+  equals "$(cat "$p/gh/var-AZURE_SUBSCRIPTION_ID")" sub-4444
+  grep -qx azure "$p/.freelunch/oidc"
+  # the workflows sign in with it
+  ci_in "$p" ci init --print-secrets >/dev/null 2>&1
+  for w in freelunch freelunch-wait freelunch-provision; do
+    grep -q 'id-token: write' "$p/.github/workflows/$w.yml"
+    grep -q 'uses: azure/login@v2' "$p/.github/workflows/$w.yml"
+  done
+  fails grep -q 'azure/login' "$p/.github/workflows/freelunch-ci.yml"
+  grep -q 'client-id: \${{ vars.AZURE_CLIENT_ID }}' "$p/.github/workflows/freelunch.yml"
+  if command -v actionlint >/dev/null; then actionlint "$p"/.github/workflows/*.yml; fi
+  # what is there already is not made twice, and the missing credential is added
+  : > "$p/fake.log"; rm "$p/gh/azure-cred-"*
+  FAKE_AZ_EXISTS=1 ci_in "$p" ci oidc azure --run >/dev/null 2>&1
+  fails grep -q '^az ad app create\|^az ad sp create' "$p/fake.log"
+  absent "$p/gh/azure-cred-main.json"
+  exists "$p/gh/azure-cred-pull-request.json"
+  # asked, with nobody to answer: print
+  : > "$p/fake.log"
+  ci_in "$p" ci oidc azure < /dev/null >/dev/null 2>&1
+  fails grep -q '^az ad app create' "$p/fake.log"
+  if out="$(ci_in "$p" ci oidc nonesuch 2>&1)"; then echo "an unknown cloud should fail"; return 1; fi
+  contains "$out" "aws, gcp or azure"
 }
 
 # ci restore writes the files the secrets carry, and the key that goes with the profile.
@@ -4801,8 +4938,34 @@ test_up_with_no_domain_says_where_the_app_is() {
   contains "$out" "up: oci-main runs the app, but nothing serves it to the internet: a VM needs a domain on Cloudflare (freelunch setup --domain <name>) or an open port of its own"
 }
 
-# tests/cli.sh <pattern>: only the tests whose name matches the pattern (grep -E)
+# tests/cli.sh [-j N] [pattern]: only the tests whose name matches the pattern (grep -E), N at a
+# time (default: one per CPU; -j 1 runs them in turn, in order). Each test works in names of its
+# own under a temp folder, so they don't get in each other's way. SLOW=1 lists the slowest.
+jobs="${TEST_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
+if [[ "${1:-}" == -j ]]; then jobs="${2:?-j takes a number}"; shift 2; fi
 echo "tests/cli.sh"
-for t in $(declare -F | awk '{print $3}' | grep '^test_' | sed 's/^test_//' | grep -E "${1:-.}"); do run_test "$t"; done
+tests=($(declare -F | awk '{print $3}' | grep '^test_' | sed 's/^test_//' | grep -E "${1:-.}"))
+reported=" "
+if [[ $jobs -le 1 ]]; then
+  for t in "${tests[@]}"; do run_test "$t"; report_test "$t"; done
+else
+  # keep $jobs tests going; report each as it finishes
+  next=0
+  while [[ $next -lt ${#tests[@]} || $(jobs -r | wc -l) -gt 0 ]]; do
+    while [[ $next -lt ${#tests[@]} && $(jobs -r | wc -l) -lt $jobs ]]; do
+      run_test "${tests[$next]}" &
+      next=$((next + 1))
+    done
+    for t in "${tests[@]}"; do
+      [[ "$reported" != *" $t "* && -f "$WORK/results/$t" ]] && report_test "$t"
+    done
+    sleep 0.2
+  done
+  wait
+  for t in "${tests[@]}"; do [[ "$reported" == *" $t "* ]] || report_test "$t"; done
+fi
+if [[ -n "${SLOW:-}" && -f "$WORK/times" ]]; then
+  echo "slowest:"; sort -rn "$WORK/times" | head -8 | sed 's/^/  /'
+fi
 echo "$passed passed, $failed failed"
 [ "$failed" -eq 0 ]

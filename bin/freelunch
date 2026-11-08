@@ -110,10 +110,10 @@ CI:
                           Then the secrets they pass on: --set-secrets runs gh secret set for each,
                           --print-secrets only prints what to run; without either it asks (and
                           prints when nobody can answer)
-  ci oidc aws [--run|--print] [--policy-arn <arn>]
-                          Sign in to AWS from Actions without a stored key: an IAM role only this
-                          repository's main branch and pull requests can take. Asks whether to run
-                          the aws commands or print them; --run and --print skip the question
+  ci oidc aws|gcp|azure [--run|--print] [--policy-arn <arn> | --role <role>]
+                          Sign in to AWS, Google Cloud or Azure from Actions without a stored key:
+                          an identity only this repository's main branch and pull requests can use. Asks whether to run the cloud's commands or print
+                          them; --run and --print skip the question
   ci secrets [--print]    Put what CI needs that git doesn't have (tfvars, .env, app env files,
                           known_hosts, the OCI API key, the SSH key deploy uses) in the secret
                           FREELUNCH_BUNDLE with gh, or print it for another CI system
@@ -7652,6 +7652,25 @@ ci_oidc_steps() {
           aws-region: ${{ vars.AWS_REGION }}
 EOF
   fi
+  if ci_oidc_on gcp; then
+    # shellcheck disable=SC2016 # GitHub expressions, not ours
+    cat <<'EOF'
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+EOF
+  fi
+  if ci_oidc_on azure; then
+    # shellcheck disable=SC2016 # GitHub expressions, not ours
+    cat <<'EOF'
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+EOF
+  fi
 }
 
 # ci_oidc_remember <cloud>: the project signs in keylessly to it from now on
@@ -7659,11 +7678,36 @@ ci_oidc_remember() {
   ci_oidc_on "$1" || echo "$1" >> "$PROJECT/oidc"
 }
 
+# sh_quote <string>: it as one word for a shell, in single quotes
+sh_quote() { local q="'\\''"; printf "'%s'" "${1//\'/$q}"; }
+
 # ci_oidc_run <how: run|print> <command...>: run a command of the cloud's CLI, or print it
 ci_oidc_run() {
   local how="$1"; shift
-  if [[ "$how" == print ]]; then printf '  %s\n' "$*" >&2; return 0; fi
+  if [[ "$how" == print ]]; then
+    local arg line=""
+    for arg in "$@"; do
+      if [[ "$arg" =~ ^[A-Za-z0-9_./:=@%+,-]+$ ]]; then line="$line $arg"; else line="$line $(sh_quote "$arg")"; fi
+    done
+    printf ' %s\n' "$line" >&2
+    return 0
+  fi
   "$@"
+}
+
+# ci_oidc_choose <how> <question>: run or print. ask lets whoever is there choose, and prints
+# when nobody can answer: nothing is created in a cloud account unasked.
+ci_oidc_choose() {
+  local how="$1" a
+  if [[ "$how" == ask ]]; then
+    if interactive; then
+      a="$(ask "$2 (run/print)" print)"
+      case "$a" in run|r|y|yes) how=run ;; *) how=print ;; esac
+    else
+      how=print
+    fi
+  fi
+  echo "$how"
 }
 
 ci_oidc() {
@@ -7671,8 +7715,9 @@ ci_oidc() {
   [[ $# -eq 0 ]] || shift
   case "$cloud" in
     aws) ci_oidc_aws "$@" ;;
-    gcp|azure) die "ci oidc: $cloud isn't built yet (aws is); until then give CI its own credentials (docs/ci.md#other-clouds)" ;;
-    *) die "ci oidc: aws (gcp and azure to come): freelunch ci oidc aws [--run|--print] [--policy-arn <arn>] [--region <region>] [--role-name <name>]" ;;
+    gcp) ci_oidc_gcp "$@" ;;
+    azure) ci_oidc_azure "$@" ;;
+    *) die "ci oidc: aws, gcp or azure: freelunch ci oidc aws|gcp|azure [--run|--print] ..." ;;
   esac
 }
 
@@ -7711,14 +7756,7 @@ ci_oidc_aws() {
     [[ "$how" == print ]] || { [[ "$how" != run ]] || die "ci oidc: the aws CLI can't reach an account (aws configure, or aws sso login); or --print"; }
     how=print
   fi
-  if [[ "$how" == ask ]]; then
-    if interactive; then
-      a="$(ask "Create the IAM role $role in AWS account $account now with the aws CLI, or print the commands for you to run? (run/print)" print)"
-      case "$a" in run|r|y|yes) how=run ;; *) how=print ;; esac
-    else
-      how=print
-    fi
-  fi
+  how="$(ci_oidc_choose "$how" "Create the IAM role $role in AWS account $account now with the aws CLI, or print the commands for you to run?")"
   provider="arn:aws:iam::$account:oidc-provider/token.actions.githubusercontent.com"
   arn="arn:aws:iam::$account:role/$role"
   trust="$TMP/aws-trust.json"
@@ -7767,6 +7805,171 @@ ci_oidc_aws() {
     echo "  gh variable set AWS_REGION --repo $repo --body $region" >&2
     echo "  echo aws >> $(rel "$PROJECT")/oidc   # then freelunch ci init, to rewrite the workflows" >&2
   fi
+}
+
+# ci_oidc_gcp: a Workload Identity pool and a provider for GitHub that only accept this
+# repository's main branch and its own pull requests, a service account the workflows act as, and
+# the permission for that identity to be used as it, then the repository variables the sign-in
+# step reads. The service account gets the roles of --role (repeatable) and none without: how
+# much of your project CI may change is yours to say.
+ci_oidc_gcp() {
+  local how=ask repo project="" sa_name="" pool="freelunch" roles=() num sa cond provider tfvars existing r member
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run)     how=run ;;
+      --print)   how=print ;;
+      --project) [[ $# -gt 1 ]] || die "ci oidc: --project takes a project ID"; project="$2"; shift ;;
+      --role)    [[ $# -gt 1 ]] || die "ci oidc: --role takes a role such as roles/editor"; roles+=("$2"); shift ;;
+      --service-account) [[ $# -gt 1 ]] || die "ci oidc: --service-account takes a name"; sa_name="$2"; shift ;;
+      *)         die "ci oidc gcp: unknown option $1" ;;
+    esac
+    shift
+  done
+  [[ -n "$PROJECT" ]] || die "ci oidc: run it in a project, where its .freelunch/ folder is (freelunch init makes one)"
+  command -v gh >/dev/null || die "ci oidc: the identity's names go to the repository as variables with gh (https://cli.github.com), signed in"
+  repo="$(cd "$(dirname "$PROJECT")" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" \
+    || die "ci oidc: gh can't tell which GitHub repository this is (gh auth login, and an origin on github.com)"
+  for r in gcp cloud-run; do
+    tfvars="$(config_dir "$r")/terraform.tfvars"
+    [[ -n "$project" || ! -f "$tfvars" ]] || project="$(tfvar "$tfvars" project_id)"
+  done
+  [[ -n "$project" && "$project" != *xxxx* ]] || die "ci oidc gcp: which Google Cloud project? Pass --project, or set project_id in the gcp or cloud-run stack's terraform.tfvars"
+  sa_name="${sa_name:-freelunch-ci}"
+  sa="$sa_name@$project.iam.gserviceaccount.com"
+  num="<PROJECT_NUMBER>"
+  if command -v gcloud >/dev/null && num="$(gcloud projects describe "$project" --format='value(projectNumber)' 2>/dev/null)" && [[ -n "$num" ]]; then :
+  else
+    num="<PROJECT_NUMBER>"
+    [[ "$how" != run ]] || die "ci oidc gcp: gcloud can't reach the project $project (gcloud auth login, and check the project ID); or --print"
+    how=print
+  fi
+  how="$(ci_oidc_choose "$how" "Create the Workload Identity pool and the service account $sa in $project now with gcloud, or print the commands for you to run?")"
+  cond="assertion.repository == '$repo' && (assertion.ref == 'refs/heads/main' || assertion.event_name == 'pull_request')"
+  provider="projects/$num/locations/global/workloadIdentityPools/$pool/providers/github"
+  member="principalSet://iam.googleapis.com/projects/$num/locations/global/workloadIdentityPools/$pool/attribute.repository/$repo"
+  if [[ "$how" == run ]]; then
+    if gcloud iam workload-identity-pools describe "$pool" --project "$project" --location global >/dev/null 2>&1; then
+      log "gcp: the pool $pool is there already"
+    else
+      gcloud iam workload-identity-pools create "$pool" --project "$project" --location global --display-name "freelunch" >/dev/null
+    fi
+    if gcloud iam workload-identity-pools providers describe github --workload-identity-pool "$pool" --project "$project" --location global >/dev/null 2>&1; then
+      existing=update-oidc
+    else
+      existing=create-oidc
+    fi
+    if gcloud iam service-accounts describe "$sa" --project "$project" >/dev/null 2>&1; then
+      log "gcp: the service account $sa is there already"
+    else
+      gcloud iam service-accounts create "$sa_name" --project "$project" --display-name "freelunch CI" >/dev/null
+    fi
+  else
+    existing=create-oidc
+    log "run these for the project $project (if the pool, provider or service account exist already, skip that command, or use update-oidc for the provider):"
+    ci_oidc_run print gcloud iam workload-identity-pools create "$pool" --project "$project" --location global --display-name freelunch
+    ci_oidc_run print gcloud iam service-accounts create "$sa_name" --project "$project" --display-name "freelunch CI"
+  fi
+  ci_oidc_run "$how" gcloud iam workload-identity-pools providers "$existing" github --workload-identity-pool "$pool" --project "$project" --location global \
+    --issuer-uri https://token.actions.githubusercontent.com \
+    --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref" \
+    --attribute-condition "$cond"
+  ci_oidc_run "$how" gcloud iam service-accounts add-iam-policy-binding "$sa" --project "$project" --role roles/iam.workloadIdentityUser --member "$member"
+  for r in ${roles[@]+"${roles[@]}"}; do
+    ci_oidc_run "$how" gcloud projects add-iam-policy-binding "$project" --member "serviceAccount:$sa" --role "$r"
+  done
+  [[ ${#roles[@]} -gt 0 ]] || log "gcp: the service account has no roles yet: grant what freelunch's gcp or cloud-run stack needs (gcloud projects add-iam-policy-binding $project --member serviceAccount:$sa --role <role>), or run this again with --role"
+  if [[ "$how" == run ]]; then
+    (cd "$(dirname "$PROJECT")" && gh variable set GCP_WORKLOAD_IDENTITY_PROVIDER --repo "$repo" --body "$provider" && gh variable set GCP_SERVICE_ACCOUNT --repo "$repo" --body "$sa") >/dev/null \
+      || die "ci oidc: gh couldn't set the variables GCP_WORKLOAD_IDENTITY_PROVIDER and GCP_SERVICE_ACCOUNT in $repo (see above)"
+    ci_oidc_remember gcp
+    log "gcp: $repo signs in as $sa from now on: the workflows get id-token: write and a sign-in step. Run freelunch ci init again to rewrite them"
+  else
+    echo "  gh variable set GCP_WORKLOAD_IDENTITY_PROVIDER --repo $repo --body $provider" >&2
+    echo "  gh variable set GCP_SERVICE_ACCOUNT --repo $repo --body $sa" >&2
+    echo "  echo gcp >> $(rel "$PROJECT")/oidc   # then freelunch ci init, to rewrite the workflows" >&2
+  fi
+}
+
+# ci_oidc_azure: an app registration in Microsoft Entra with federated credentials that only
+# accept this repository's main branch and its own pull requests, a service principal for it, and
+# the repository variables azure/login reads. The principal gets the roles of --role (repeatable),
+# scoped to the subscription, and none without: how much of the subscription CI may change is yours
+# to say.
+ci_oidc_azure() {
+  local how=ask repo subscription="" tenant="" app_name="" roles=() tfvars app_id obj_id names r subj n suffix creds
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run)          how=run ;;
+      --print)        how=print ;;
+      --subscription) [[ $# -gt 1 ]] || die "ci oidc: --subscription takes a subscription ID"; subscription="$2"; shift ;;
+      --role)         [[ $# -gt 1 ]] || die "ci oidc: --role takes a role such as Contributor"; roles+=("$2"); shift ;;
+      --app-name)     [[ $# -gt 1 ]] || die "ci oidc: --app-name takes a name"; app_name="$2"; shift ;;
+      *)              die "ci oidc azure: unknown option $1" ;;
+    esac
+    shift
+  done
+  [[ -n "$PROJECT" ]] || die "ci oidc: run it in a project, where its .freelunch/ folder is (freelunch init makes one)"
+  command -v jq >/dev/null || die "jq is required for ci oidc"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  command -v gh >/dev/null || die "ci oidc: the identity's IDs go to the repository as variables with gh (https://cli.github.com), signed in"
+  repo="$(cd "$(dirname "$PROJECT")" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" \
+    || die "ci oidc: gh can't tell which GitHub repository this is (gh auth login, and an origin on github.com)"
+  tfvars="$(config_dir azure)/terraform.tfvars"
+  [[ -n "$subscription" || ! -f "$tfvars" ]] || subscription="$(tfvar "$tfvars" subscription_id)"
+  if command -v az >/dev/null && tenant="$(az account show --query tenantId -o tsv 2>/dev/null)" && [[ -n "$tenant" ]]; then
+    [[ -n "$subscription" && "$subscription" != *xxxx* ]] || subscription="$(az account show --query id -o tsv 2>/dev/null)"
+  else
+    tenant="<TENANT_ID>"
+    [[ "$how" != run ]] || die "ci oidc azure: the az CLI isn't signed in (az login); or --print"
+    how=print
+  fi
+  subscription="${subscription:-<SUBSCRIPTION_ID>}"
+  app_name="${app_name:-freelunch-${repo//\//-}}"
+  how="$(ci_oidc_choose "$how" "Create the app registration $app_name in Microsoft Entra tenant $tenant now with az, or print the commands for you to run?")"
+  creds=("main:repo:$repo:ref:refs/heads/main" "pull-request:repo:$repo:pull_request")
+  if [[ "$how" == print ]]; then
+    log "run these in a shell where az is signed in (az login):"
+    {
+      echo "  APP_ID=\$(az ad app create --display-name $(sh_quote "$app_name") --query appId -o tsv)"
+      echo "  az ad sp create --id \"\$APP_ID\""
+      for r in "${creds[@]}"; do
+        n="${r%%:*}"; subj="${r#*:}"
+        echo "  az ad app federated-credential create --id \"\$APP_ID\" --parameters $(sh_quote "$(jq -cn --arg n "$n" --arg s "$subj" '{name: $n, issuer: "https://token.actions.githubusercontent.com", subject: $s, audiences: ["api://AzureADTokenExchange"]}')")"
+      done
+      for r in ${roles[@]+"${roles[@]}"}; do
+        echo "  az role assignment create --assignee \"\$APP_ID\" --role $(sh_quote "$r") --scope /subscriptions/$subscription"
+      done
+      echo "  gh variable set AZURE_CLIENT_ID --repo $repo --body \"\$APP_ID\""
+      echo "  gh variable set AZURE_TENANT_ID --repo $repo --body $tenant"
+      echo "  gh variable set AZURE_SUBSCRIPTION_ID --repo $repo --body $subscription"
+      echo "  echo azure >> $(rel "$PROJECT")/oidc   # then freelunch ci init, to rewrite the workflows"
+    } >&2
+    [[ ${#roles[@]} -gt 0 ]] || log "azure: the principal would have no roles: add --role (say Contributor) or assign what freelunch's azure stack needs yourself"
+    return 0
+  fi
+  app_id="$(az ad app list --display-name "$app_name" --query '[0].appId' -o tsv 2>/dev/null || true)"
+  if [[ -n "$app_id" ]]; then
+    log "azure: the app registration $app_name is there already"
+  else
+    app_id="$(az ad app create --display-name "$app_name" --query appId -o tsv)"
+  fi
+  obj_id="$(az ad app show --id "$app_id" --query id -o tsv)"
+  az ad sp show --id "$app_id" >/dev/null 2>&1 || az ad sp create --id "$app_id" >/dev/null
+  names="$(az ad app federated-credential list --id "$obj_id" --query '[].name' -o tsv 2>/dev/null || true)"
+  for r in "${creds[@]}"; do
+    n="${r%%:*}"; subj="${r#*:}"
+    if grep -qx "$n" <<< "$names"; then continue; fi
+    jq -n --arg n "$n" --arg s "$subj" '{name: $n, issuer: "https://token.actions.githubusercontent.com", subject: $s, audiences: ["api://AzureADTokenExchange"]}' > "$TMP/azure-cred-$n.json"
+    az ad app federated-credential create --id "$obj_id" --parameters "@$TMP/azure-cred-$n.json" >/dev/null
+  done
+  for r in ${roles[@]+"${roles[@]}"}; do
+    az role assignment create --assignee "$app_id" --role "$r" --scope "/subscriptions/$subscription" >/dev/null
+  done
+  [[ ${#roles[@]} -gt 0 ]] || log "azure: the principal has no roles yet: assign what freelunch's azure stack needs (az role assignment create --assignee $app_id --role <role> --scope /subscriptions/$subscription), or run this again with --role"
+  (cd "$(dirname "$PROJECT")" && gh variable set AZURE_CLIENT_ID --repo "$repo" --body "$app_id" && gh variable set AZURE_TENANT_ID --repo "$repo" --body "$tenant" && gh variable set AZURE_SUBSCRIPTION_ID --repo "$repo" --body "$subscription") >/dev/null \
+    || die "ci oidc: gh couldn't set the variables AZURE_CLIENT_ID, AZURE_TENANT_ID and AZURE_SUBSCRIPTION_ID in $repo (see above)"
+  ci_oidc_remember azure
+  log "azure: $repo signs in as $app_name ($app_id) from now on: the workflows get id-token: write and a sign-in step. Run freelunch ci init again to rewrite them"
 }
 
 # ci_secret_value <name> <file>: what the secret holds, into the file. The secrets that carry a
