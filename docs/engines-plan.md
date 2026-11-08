@@ -71,11 +71,11 @@ Tick a box when the step is built, tested and committed. Design: [engines.md](en
 - [x] Deno Deploy: `api.yaml`, app create/delete (custom domains left out: the spec's domain endpoints were not read; the revision's `*.deno.net` address is reported)
 - [x] Deno Deploy: source upload `custom` function (`providers/deno-deploy/api.sh`)
 - [x] Deno Deploy: fixtures, tests, README, `status: ready` (`verified: fake-api`)
-- [ ] Zeabur: pin GraphQL calls from the schema
+- [ ] Zeabur: pin GraphQL calls from the schema (blocked: the SDL is behind a login and the endpoint can't be introspected without a key; providers/zeabur/README.md has what is known and the one query that unblocks it)
 - [ ] Zeabur: `api.yaml`, fixtures, tests, README, `status: ready`
-- [ ] Back4App: `guided`
-- [ ] Leapcell: `guided`
-- [ ] SnapDeploy: recorded as refused (no delete)
+- [x] Back4App: `guided` (declared; the guided engine itself is section 7)
+- [x] Leapcell: `guided` (declared; the guided engine itself is section 7)
+- [x] SnapDeploy: recorded as refused (no delete): the api engine rejects a provider with no delete
 
 ## 7. `cli` and `guided` engines
 

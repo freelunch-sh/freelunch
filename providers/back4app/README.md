@@ -20,7 +20,7 @@
 
 ## Notes
 
-No documented API for creating Containers apps was found (2026-11-08); the b4a CLI covers Parse apps interactively. Blocked until Back4App publishes one.
+No documented API for creating Containers apps was found (2026-11-08); the b4a CLI covers Parse apps interactively. Blocked until Back4App publishes one. Declared guided: freelunch prints the manual steps and checks what it can, until an API exists.
 
 ## Plan
 

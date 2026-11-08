@@ -20,7 +20,7 @@
 
 ## Notes
 
-Has an API (snapdeploy.dev/api, X-API-Key or sd_pat_ tokens, POST /api/containers/deploy from Docker Hub/ghcr/quay/ECR images), but its own docs say tokens cannot delete containers, so freelunch could not destroy what it creates. Two docs disagree on the deploy endpoint.
+Has an API (snapdeploy.dev/api, X-API-Key or sd_pat_ tokens, POST /api/containers/deploy from Docker Hub/ghcr/quay/ECR images), but its own docs say tokens cannot delete containers, so freelunch could not destroy what it creates. Two docs disagree on the deploy endpoint. Refused for the api engine (docs/api-adapter.md): without a delete, freelunch destroy could not clean up what it makes, so it is guided only.
 
 ## Plan
 
