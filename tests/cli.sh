@@ -3367,7 +3367,7 @@ test_ci_needs_names_the_missing_secrets() {
   out="$(cd "$p" && HOME="$p/home" FREELUNCH_BUNDLE=anything "$CLI" ci needs 2>&1)"
   equals "$out" ""
   # The action runs it for every command but the ones that need no secret.
-  grep -q 'check|verify|help|version|agent) ;;' "$ROOT/action.yml"
+  grep -q 'check|verify|help|version|agent|list) ;;' "$ROOT/action.yml"
   grep -q '"\$freelunch" ci needs' "$ROOT/action.yml"
 }
 
@@ -4095,7 +4095,11 @@ test_setup_says_what_is_wrong() {
   # The state goes in a branch of the project's repository, which has to be one.
   sed -i.bak 's/^NORTHFLANK_API_TOKEN=.*/NORTHFLANK_API_TOKEN=x/' "$p/.freelunch/.env" && rm "$p/.freelunch/.env.bak"
   if out="$(TEST_NO_HOME=1 setup_in "$p" --ci --no-doctor 2>&1)"; then echo "setup should have failed"; return 1; fi
-  contains "$out" "state init git: $p isn't a git repository"
+  if CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu; then
+    contains "$out" "state init git: $p isn't a git repository"
+  else
+    contains "$out" "state init git: the state goes into your repository"
+  fi
 }
 
 # What setup writes is what up reads.
@@ -4175,7 +4179,12 @@ test_git_state_store_needs_a_repository_and_opentofu() {
   local p="$WORK/gitstore-bad" out
   new_project "$p"
   if out="$(in_dir "$p" "$CLI" state init git 2>&1)"; then echo "state init should have failed"; return 1; fi
-  contains "$out" "isn't a git repository (git init, commit, and add a remote)"
+  # Terraform can't encrypt the state, so it stops before it looks at the repository.
+  if CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu; then
+    contains "$out" "isn't a git repository (git init, commit, and add a remote)"
+  else
+    contains "$out" "takes OpenTofu"
+  fi
   absent "$p/.freelunch/state.git.tfbackend"
 }
 

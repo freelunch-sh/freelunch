@@ -65,7 +65,7 @@ runs:
         # Secrets that are missing are said here, by name, before anything runs. A pull request's
         # check needs none.
         case "${args[0]:-}" in
-          check|verify|help|version|agent) ;;
+          check|verify|help|version|agent|list) ;;
           *) "$freelunch" ci needs ;;
         esac
         "$freelunch" "${args[@]}"

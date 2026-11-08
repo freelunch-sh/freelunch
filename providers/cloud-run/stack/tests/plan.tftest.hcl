@@ -10,17 +10,17 @@ run "scale_to_zero_and_no_tunnel_by_default" {
 
   assert {
     condition = output.platforms[0] == {
-      provider      = "cloud-run"
-      name          = "main"
-      id            = "my-gcp-project"
-      region        = "us-central1"
-      arch          = "amd64"
-      size          = "1 vCPU, 512Mi"
-      tunnel        = false
-      max_services  = null
-      volume_size   = null
-      pricing       = { budget = null, service = null, tunnel = null, volume_gb = null }
-      settings      = { label = "freelunch", cpu = "1", memory = "512Mi", max_instances = 1 }
+      provider     = "cloud-run"
+      name         = "main"
+      id           = "my-gcp-project"
+      region       = "us-central1"
+      arch         = "amd64"
+      size         = "1 vCPU, 512Mi"
+      tunnel       = false
+      max_services = null
+      volume_size  = null
+      pricing      = { budget = null, service = null, tunnel = null, volume_gb = null }
+      settings     = { label = "freelunch", cpu = "1", memory = "512Mi", max_instances = 1 }
     }
     error_message = "The default target is one instance of 1 vCPU and 512 MiB per service, with no tunnel and no volumes."
   }

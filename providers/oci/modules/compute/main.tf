@@ -45,8 +45,8 @@ locals {
   instance_size = {
     for k, v in var.instances : k => (
       local.instance_step[k] == 0 ? { ocpus = v.ocpus, memory_in_gbs = v.memory_in_gbs } : {
-        ocpus         = min(v.ocpus, var.capacity_fallbacks[local.instance_step[k] - 1].ocpus)
-        memory_in_gbs = min(v.memory_in_gbs, var.capacity_fallbacks[local.instance_step[k] - 1].memory_in_gbs)
+        ocpus                               = min(v.ocpus, var.capacity_fallbacks[local.instance_step[k] - 1].ocpus)
+        memory_in_gbs                       = min(v.memory_in_gbs, var.capacity_fallbacks[local.instance_step[k] - 1].memory_in_gbs)
       }
     )
   }

@@ -124,8 +124,8 @@ run "fallbacks_step_down_after_every_ad_was_tried" {
   command = plan
 
   variables {
-    instances          = { main = { ocpus = 2, memory_in_gbs = 12 } }
-    capacity_fallbacks = [{ ocpus = 1, memory_in_gbs = 6 }, { ocpus = 1, memory_in_gbs = 4 }]
+    instances                  = { main = { ocpus = 2, memory_in_gbs = 12 } }
+    capacity_fallbacks         = [{ ocpus = 1, memory_in_gbs = 6 }, { ocpus = 1, memory_in_gbs = 4 }]
     availability_domain_offset = 1
   }
 
