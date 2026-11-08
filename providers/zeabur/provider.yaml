@@ -8,10 +8,11 @@ terraform_provider: null
 iac: none
 free_tier_type: always-free
 free_tier: "$0 plan with auto-sleep"
+behavior: sleeps
 card_required: "no"
 url: "https://zeabur.com/pricing"
-last_verified: "2026-10-18"
-notes: null
+last_verified: "2026-11-08"
+notes: "The old shared free cluster is not generally available; the free plan is for deploying to your own server."
 sources:
   - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
   - "registry.terraform.io (checked 2026-10-18)"

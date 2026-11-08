@@ -9,7 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | [`render-oss/render`](https://registry.terraform.io/providers/render-oss/render/latest) (partner) |
-| **Last verified** | 2026-10-18 |
+| **Last verified** | 2026-11-08 |
 
 ## What's free
 

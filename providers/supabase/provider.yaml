@@ -8,11 +8,13 @@ terraform_provider: "supabase/supabase"
 iac: community
 free_tier_type: always-free
 free_tier: "2 active projects, 500 MB database, 1 GB file storage; free projects pause after a week of inactivity"
+behavior: pauses
 card_required: "no"
 url: "https://supabase.com/pricing"
-last_verified: "2026-10-18"
-notes: "Limits not re-verified during research. Check the pricing page."
+last_verified: "2026-11-08"
+notes: "Free projects pause after 7 days of inactivity and need a manual restore; no automatic backups. Egress is reported as 5 GB or 2+2 GB depending on the source; check the pricing page."
 sources:
+  - "costbench.com/software/database-as-service/supabase/free-plan (checked 2026-11-08)"
   - "registry.terraform.io (checked 2026-10-18)"
 inspire:
   - "repos/terraform-providers/supabase-terraform-provider-supabase"

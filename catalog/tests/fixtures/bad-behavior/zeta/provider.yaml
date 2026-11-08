@@ -1,0 +1,14 @@
+# Invalid on purpose: behavior is not one of the allowed values.
+name: zeta
+display_name: "Zeta"
+category: containers
+status: planned
+layer: platform
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "Nothing"
+behavior: naps
+card_required: "no"
+url: "https://zeta.example"
+last_verified: "2026-11-08"

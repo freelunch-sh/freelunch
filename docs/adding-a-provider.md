@@ -23,6 +23,7 @@ Schema (enforced by `catalog/`):
 | `free_tier_type` | `always-free`, `monthly-credit`, `trial`, `startup-credits`, `none` |
 | `card_required` | `"yes"`, `"no"`, `"unknown"` |
 | `free_tier`, `display_name`, `url`, `last_verified` | strings |
+| `behavior` | optional, for always-free tiers: `always-on`, `scale-to-zero`, `sleeps`, `pauses` or `capped`. The checklist shows it, so "free forever" and "free but asleep" are told apart |
 | `notes`, `sources`, `inspire` | optional |
 | `recommended` | optional `true` for the provider to start with when a category has several; at most one per category, never an excluded one. The checklist marks it, and `freelunch domain suggest` lists it first |
 | `suffixes` | free domain providers (category `domains`) only: a one-line list such as `["dpdns.org", "us.kg"]`, which `freelunch domain suggest` checks. List only suffixes on the [Public Suffix List](https://publicsuffix.org/): Cloudflare's free plan treats names under any other suffix as subdomains and won't add them |

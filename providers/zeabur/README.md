@@ -9,13 +9,17 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | None. Automate through the provider's API or CLI. |
-| **Last verified** | 2026-10-18 |
+| **Last verified** | 2026-11-08 |
 
 ## What's free
 
 $0 plan with auto-sleep
 
 > Free tiers change without notice. Check <https://zeabur.com/pricing> before relying on this.
+
+## Notes
+
+The old shared free cluster is not generally available; the free plan is for deploying to your own server.
 
 ## Plan
 

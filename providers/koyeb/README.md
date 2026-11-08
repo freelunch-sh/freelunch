@@ -3,32 +3,27 @@
 
 | | |
 |---|---|
-| **Status** | 🚧 Planned |
+| **Status** | ⛔ Excluded |
 | **Category** | Containers & PaaS |
 | **Layer** | `platform`: runs your apps' images without a VM; deploy goes through its API |
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | yes |
 | **Terraform provider** | [`koyeb/koyeb`](https://registry.terraform.io/providers/koyeb/koyeb/latest) (partner) |
-| **Last verified** | 2026-10-18 |
+| **Last verified** | 2026-11-08 |
 
 ## What's free
 
-1 free web service per organisation (512 MB, 0.1 vCPU, Frankfurt or Washington), scales to zero after 1 h idle; free Postgres with 5 compute-hours/month
+Legacy accounts only: 1 free web service (512 MB, 0.1 vCPU), scales to zero; new signups are sent to a paid plan; free Postgres with 5 compute-hours/month
 
 > Free tiers change without notice. Check <https://www.koyeb.com/pricing> before relying on this.
 
 ## Notes
 
-The card-free Hobby plan was removed in Feb 2026; sign-up places a $29 card authorisation hold. No workers or volumes on the free tier.
-
-## Plan
-
-- `stack/`: a root module whose `platforms` output follows the [platform contract](../../docs/architecture.md#platform-contract), so [`hybrid/`](../../hybrid/) picks it up
-- `freelunch deploy`: one service per app through the provider's API, from the app's Compose file (see [Northflank](../northflank/) for the pattern)
+New organisations reportedly start on the $29/month Pro plan with a card hold since February 2026, so this is not a general new-user free tier. Koyeb's own pricing page still mentions a Hobby plan; check it. Excluded until a new account can get the free instance.
 
 ## References
 
-- snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)
+- snapdeploy.dev/state-of-free-hosting (checked 2026-11-08)
 - registry.terraform.io (checked 2026-10-18)
 - Research corpus: `inspire/repos/terraform-providers/koyeb-terraform-provider-koyeb`
 

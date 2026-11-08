@@ -7,12 +7,14 @@ layer: service
 terraform_provider: "denoland/deno"
 iac: stale
 free_tier_type: always-free
-free_tier: "100k requests/day and 100 GiB transfer/month"
+free_tier: "1M requests/month, 20 GiB egress/month, 1 GiB KV (about 10 CPU-hours/month); personal use"
+behavior: capped
 card_required: "no"
 url: "https://deno.com/deploy/pricing"
-last_verified: "2026-10-18"
-notes: "Terraform provider has had no release since 2023."
+last_verified: "2026-11-08"
+notes: "Free-plan egress fell from 100 GB to 20 GiB in April 2026 and CPU time was cut again later; sources disagree on the CPU figure. Apps pause at the cap instead of being billed. Terraform provider has had no release since 2023."
 sources:
+  - "agentdeals.dev/vendor/deno-deploy (checked 2026-11-08)"
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
 inspire: []

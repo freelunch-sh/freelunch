@@ -9,7 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | [`supabase/supabase`](https://registry.terraform.io/providers/supabase/supabase/latest) (community) |
-| **Last verified** | 2026-10-18 |
+| **Last verified** | 2026-11-08 |
 
 ## What's free
 
@@ -19,7 +19,7 @@
 
 ## Notes
 
-Limits not re-verified during research. Check the pricing page.
+Free projects pause after 7 days of inactivity and need a manual restore; no automatic backups. Egress is reported as 5 GB or 2+2 GB depending on the source; check the pricing page.
 
 ## Plan
 
@@ -28,6 +28,7 @@ Limits not re-verified during research. Check the pricing page.
 
 ## References
 
+- costbench.com/software/database-as-service/supabase/free-plan (checked 2026-11-08)
 - registry.terraform.io (checked 2026-10-18)
 - Research corpus: `inspire/repos/terraform-providers/supabase-terraform-provider-supabase`
 

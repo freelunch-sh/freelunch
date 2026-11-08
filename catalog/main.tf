@@ -23,6 +23,15 @@ locals {
     card_required  = ["yes", "no", "unknown"]
   }
 
+  # Optional `behavior` says what an always-free tier does when it is idle or over its cap.
+  behaviors = {
+    "always-on"     = "🟢 always on"
+    "scale-to-zero" = "💤 scales to zero"
+    sleeps          = "💤 sleeps when idle"
+    pauses          = "⏸️ pauses when unused"
+    capped          = "🚧 hard cap, no billing"
+  }
+
   # `recommended: true` marks the provider to start with where a category offers several.
   recommended = [for k, p in local.providers : k if try(p.recommended, false) == true]
 
@@ -31,6 +40,7 @@ locals {
     name_mismatch   = [for k, p in local.providers : k if try(p.name, "") != k]
     bad_category    = [for k, p in local.providers : k if !contains(local.category_keys, try(p.category, ""))]
     bad_enum        = [for k, p in local.providers : k if !alltrue([for f, allowed in local.enums : contains(allowed, try(tostring(p[f]), ""))])]
+    bad_behavior    = [for k, p in local.providers : k if try(p.behavior, null) != null && !contains(keys(local.behaviors), tostring(p.behavior))]
     bad_terraform   = [for k, p in local.providers : k if(try(p.terraform_provider, null) == null) != (try(p.iac, "") == "none")]
     bad_recommended = [for k, p in local.providers : k if !(try(p.recommended, false) == true || try(p.recommended, false) == false) || (contains(local.recommended, k) && try(p.status, "") == "excluded")]
     two_recommended = [for c in local.category_keys : c if length([for k in local.recommended : k if try(local.providers[k].category, "") == c]) > 1]
@@ -66,6 +76,7 @@ locals {
     for k in local.sorted : k => merge(local.providers[k], {
       iac_icon  = try(local.icons.iac[local.providers[k].iac], "?")
       tier_icon = try(local.icons.tier[local.providers[k].free_tier_type], "?")
+      behavior_tag = try(" · ${local.behaviors[local.providers[k].behavior]}", "")
     })
   }
 

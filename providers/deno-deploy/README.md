@@ -9,17 +9,17 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | [`denoland/deno`](https://registry.terraform.io/providers/denoland/deno/latest) (stale) |
-| **Last verified** | 2026-10-18 |
+| **Last verified** | 2026-11-08 |
 
 ## What's free
 
-100k requests/day and 100 GiB transfer/month
+1M requests/month, 20 GiB egress/month, 1 GiB KV (about 10 CPU-hours/month); personal use
 
 > Free tiers change without notice. Check <https://deno.com/deploy/pricing> before relying on this.
 
 ## Notes
 
-Terraform provider has had no release since 2023.
+Free-plan egress fell from 100 GB to 20 GiB in April 2026 and CPU time was cut again later; sources disagree on the CPU figure. Apps pause at the cap instead of being billed. Terraform provider has had no release since 2023.
 
 ## Plan
 
@@ -28,6 +28,7 @@ Terraform provider has had no release since 2023.
 
 ## References
 
+- agentdeals.dev/vendor/deno-deploy (checked 2026-11-08)
 - inspire/listing/free-for-dev (2026-10-18)
 - registry.terraform.io (checked 2026-10-18)
 

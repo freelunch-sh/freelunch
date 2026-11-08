@@ -9,17 +9,17 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | [`kislerdm/neon`](https://registry.terraform.io/providers/kislerdm/neon/latest) (community) |
-| **Last verified** | 2026-10-18 |
+| **Last verified** | 2026-11-08 |
 
 ## What's free
 
-0.5 GB storage per project, up to 100 projects, 100 CU-hours/project/month, scales to zero after 5 min
+100 projects, each with 1 GB Postgres storage (20 GB total) and 100 CU-hours/month; scales to zero after 5 min; 10 branches per project
 
 > Free tiers change without notice. Check <https://neon.com/pricing> before relying on this.
 
 ## Notes
 
-An official neondatabase/neon provider exists in source but is not yet published to the Terraform Registry.
+Neon's FAQ (updated 2026-10-01) says 1 GB per project; some older pages say 0.5 GB. Suspended projects still count toward the storage cap. An official neondatabase/neon provider exists in source but is not yet published to the Terraform Registry.
 
 ## Plan
 
@@ -28,6 +28,7 @@ An official neondatabase/neon provider exists in source but is not yet published
 
 ## References
 
+- neon.com/faqs/free-plan-limits-and-quotas (checked 2026-11-08)
 - inspire/listing/free-for-dev (2026-10-18)
 - registry.terraform.io (checked 2026-10-18)
 - Research corpus: `inspire/repos/terraform-providers/neondatabase-terraform-provider-neon`

@@ -11,7 +11,7 @@
 ${s.description}
 
 %{ for p in s.providers ~}
-- [${p.status == "ready" ? "x" : " "}] **[${p.display_name}](providers/${p.name}/)** ${p.iac_icon}${p.terraform_provider != null ? " `${p.terraform_provider}`" : ""} · ${p.tier_icon} ${p.free_tier}${try(p.recommended, false) == true ? " · **recommended**" : ""}
+- [${p.status == "ready" ? "x" : " "}] **[${p.display_name}](providers/${p.name}/)** ${p.iac_icon}${p.terraform_provider != null ? " `${p.terraform_provider}`" : ""} · ${p.tier_icon} ${p.free_tier}${p.behavior_tag}${try(p.recommended, false) == true ? " · **recommended**" : ""}
 %{ endfor ~}
 %{ endfor ~}
 

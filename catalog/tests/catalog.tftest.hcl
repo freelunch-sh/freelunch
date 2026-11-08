@@ -57,3 +57,13 @@ run "one_recommended_provider_per_category" {
 
   expect_failures = [output.checklist, output.stub_readmes]
 }
+
+run "unknown_behavior_is_rejected" {
+  command = plan
+
+  variables {
+    providers_dir = "tests/fixtures/bad-behavior"
+  }
+
+  expect_failures = [output.checklist, output.stub_readmes]
+}
