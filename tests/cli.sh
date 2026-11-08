@@ -3577,7 +3577,7 @@ test_ci_resume_makes_an_attempt_per_run() {
   out="$(GITHUB_ACTIONS=true GITHUB_RUN_NUMBER=12 GITHUB_WORKFLOW_REF=me/shop/.github/workflows/freelunch-wait.yml@refs/heads/main \
     GITHUB_STEP_SUMMARY="$p/summary.md" FAKE_APPLY=capacity FAKE_PLAN="$main" TEST_TF="$WORK/bin/fake-tf" TEST_CLI="$p-checkout/bin/freelunch" \
     ci_in "$p" ci resume 2>&1)"
-  contains "$out" "oci: out of host capacity in EU-FRANKFURT-1-AD-3 on attempt 12; the next run goes on with attempt 13"
+  contains "$out" "oci: out of host capacity in every availability domain that offers the shape on attempt 12; the next run goes on with attempt 13"
   grep -q -- '/stack plan .*-var=availability_domain_offset=11$' "$p/fake.log"
   fails grep -q -e '^gh workflow disable' -e '^desktop: ' "$p/fake.log"
   grep -q 'oci: still waiting after attempt 12' "$p/summary.md"
