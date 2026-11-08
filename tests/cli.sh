@@ -645,6 +645,50 @@ case "$url" in
       "DELETE /containers/"*) rm -f "$sw/containers/$id.json"; respond 200 '{}' ;;
       *) respond 404 '{"message":"no such route"}' ;;
     esac ;;
+  https://api.render.com/v1/*)
+    path="${url#https://api.render.com/v1}"
+    rd="${FAKE_RD:?}"
+    mkdir -p "$rd/services" "$rd/envs" "$rd/creds"
+    echo "rd $method $path token=$auth" >> "$FAKE_LOG"
+    if [[ "$auth" != "${FAKE_RD_TOKEN:-rd-key}" ]]; then respond 401 '{"message":"unauthorized"}'; exit 0; fi
+    id="${path#/services/}"; id="${id%%/*}"; id="${id%%\?*}"
+    case "$method $path" in
+      "GET /owners"*) respond 200 '[{"owner":{"id":"usr-abc123def456","name":"me","email":"me@example.com","type":"user"},"cursor":"c1"}]' ;;
+      "GET /services?"*)
+        respond 200 "$(for f in "$rd/services"/*.json; do [[ -f "$f" ]] && cat "$f"; done | jq -sc '[.[] | {service: ., cursor: .id}]')" ;;
+      "POST /services")
+        if [[ -n "${FAKE_RD_QUOTA:-}" ]]; then respond 402 '{"message":"payment information is required"}'; exit 0; fi
+        id="srv-$(jq -r .name <<< "$data")"
+        jq -c --arg id "$id" '{id: $id, name, ownerId, type, suspended: "not_suspended", serviceDetails: (.serviceDetails + {url: ("https://" + .name + ".onrender.com")}), image}' <<< "$data" > "$rd/services/$id.json"
+        jq -c '[.envVars[] | {envVar: .}]' <<< "$data" > "$rd/envs/$id.json"
+        printf '%s\n' "$data" > "$rd/sent-${id#srv-}.json"
+        respond 201 "$(jq -c '{service: ., deployId: "dep-1"}' "$rd/services/$id.json")" ;;
+      "GET /services/"*/env-vars*) respond 200 "$(cat "$rd/envs/$id.json")" ;;
+      "PUT /services/"*/env-vars)
+        jq -c '[.[] | {envVar: .}]' <<< "$data" > "$rd/envs/$id.json"
+        printf '%s\n' "$data" > "$rd/sent-env-${id#srv-}.json"
+        respond 200 "$(cat "$rd/envs/$id.json")" ;;
+      "POST /services/"*/deploys) respond 201 '{"id":"dep-2","status":"created"}' ;;
+      "GET /services/"*/deploys/*) respond 200 "{\"id\":\"${path##*/}\",\"status\":\"${FAKE_RD_DEPLOY:-live}\"}" ;;
+      "GET /services/"*) if [[ -f "$rd/services/$id.json" ]]; then respond 200 "$(cat "$rd/services/$id.json")"; else respond 404 '{"message":"not found"}'; fi ;;
+      "PATCH /services/"*)
+        jq -c --argjson d "$data" '. * $d' "$rd/services/$id.json" > "$rd/services/$id.new" && mv "$rd/services/$id.new" "$rd/services/$id.json"
+        printf '%s\n' "$data" > "$rd/sent-patch-${id#srv-}.json"
+        respond 200 "$(cat "$rd/services/$id.json")" ;;
+      "DELETE /services/"*) rm -f "$rd/services/$id.json" "$rd/envs/$id.json"; respond 204 '' ;;
+      "GET /registrycredentials"*)
+        respond 200 "$(for f in "$rd/creds"/*.json; do [[ -f "$f" ]] && cat "$f"; done | jq -sc '.')" ;;
+      "POST /registrycredentials")
+        cid="rc-$(ls "$rd/creds" | wc -l | tr -d ' ')"
+        jq -c --arg id "$cid" '. + {id: $id} | del(.authToken)' <<< "$data" > "$rd/creds/$cid.json"
+        printf '%s\n' "$data" > "$rd/sent-cred-$cid.json"
+        respond 201 "$(cat "$rd/creds/$cid.json")" ;;
+      "PATCH /registrycredentials/"*)
+        printf '%s\n' "$data" > "$rd/sent-cred-${path##*/}.json"
+        respond 200 "$(cat "$rd/creds/${path##*/}.json")" ;;
+      "DELETE /registrycredentials/"*) rm -f "$rd/creds/${path##*/}.json"; respond 204 '' ;;
+      *) respond 404 '{"message":"no such route"}' ;;
+    esac ;;
   https://artifactregistry.googleapis.com/v1/*)
     path="${url#https://artifactregistry.googleapis.com/v1}"
     cr="${FAKE_CR:?}"
@@ -1007,8 +1051,8 @@ up_checkout() { # up_checkout <dir>
   cp "$ROOT"/deploy/*.tf "$dir/deploy/"
   cp "$ROOT"/hybrid/*.tf "$dir/hybrid/"
   cp -R "$ROOT/providers/cloudflare/apps/." "$dir/providers/cloudflare/apps/"
-  # koyeb is catalogued only: a provider with no stack
-  mkdir -p "$dir/providers/koyeb" && cp "$ROOT/providers/koyeb/provider.yaml" "$dir/providers/koyeb/"
+  # linode is catalogued only: a provider with no stack
+  mkdir -p "$dir/providers/linode" && cp "$ROOT/providers/linode/provider.yaml" "$dir/providers/linode/"
   for s in oci northflank cloudflare; do
     mkdir -p "$dir/providers/$s/stack"
     cp "$ROOT/providers/$s/provider.yaml" "$dir/providers/$s/"
@@ -2448,6 +2492,102 @@ YAML
   contains "$out" "scaleway: deleted the namespace sunbird"
   absent "$p/sw/containers/c-api.json"
   absent "$p/sw/namespaces/ns-sunbird.json"
+}
+
+rd_in() { # rd_in <dir> <command> [args...]: run the CLI against the fake Render API and registry
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/nf-bin:$WORK/bin:$PATH" FAKE_LOG="$dir/fake.log" FAKE_RD="$dir/rd" RENDER_API_KEY="${TEST_RD_KEY-rd-key}" "$CLI" "$@")
+}
+
+test_render_applies_deploys_and_destroys() {
+  local p="$WORK/rd-all" out body digest
+  mkdir -p "$p/rd"
+  cat > "$p/compose.yaml" <<'YAML'
+services:
+  api:
+    image: ghcr.io/me/api:1.0.0
+    command: serve --name api
+    ports: ["8080:8080"]
+    environment:
+      LOG_LEVEL: info
+YAML
+  (cd "$p" && "$CLI" init --name sunbird render) >/dev/null 2>&1
+  printf 'owner_id = "usr-abc123def456"\nname_prefix = "sunbird"\n' > "$p/.freelunch/render/terraform.tfvars"
+  printf 'API_SECRET=s3cret-value\n' > "$p/.freelunch/api.env"
+  printf 'apps = {\n  api = { host = "render-main", compose = "../compose.yaml", env_file = "api.env" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  out="$(FREELUNCH_AUTO_APPROVE=1 rd_in "$p" apply render 2>&1)"
+  contains "$out" "render: workspace usr-abc123def456 (services are named sunbird-<app>)"
+  out="$(rd_in "$p" deploy 2>&1)"
+  digest="$(sed -n 's/^.*api: ghcr.io\/me\/api:1.0.0 = //p' <<< "$out")"
+  [[ "$digest" == sha256:* ]] || { echo "no digest in: $out"; return 1; }
+  body="$(cat "$p/rd/sent-sunbird-api.json")"
+  equals "$(jq -c '{type, name, ownerId, image, plan: .serviceDetails.plan, runtime: .serviceDetails.runtime, region: .serviceDetails.region, cmd: .serviceDetails.envSpecificDetails.dockerCommand}' <<< "$body")" \
+    "{\"type\":\"web_service\",\"name\":\"sunbird-api\",\"ownerId\":\"usr-abc123def456\",\"image\":{\"ownerId\":\"usr-abc123def456\",\"imagePath\":\"ghcr.io/me/api@$digest\"},\"plan\":\"free\",\"runtime\":\"image\",\"region\":\"oregon\",\"cmd\":\"serve --name api\"}"
+  equals "$(jq -c '[.envVars[] | {(.key): .value}] | add' <<< "$body")" '{"FREELUNCH_MANAGED":"sunbird","PORT":"8080","API_SECRET":"s3cret-value","LOG_LEVEL":"info"}'
+  contains "$out" "render-main: api is running"
+  contains "$out" "render-main: api: https://sunbird-api.onrender.com"
+  lacks "$(cat "$p/fake.log")" "s3cret-value"
+  # A second deploy updates the same service, its variables, and starts a deploy.
+  out="$(rd_in "$p" deploy 2>&1)"
+  grep -q '^rd PATCH /services/srv-sunbird-api ' "$p/fake.log"
+  grep -q '^rd PUT /services/srv-sunbird-api/env-vars ' "$p/fake.log"
+  grep -q '^rd POST /services/srv-sunbird-api/deploys ' "$p/fake.log"
+  equals "$(grep -c '^rd POST /services ' "$p/fake.log")" 1
+  out="$(rd_in "$p" status 2>&1)"
+  contains "$out" "api                  serving at https://sunbird-api.onrender.com"
+  if out="$(TEST_RD_KEY='' rd_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "RENDER_API_KEY is not set"
+  out="$(FREELUNCH_AUTO_APPROVE=1 rd_in "$p" destroy render 2>&1)"
+  contains "$out" "render: deleted the service sunbird-api"
+  absent "$p/rd/services/srv-sunbird-api.json"
+}
+
+test_render_leaves_services_it_did_not_make() {
+  local p="$WORK/rd-foreign" out
+  mkdir -p "$p/rd/services" "$p/rd/envs"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["8080:8080"]\n' > "$p/compose.yaml"
+  (cd "$p" && "$CLI" init --name sunbird render) >/dev/null 2>&1
+  printf 'owner_id = "usr-abc123def456"\nname_prefix = "sunbird"\n' > "$p/.freelunch/render/terraform.tfvars"
+  printf 'apps = {\n  api = { host = "render-main", compose = "../compose.yaml" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  echo '{"id":"srv-sunbird-api","name":"sunbird-api","ownerId":"usr-abc123def456","type":"web_service","suspended":"not_suspended","serviceDetails":{"url":"https://sunbird-api.onrender.com"}}' > "$p/rd/services/srv-sunbird-api.json"
+  echo '[{"envVar":{"key":"MINE","value":"yes"}}]' > "$p/rd/envs/srv-sunbird-api.json"
+  FREELUNCH_AUTO_APPROVE=1 rd_in "$p" apply render >/dev/null 2>&1
+  if out="$(rd_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "there is a service sunbird-api that freelunch didn't make"
+  out="$(FREELUNCH_AUTO_APPROVE=1 rd_in "$p" destroy render 2>&1)"
+  contains "$out" "the service sunbird-api wasn't made by freelunch, so it stays"
+  exists "$p/rd/services/srv-sunbird-api.json"
+}
+
+test_render_saves_a_login_for_a_private_image() {
+  local p="$WORK/rd-private" out
+  mkdir -p "$p/rd"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["8080:8080"]\n' > "$p/compose.yaml"
+  (cd "$p" && "$CLI" init --name sunbird render) >/dev/null 2>&1
+  printf 'owner_id = "usr-abc123def456"\nname_prefix = "sunbird"\n' > "$p/.freelunch/render/terraform.tfvars"
+  printf 'apps = {\n  api = { host = "render-main", compose = "../compose.yaml" }\n}\nregistries = {\n  "ghcr.io" = { username = "me", password_env = "GHCR_TOKEN" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  FREELUNCH_AUTO_APPROVE=1 rd_in "$p" apply render >/dev/null 2>&1
+  out="$(GHCR_TOKEN=ghp_test-token FAKE_PRIVATE=me/api rd_in "$p" deploy 2>&1)"
+  equals "$(jq -c '{name, registry, username, authToken}' "$p/rd/sent-cred-rc-0.json")" '{"name":"freelunch sunbird ghcr.io","registry":"GITHUB","username":"me","authToken":"ghp_test-token"}'
+  equals "$(jq -r .image.registryCredentialId "$p/rd/sent-sunbird-api.json")" rc-0
+  lacks "$(cat "$p/fake.log")" "ghp_test-token"
+  lacks "$out" "ghp_test-token"
+  out="$(FREELUNCH_AUTO_APPROVE=1 rd_in "$p" destroy render 2>&1)"
+  contains "$out" "render: deleted the registry login freelunch sunbird ghcr.io"
+}
+
+test_render_stops_when_the_deploy_fails() {
+  local p="$WORK/rd-fail" out
+  mkdir -p "$p/rd"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["8080:8080"]\n' > "$p/compose.yaml"
+  (cd "$p" && "$CLI" init --name sunbird render) >/dev/null 2>&1
+  printf 'owner_id = "usr-abc123def456"\nname_prefix = "sunbird"\n' > "$p/.freelunch/render/terraform.tfvars"
+  printf 'apps = {\n  api = { host = "render-main", compose = "../compose.yaml" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  FREELUNCH_AUTO_APPROVE=1 rd_in "$p" apply render >/dev/null 2>&1
+  if out="$(FAKE_RD_DEPLOY=update_failed rd_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "render: the deploy of api is update_failed"
+  printf 'owner_id = "usr-other"\nname_prefix = "sunbird"\n' > "$p/.freelunch/render/terraform.tfvars"
+  if out="$(FREELUNCH_AUTO_APPROVE=1 rd_in "$p" apply render 2>&1)"; then echo "apply should have failed"; return 1; fi
 }
 
 test_cloud_run_copies_a_private_image() {
@@ -3896,9 +4036,9 @@ test_up_checks_the_targets_it_is_given() {
   up_project "$p" cloudflare
   if out="$(up_in "$p" --dry-run 2>&1)"; then echo "up should have failed"; return 1; fi
   contains "$out" "targets in apps.tfvars: cloudflare is a glue stack, not a host or a container platform"
-  up_project "$p" oci koyeb
+  up_project "$p" oci linode
   if out="$(up_in "$p" --dry-run 2>&1)"; then echo "up should have failed"; return 1; fi
-  contains "$out" "targets in apps.tfvars: koyeb has no stack yet (status: planned)"
+  contains "$out" "targets in apps.tfvars: linode has no stack yet (status: planned)"
   up_project "$p" oci northflank
   rm "$p/.freelunch/northflank/terraform.tfvars"
   if out="$(up_in "$p" --dry-run 2>&1)"; then echo "up should have failed"; return 1; fi
@@ -4019,7 +4159,7 @@ setup_in() {
     printf '[DEFAULT]\nuser=ocid1.user.oc1..me\nfingerprint=aa:bb\nkey_file=~/.oci/key.pem\ntenancy=ocid1.tenancy.oc1..mytenancy\nregion=uk-london-1\n' > "$dir/home/.oci/config"
     [[ -f "$dir/home/.ssh/id_ed25519.pub" ]] || ssh-keygen -q -t ed25519 -N '' -C me@laptop -f "$dir/home/.ssh/id_ed25519"
   fi
-  (cd "$dir" && env -u CLOUDFLARE_API_TOKEN -u NORTHFLANK_API_TOKEN -u SCW_SECRET_KEY HOME="$dir/home" PATH="$WORK/bin:$PATH" "$CLI" setup "$@")
+  (cd "$dir" && env -u CLOUDFLARE_API_TOKEN -u NORTHFLANK_API_TOKEN -u SCW_SECRET_KEY -u RENDER_API_KEY HOME="$dir/home" PATH="$WORK/bin:$PATH" "$CLI" setup "$@")
 }
 
 # setup finds what the clouds' own config has and writes the project; what it can't find is
