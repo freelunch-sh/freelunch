@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export REDISCLOUD_ACCESS_KEY and REDISCLOUD_SECRET_KEY (or put them in
+# .freelunch/.env). Make them in the Redis Cloud console: Account settings > API keys
+# (enable the API under Access management first).
+
+# The free plan is one 30 MB database per account.
+databases = {
+  main = {}
+  # main = { cloud_provider = "GCP", region = "us-central1" }
+}

@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export YBM_API_KEY (or put it in .freelunch/.env). Make a key in YugabyteDB Aeon
+# under Security > API Keys. The database password is generated; read it from the outputs.
+
+# One Sandbox cluster per entry. Yugabyte allows one Sandbox per account (up to 2 vCPUs, 10 GB,
+# 15 connections); it is paused after 10 days idle and deleted after 15.
+databases = {
+  main = {
+    # cloud = "AWS", region = "us-west-2"
+    # allow_cidrs is required to connect at all; use your own address, not 0.0.0.0/0.
+    allow_cidrs = ["203.0.113.7/32"]
+  }
+}

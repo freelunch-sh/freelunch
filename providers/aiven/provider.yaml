@@ -2,18 +2,23 @@
 name: aiven
 display_name: "Aiven"
 category: databases
-status: planned
+status: ready
 layer: service
 terraform_provider: "aiven/aiven"
 iac: partner
 free_tier_type: always-free
-free_tier: "Free PostgreSQL, MySQL and Valkey: single node, 1 CPU, 1 GB RAM, 1 GB storage (PostgreSQL/MySQL)"
+free_tier: "Free PostgreSQL and Valkey: one service of each type per organisation, single node, 1 CPU, 1 GB RAM, 1 GB disk (PostgreSQL, max_connections 20), powered off after inactivity"
 card_required: "no"
 url: "https://aiven.io/pricing"
-last_verified: "2026-10-18"
-notes: null
+last_verified: "2026-11-08"
+notes: "Free MySQL is not on the free-plan page any more (MySQL is on the paid Developer tier). The Terraform plan slug free-1-1gb is unverified."
 sources:
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
+  - "aiven.io/docs/platform/concepts/free-plan, pg-free-tier, valkey-free-tier (checked 2026-11-08)"
 inspire:
   - "repos/terraform-providers/aiven-terraform-provider-aiven"
+limits:
+  max_per_engine: 1
+  engines: ["pg", "valkey"]
+  free_plan: "free-1-1gb"

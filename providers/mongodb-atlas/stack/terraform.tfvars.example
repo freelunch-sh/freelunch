@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export MONGODB_ATLAS_PUBLIC_KEY and MONGODB_ATLAS_PRIVATE_KEY (or put them in
+# .freelunch/.env). Make an API key in Atlas under Organization > Access Manager > API Keys
+# with the Organization Project Creator role.
+
+# Organisation settings > Organization ID.
+org_id = "..."
+
+# One project with one Free (M0) cluster per entry: 512 MB, 500 connections, paused after
+# 30 days without a connection.
+databases = {
+  main = {}
+  # eu = { provider_name = "AWS", region_name = "EU_WEST_1", allowed_cidr = "203.0.113.7/32" }
+}

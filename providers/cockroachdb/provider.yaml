@@ -2,18 +2,23 @@
 name: cockroachdb
 display_name: "CockroachDB Cloud"
 category: databases
-status: planned
+status: ready
 layer: service
 terraform_provider: "cockroachdb/cockroach"
 iac: partner
 free_tier_type: always-free
-free_tier: "50M request units + 10 GiB storage per month"
-card_required: "unknown"
+free_tier: "Basic clusters include $15 of usage a month (50M request units + 10 GiB storage) across the organisation; a payment method must be on file"
+behavior: scale-to-zero
+card_required: "yes"
 url: "https://www.cockroachlabs.com/pricing/"
-last_verified: "2026-10-18"
+last_verified: "2026-11-08"
 notes: null
 sources:
+  - "cockroachlabs.com/docs/cockroachcloud/free-trial (checked 2026-11-08)"
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
 inspire:
   - "repos/terraform-providers/cockroachdb-terraform-provider-cockroach"
+limits:
+  free_request_units: 50000000
+  free_storage_mib: 10240

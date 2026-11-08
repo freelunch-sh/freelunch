@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export AIVEN_TOKEN (or put it in .freelunch/.env). Make a token in the Aiven
+# console under User information > Tokens.
+
+# The Aiven project that holds the services (made in the console).
+project = "my-project"
+
+# One free service per entry; the free plan has one PostgreSQL and one Valkey per organisation.
+# Free services power off after a period of inactivity.
+databases = {
+  main = {}
+  # cache = { engine = "valkey" }
+}

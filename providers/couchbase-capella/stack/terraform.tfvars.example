@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export CAPELLA_AUTHENTICATION_TOKEN (or put it in .freelunch/.env). Make a
+# token in the Capella console under Settings > API Keys (organisation owner role).
+
+organization_id = "00000000-0000-0000-0000-000000000000"
+
+# The free tier is one cluster per organisation; it is deleted after 30 days without activity.
+databases = {
+  main = {}
+  # main = { cloud = "aws", region = "us-east-2", bucket = "app" }
+}
+
+# allowed_cidrs = ["203.0.113.7/32"]   # default is 0.0.0.0/0

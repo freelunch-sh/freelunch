@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export COCKROACH_API_KEY (or put it in .freelunch/.env). Make a service account
+# with the Cluster Creator/Admin role in the Cloud console (Access Management > Service
+# Accounts) and create an API key for it.
+# The free monthly allowance needs a payment method on the account.
+
+# One Basic cluster per entry. The allowance is 50M request units and 10 GiB of storage a month
+# across all clusters, so with several clusters lower request_unit_limit and storage_mib_limit.
+databases = {
+  main = {}
+  # eu = { region = "eu-central-1", request_unit_limit = 10000000, storage_mib_limit = 2048 }
+}

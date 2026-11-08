@@ -6517,6 +6517,17 @@ ci_secret_names() {
       render)       emit RENDER_API_KEY "Render API key" ;;
       neon)         emit NEON_API_KEY "Neon API key" ;;
       supabase)     emit SUPABASE_ACCESS_TOKEN "Supabase access token" ;;
+      upstash)           emit UPSTASH_EMAIL "Upstash account email"; emit UPSTASH_API_KEY "Upstash API key" ;;
+      mongodb-atlas)     emit MONGODB_ATLAS_PUBLIC_KEY "MongoDB Atlas public API key"; emit MONGODB_ATLAS_PRIVATE_KEY "MongoDB Atlas private API key" ;;
+      cockroachdb)       emit COCKROACH_API_KEY "CockroachDB Cloud API key" ;;
+      tidb-cloud)        emit TIDBCLOUD_PUBLIC_KEY "TiDB Cloud public API key"; emit TIDBCLOUD_PRIVATE_KEY "TiDB Cloud private API key" ;;
+      aiven)             emit AIVEN_TOKEN "Aiven API token" ;;
+      redis-cloud)       emit REDISCLOUD_ACCESS_KEY "Redis Cloud access key"; emit REDISCLOUD_SECRET_KEY "Redis Cloud secret key" ;;
+      couchbase-capella) emit CAPELLA_AUTHENTICATION_TOKEN "Couchbase Capella API token" ;;
+      datastax-astra)    emit ASTRA_API_TOKEN "DataStax Astra token" ;;
+      yugabyte)          emit YBM_API_KEY "YugabyteDB Aeon API key" ;;
+      neo4j-aura)        emit AURA_CLIENT_ID "Neo4j Aura client ID"; emit AURA_CLIENT_SECRET "Neo4j Aura client secret" ;;
+      motherduck)        emit MOTHERDUCK_TOKEN "MotherDuck token"; emit MOTHERDUCK_ADMIN_TOKEN "MotherDuck admin token" ;;
       cloud-run)    emit CLOUD_RUN_ACCESS_TOKEN "Google access token for Cloud Run" ;;
       backblaze-b2) emit B2_APPLICATION_KEY_ID "Backblaze key ID"; emit B2_APPLICATION_KEY "Backblaze application key" ;;
       oci)          emit FREELUNCH_OCI_CONFIG "the profile block of ~/.oci/config (the console shows it when you add an API key)"
