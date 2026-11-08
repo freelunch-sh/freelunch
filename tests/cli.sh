@@ -1522,7 +1522,7 @@ test_reviewed_plan_waits_unattended() {
     freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity < /dev/null 2>&1)"
   grep -q -- "/stack apply -input=false -state=$p/.freelunch/oci/terraform.tfstate $p/.freelunch/oci/reviewed.tfplan$" "$p/fake.log"
   grep -q -- "/stack plan -input=false -no-color -out=.*/oci.tfplan -var-file=.* -var=availability_domain_offset=1$" "$p/fake.log"
-  contains "$out" "oci: out of host capacity in UK-LONDON-1-AD-1; attempt 2 in"
+  contains "$out" "oci: out of host capacity in UK-LONDON-1-AD-1; trying the next availability domain right away (attempt 2)"
   contains "$out" "oci: attempt 2 in UK-LONDON-1-AD-2: Plan: 1 to add"
   contains "$out" "oci: applied on attempt 2 in UK-LONDON-1-AD-2"
   # A retry that changes anything the reviewed plan doesn't is not applied.
@@ -1550,6 +1550,31 @@ test_capacity_retries_rotate_availability_domains() {
   fails grep -q 'availability_domain_offset' "$p/fake.log"
 }
 
+# An attempt that is out of capacity tries the next availability domain at once, and pauses
+# only when a plan comes back to a domain that was already tried.
+test_capacity_wait_sweeps_availability_domains() {
+  local p="$WORK/sweep" out
+  capacity_project "$p"
+  FAKE_PLAN="$(plan_with 'oci_core_instance.this["main"] create Xyz:UK-LONDON-1-AD-1')" freelunch_in "$p" plan oci --out .freelunch/oci/reviewed.tfplan
+  out="$(FAKE_APPLY="capacity capacity ok" FAKE_PLAN="$(plan_with 'oci_core_instance.this["main"] create Xyz:UK-LONDON-1-AD-1')" \
+    freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity 2>&1)"
+  contains "$out" "trying the next availability domain right away (attempt 2)"
+  contains "$out" "out of host capacity in every availability domain that offers the shape; attempt 2 in "
+  contains "$out" "oci: applied on attempt 3 in UK-LONDON-1-AD-1"
+}
+
+# A wait says which size it got, and reminds you to match the tfvars when fallbacks were set.
+test_capacity_wait_names_the_size() {
+  local p="$WORK/size" out plan
+  capacity_project "$p"
+  echo 'capacity_fallbacks = [{ ocpus = 1, memory_in_gbs = 6 }]' >> "$p/.freelunch/oci/terraform.tfvars"
+  plan="$(jq -nc '{resource_changes: [{address: "oci_core_instance.this[\"main\"]", change: {actions: ["create"], after: {availability_domain: "Xyz:UK-LONDON-1-AD-1", shape_config: [{ocpus: 1, memory_in_gbs: 6}]}}}]}')"
+  out="$(FAKE_APPLY="capacity ok" FAKE_PLAN="$plan" apply_in "$p" oci --wait-for-capacity 2>&1)"
+  contains "$out" "got the host" || true
+  contains "$out" "(1 OCPU, 6 GB)"
+  contains "$out" "set ocpus and memory_in_gbs"
+}
+
 # --detach waits in the background with its output in wait.log, and status shows it.
 test_detached_wait_and_status() {
   local p="$WORK/detach" out f
@@ -1571,7 +1596,7 @@ test_detached_wait_and_status() {
   grep -q "freelunch apply oci --wait-for-capacity --plan $p/.freelunch/oci/reviewed.tfplan$" "$p/.freelunch/oci/wait.log"
   grep -q 'oci: applied on attempt 3 in UK-LONDON-1-AD-2' "$p/.freelunch/oci/wait.log"
   grep -q '^desktop: oci: got the host on attempt 3' "$p/fake.log"
-  grep -qE '^caffeinate -i -w [0-9]+$' "$p/fake.log"
+  grep -qE '^caffeinate -is -w [0-9]+$' "$p/fake.log"
   # Without a reviewed plan, a wait in the background would sit at the prompt.
   fails freelunch_in "$p" apply oci --wait-for-capacity --detach
   fails freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --detach
@@ -2887,7 +2912,7 @@ test_wait_goes_on_from_an_earlier_run() {
     apply_in "$p" oci --plan .freelunch/oci/approved.json --wait-for-capacity 2>&1)" || rc=$?
   equals "$rc" 75
   grep -q -- "/stack plan .*-var=availability_domain_offset=6$" "$p/fake.log"
-  contains "$out" "oci: out of host capacity in EU-FRANKFURT-1-AD-1 on attempt 7; the next run goes on with attempt 8"
+  contains "$out" "oci: out of host capacity in every availability domain that offers the shape on attempt 7; the next run goes on with attempt 8"
   grep -qx 'state=paused' "$p/.freelunch/oci/wait.state"
   fails grep -q '^desktop: ' "$p/fake.log"
   contains "$(freelunch_in "$p" status)" "oci: paused "
@@ -3479,6 +3504,14 @@ test_ci_init_writes_the_workflows() {
   mkdir -p "$p/.github/workflows" && touch "$p/.github/workflows/image.yml"
   FAKE_VISIBILITY=PUBLIC ci_in "$p" ci init >/dev/null 2>&1
   grep -q '    - cron: "4,19,34,49 \* \* \* \*" # every quarter of an hour' "$wait"
+  # A public repository's run keeps trying for 15 minutes; a private one makes a single round.
+  grep -qx '      FREELUNCH_CAPACITY_TIMEOUT: "900" # seconds a run keeps trying; remove the line for one attempt per run' "$wait"
+  rm -r "$p/.github"
+  ci_in "$p" ci init >/dev/null 2>&1
+  fails grep -q 'FREELUNCH_CAPACITY_TIMEOUT' "$wait"
+  rm -r "$p/.github"
+  mkdir -p "$p/.github/workflows" && touch "$p/.github/workflows/image.yml"
+  FAKE_VISIBILITY=PUBLIC ci_in "$p" ci init >/dev/null 2>&1
   grep -q '    workflows: \[image\]' "$p/.github/workflows/freelunch.yml"
   fails grep -q '^  push:' "$p/.github/workflows/freelunch.yml"
   # GitLab

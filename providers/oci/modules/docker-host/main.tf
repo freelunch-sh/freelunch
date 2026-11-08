@@ -53,6 +53,7 @@ module "compute" {
 
   ssh_public_keys                = var.ssh_public_keys
   availability_domain_offset     = var.availability_domain_offset
+  capacity_fallbacks             = var.capacity_fallbacks
   reserved_block_storage_gb      = var.reserved_block_storage_gb
   acknowledge_billable_resources = var.acknowledge_billable_resources
 

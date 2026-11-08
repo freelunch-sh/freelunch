@@ -185,6 +185,25 @@ capacity) changed the state, so tofu/terraform can't apply the plan as it is any
 stale. A wait you start again with the same plan goes on anyway. It plans again, and applies
 only what the reviewed plan does, without a new review.
 
+An attempt that is out of capacity tries the next availability domain at once, and the wait
+pauses only after every domain that offers the shape has been tried. To settle for less when
+there is no room for the size you asked for, add `capacity_fallbacks` to `terraform.tfvars`:
+
+```hcl
+capacity_fallbacks = [
+  { ocpus = 1, memory_in_gbs = 6 },
+  { ocpus = 1, memory_in_gbs = 4 },
+]
+```
+
+After each full round of domains the wait steps down to the next size, and starts over with
+the size in `instances` after the last. A fallback never makes an instance bigger than
+`instances` says. The list is part of `terraform.tfvars`, so an approval (`freelunch ci wait`)
+covers it. Host made at a smaller size? Set `ocpus` and `memory_in_gbs` to match afterwards,
+or the next plan resizes it. Use fallbacks with one A1 host: if another instance was made
+before the first ran out of room, a step to another size would change that one, and the wait
+stops, since no one approved that.
+
 `--detach` runs the wait in the background and returns at once:
 
 ```bash
@@ -196,7 +215,7 @@ Its output goes to `.freelunch/oci/wait.log`, and `kill <pid>` stops it. `--deta
 reviewed plan (or `FREELUNCH_AUTO_APPROVE=1`), since nobody would be at the prompt. A
 machine that sleeps pauses the wait, and with a session token, one that sleeps for more than
 an hour ends it, since the token can't be refreshed while it sleeps. On a Mac, `--detach`
-runs `caffeinate -i -w <pid>`, which keeps the Mac awake until the wait ends (closing the
+runs `caffeinate -is -w <pid>`, which keeps the Mac awake until the wait ends (closing the
 lid still puts it to sleep). Elsewhere, keep the machine awake yourself.
 
 #### A machine that stays on

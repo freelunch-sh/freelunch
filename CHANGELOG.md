@@ -12,6 +12,15 @@ release can change commands and the project layout.
 
 ### Added
 
+- **`capacity_fallbacks` for the OCI stack.** Smaller A1 sizes to settle for while a wait for
+  capacity goes on: after every availability domain has been tried with the size asked for, the
+  wait steps down the list, then starts over. The wait names the size it got. In a public
+  repository the wait workflow keeps trying for 15 minutes per run, and `--detach` on a Mac uses
+  `caffeinate -is`.
+- **A wait tries every availability domain before it pauses.** When an attempt is out of capacity
+  in one domain, `--wait-for-capacity` plans the next one right away and sleeps only after they
+  have all been tried, which doubles the odds per cycle in a region with two A1 domains. On OCI
+  it also says, after a dozen attempts, that a Pay As You Go upgrade is the usual fix.
 - **`freelunch harden`** makes a `production` environment that only the main branch deploys from
   (and, with `--reviewer`, after approval) and CODEOWNERS for workflows and `.freelunch/`;
   `freelunch check` also fails workflows that use `pull_request_target` or `write-all`.

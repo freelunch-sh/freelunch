@@ -118,6 +118,79 @@ run "offset_wraps_around" {
   }
 }
 
+# With fallbacks, each full round of availability domains (two here) steps down to the next
+# size, and the round after the last fallback starts over with the size asked for.
+run "fallbacks_step_down_after_every_ad_was_tried" {
+  command = plan
+
+  variables {
+    instances          = { main = { ocpus = 2, memory_in_gbs = 12 } }
+    capacity_fallbacks = [{ ocpus = 1, memory_in_gbs = 6 }, { ocpus = 1, memory_in_gbs = 4 }]
+    availability_domain_offset = 1
+  }
+
+  assert {
+    condition     = oci_core_instance.this["main"].shape_config[0].ocpus == 2 && oci_core_instance.this["main"].shape_config[0].memory_in_gbs == 12
+    error_message = "The second availability domain still uses the size asked for."
+  }
+}
+
+run "fallbacks_second_round_uses_the_first_fallback" {
+  command = plan
+
+  variables {
+    instances                  = { main = { ocpus = 2, memory_in_gbs = 12 } }
+    capacity_fallbacks         = [{ ocpus = 1, memory_in_gbs = 6 }, { ocpus = 1, memory_in_gbs = 4 }]
+    availability_domain_offset = 2
+  }
+
+  assert {
+    condition     = oci_core_instance.this["main"].shape_config[0].ocpus == 1 && oci_core_instance.this["main"].shape_config[0].memory_in_gbs == 6
+    error_message = "Offset 2 over two availability domains is the first fallback."
+  }
+}
+
+run "fallbacks_start_over_after_the_last" {
+  command = plan
+
+  variables {
+    instances                  = { main = { ocpus = 2, memory_in_gbs = 12 } }
+    capacity_fallbacks         = [{ ocpus = 1, memory_in_gbs = 6 }, { ocpus = 1, memory_in_gbs = 4 }]
+    availability_domain_offset = 6
+  }
+
+  assert {
+    condition     = oci_core_instance.this["main"].shape_config[0].ocpus == 2
+    error_message = "Offset 6 is the start of a new cycle, with the size asked for."
+  }
+}
+
+run "fallbacks_never_make_an_instance_bigger" {
+  command = plan
+
+  variables {
+    instances                  = { main = { ocpus = 1, memory_in_gbs = 4 } }
+    capacity_fallbacks         = [{ ocpus = 2, memory_in_gbs = 12 }]
+    availability_domain_offset = 2
+  }
+
+  assert {
+    condition     = oci_core_instance.this["main"].shape_config[0].ocpus == 1 && oci_core_instance.this["main"].shape_config[0].memory_in_gbs == 4
+    error_message = "A fallback only ever makes an instance smaller."
+  }
+}
+
+run "fallback_needs_a_valid_size" {
+  command = plan
+
+  variables {
+    instances          = { main = {} }
+    capacity_fallbacks = [{ ocpus = 1, memory_in_gbs = 100 }]
+  }
+
+  expect_failures = [var.capacity_fallbacks]
+}
+
 run "offset_must_be_a_whole_number" {
   command = plan
 

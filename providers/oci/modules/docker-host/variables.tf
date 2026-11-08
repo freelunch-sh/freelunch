@@ -73,6 +73,15 @@ variable "availability_domain_offset" {
   default     = 0
 }
 
+variable "capacity_fallbacks" {
+  description = "Smaller sizes for A1 instances to settle for when the region is out of capacity (see the compute module). Used by freelunch apply --wait-for-capacity."
+  type = list(object({
+    ocpus         = number
+    memory_in_gbs = number
+  }))
+  default = []
+}
+
 variable "tailscale_auth_key" {
   description = "Optional Tailscale auth key; hosts join your tailnet on first boot."
   type        = string

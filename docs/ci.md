@@ -132,8 +132,10 @@ freelunch ci init
 
 This writes two workflows:
 
-- `.github/workflows/freelunch-wait.yml` waits for capacity on a schedule. Each run makes one
-  attempt with the plan you approved, and the workflow turns itself off once the host
+- `.github/workflows/freelunch-wait.yml` waits for capacity on a schedule. Each run makes an
+  attempt in every availability domain with the plan you approved (in a public repository it keeps
+  trying for 15 minutes, `FREELUNCH_CAPACITY_TIMEOUT: "900"` in the workflow, since GitHub
+  starts scheduled runs late; a private one makes a single round, to spare its minutes), and the workflow turns itself off once the host
   exists, or when there is nothing to wait for. It runs about every half hour in a private
   repository and every quarter of an hour in a public one, as GitHub finds room.
 - `.github/workflows/freelunch.yml` runs [`freelunch up`](deploy-a-container.md#deploy-wherever-there-is-room-freelunch-up)
@@ -214,7 +216,11 @@ A run takes a minute or two. In a public repository GitHub runs them for free; a
 one on GitHub Free has 2,000 minutes a month, which lasts about 20 days of a run every half
 hour. Change the `cron` line to wait less often. The schedule is a wish, not a promise:
 GitHub starts scheduled runs when it has room, so a run can come an hour or two late, and
-now and then not at all.
+now and then not at all. Scheduled runs of a repository that sits idle have been seen
+about every four hours, which makes 62 attempts a fortnight rather than 48 a day. A run
+tries every availability domain that offers the shape before it ends, but for a wait that
+must not depend on GitHub's mood, use a machine of your own that stays on (`freelunch apply --wait-for-capacity --detach` on an always-on box). On OCI, a tenancy on the free trial gets A1 capacity far less readily than a Pay As
+You Go one; upgrading keeps Always Free resources free.
 
 ## 5. Deploy from GitHub Actions
 
@@ -278,6 +284,16 @@ freelunch ci secrets --print > bundle.txt        # copy it over, then delete it
 FREELUNCH_BUNDLE="$(cat bundle.txt)" freelunch ci restore && rm bundle.txt
 freelunch plan oci --out .freelunch/oci/reviewed.tfplan
 freelunch apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity --detach
+```
+
+To keep it running across reboots, a systemd unit does it (`Restart=on-failure`; exit 75 only
+means a paused wait, so let it end and start it again from a timer if you use `ci resume`):
+
+```ini
+[Service]
+WorkingDirectory=/home/you/project
+ExecStart=/usr/local/bin/freelunch apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity
+Restart=on-failure
 ```
 
 When the host exists, it notifies you, and the state is in the store for your laptop's next

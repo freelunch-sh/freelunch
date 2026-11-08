@@ -1061,7 +1061,7 @@ CHANGES='[.resource_changes[]? | select(.change.actions != ["no-op"] and .change
 
 # A wait records how it goes in <stack config>/wait.state, for freelunch status. WAIT is
 # that file while a wait runs; if the CLI stops before the host exists, on_exit marks it.
-WAIT_PROVIDER="" WAIT_STARTED="" WAIT_ATTEMPT=0 WAIT_TRIES=0 WAIT_AD="" WAIT_INTERRUPTED=0 WAIT_SESSION="" SLEEP_PID=""
+WAIT_PROVIDER="" WAIT_STARTED="" WAIT_ATTEMPT=0 WAIT_TRIES=0 WAIT_AD="" WAIT_SIZE="" WAIT_INTERRUPTED=0 WAIT_SESSION="" SLEEP_PID=""
 
 # tee that ignores Ctrl-C. tofu/terraform keep printing while they stop and save the
 # state; with tee gone, their next line would kill them (SIGPIPE).
@@ -1105,6 +1105,11 @@ transient_why() {
 # tenancy prefix (Xyz:UK-LONDON-1-AD-2 is UK-LONDON-1-AD-2)
 ads_in() {
   jq -r '[.resource_changes[]? | select(.change.actions | index("create")) | .change.after.availability_domain? // empty | sub("^[^:]*:"; "")] | unique | join(", ")' "$1"
+}
+
+# sizes_in <plan json>: the A1 size the plan creates instances with ("1 OCPU, 6 GB")
+sizes_in() {
+  jq -r '[.resource_changes[]? | select(.change.actions | index("create")) | .change.after.shape_config?[0]? | select(. != null) | "\(.ocpus) OCPU, \(.memory_in_gbs) GB"] | unique | join("; ")' "$1" 2>/dev/null || true
 }
 
 # host_addresses <provider>: "oci-main 203.0.113.10" per host in the stack's state
@@ -1177,10 +1182,42 @@ check_approval() {
     || die "$1: $(rel "$tfvars") has changed since the plan was approved, so the approval doesn't cover it. Review a new plan and approve that: freelunch plan $1 --out <file>, then freelunch ci wait $1 --plan <file>"
 }
 
+# nap and nap_sleep serve apply_until_capacity, whose variables they use: nap works out the
+# pause after a failed attempt, and ends this run of a wait that the next run goes on with when
+# the pause would pass FREELUNCH_CAPACITY_TIMEOUT. nap_sleep tells the next attempt's number
+# (already counted by then), records the pause and sleeps.
+nap() {
+  pause=$((delay + RANDOM % (delay / 5 + 1)))
+  if [[ -n "$deadline" && $((SECONDS + pause)) -gt $deadline ]]; then
+    [[ $resumes -eq 0 ]] || pause_wait "$why"
+    die "$p: still out of capacity after $WAIT_ATTEMPT attempt(s), and FREELUNCH_CAPACITY_TIMEOUT=$FREELUNCH_CAPACITY_TIMEOUT ends the wait here"
+  fi
+}
+
+nap_sleep() {
+  # OCI hands A1 machines to Pay As You Go accounts far more readily than to a free trial. The
+  # CLI can't tell which one this is, so it says so now and then.
+  if [[ "$p" == "oci" && $((WAIT_ATTEMPT % 24)) -eq 12 ]]; then
+    log "$p: $((WAIT_ATTEMPT - 1)) attempts and still no A1 capacity. If this tenancy is still on the free trial, upgrading it to Pay As You Go (Console > Billing > Upgrade) is the usual fix: the Always Free resources stay free, and A1 capacity is far easier to get"
+  fi
+  wait_state waiting "$why${WAIT_AD:+ in $WAIT_AD}" "$(($(date +%s) + pause))"
+  log "$p: $why${WAIT_AD:+ in $WAIT_AD}; attempt $WAIT_ATTEMPT in ${pause}s (Ctrl-C stops waiting)"
+  # In the background, so that kill stops the wait right away.
+  before="$(date +%s)"
+  sleep "$pause" & SLEEP_PID=$!
+  wait "$SLEEP_PID" || true
+  SLEEP_PID=""
+  # A machine that sleeps makes no attempts meanwhile: a closed lid stops a wait for hours.
+  slept=$(($(date +%s) - before - pause))
+  if [[ $slept -gt 300 ]]; then
+    log "$p: this machine slept for $(fmt_duration "$slept") of that pause, with no attempts meanwhile. A long wait needs a machine that stays on: freelunch ci wait $p hands it to GitHub Actions (docs/ci.md)"
+  fi
+}
+
 apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or approval, or ""> [extra args]
   local p="$1" reviewed="$2"; shift 2
   local dir out plan json profile="" interval delay pause cap deadline="" summary why a pid unreviewed rotates=0
-  local first=1 exact=0 resumes=0 phase nothing=0 before slept what="the reviewed plan" again
+  local first=1 exact=0 resumes=0 phase nothing=0 before slept what="the reviewed plan" again reason swept="" sweeping=0
   local args=() state=() approve=() offset=()
   dir="$(stack_dir "$p")"
   interval="${FREELUNCH_CAPACITY_INTERVAL:-120}"
@@ -1235,7 +1272,7 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
   elif [[ -n "$reviewed" ]]; then
     tf_for "$p" "$dir" show -json "$reviewed" > "$TMP/reviewed.json" || die "$p: can't read the plan in $(rel "$reviewed")"
     jq -c "$CHANGES" "$TMP/reviewed.json" > "$TMP/reviewed.changes"
-    WAIT_AD="$(ads_in "$TMP/reviewed.json")"
+    WAIT_AD="$(ads_in "$TMP/reviewed.json")" WAIT_SIZE="$(sizes_in "$TMP/reviewed.json")"
     exact=1
   fi
   trap 'WAIT_INTERRUPTED=1; [[ -z "$SLEEP_PID" ]] || kill "$SLEEP_PID" 2>/dev/null; die "$p: stopped waiting for capacity"' INT TERM
@@ -1275,7 +1312,7 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
       if tf_for "$p" "$dir" plan -input=false -no-color -out="$plan" ${args[@]+"${args[@]}"} ${offset[@]+"${offset[@]}"} "$@" > "$out" 2>&1; then
         tf_for "$p" "$dir" show -json "$plan" > "$json"
         summary="$(grep -m1 -E '^(Plan:|No changes)' "$out" || true)"
-        WAIT_AD="$(ads_in "$json")"
+        WAIT_AD="$(ads_in "$json")" WAIT_SIZE="$(sizes_in "$json")"
         if jq -e 'any(.resource_changes[]?.change.actions[]; . == "delete")' "$json" >/dev/null; then
           cat "$out" >&2
           die "$p: the plan for attempt $WAIT_ATTEMPT destroys or replaces something, so it is not applied without you. Run freelunch apply $p to review it"
@@ -1287,8 +1324,19 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
             die "$p: the plan for attempt $WAIT_ATTEMPT changes what $what doesn't: $unreviewed. It is not applied; $again"
           fi
         fi
+        if [[ $sweeping -eq 1 && "$swept" == *"|$WAIT_AD|"* ]]; then
+          # Back where this sweep began, so every availability domain was tried. The plan stays;
+          # it is applied after the pause.
+          sweeping=0 swept=""
+          why="out of host capacity in every availability domain that offers the shape"
+          WAIT_AD="" WAIT_ATTEMPT=$((WAIT_ATTEMPT - 1))
+          nap
+          WAIT_ATTEMPT=$((WAIT_ATTEMPT + 1))
+          nap_sleep
+          WAIT_AD="$(ads_in "$json")"
+        fi
         if jq -e "$CHANGES | length == 0" "$json" >/dev/null; then nothing=1; fi
-        [[ -z "$summary" ]] || log "$p: attempt $WAIT_ATTEMPT${WAIT_AD:+ in $WAIT_AD}: $summary"
+        [[ -z "$summary" ]] || log "$p: attempt $WAIT_ATTEMPT${WAIT_AD:+ in $WAIT_AD}${WAIT_SIZE:+ ($WAIT_SIZE)}: $summary"
         phase=apply
         if tf_for "$p" "$dir" apply -input=false ${state[@]+"${state[@]}"} "$plan" 2>&1 | keep "$out"; then break; fi
       else
@@ -1298,32 +1346,29 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
     first=0
     # What the attempt made goes to the state store now, in case this run ends before the next.
     sync_now "$p"
-    case "$(retry_reason "$out" "$phase")" in
+    reason="$(retry_reason "$out" "$phase")"
+    case "$reason" in
       capacity)  delay="$interval"; why="out of host capacity" ;;
       busy)      delay=$((delay * 2 > cap ? cap : delay * 2)); why="OCI asks for fewer requests (TooManyRequests)" ;;
       transient) delay="$interval"; why="$(transient_why "$out")" ;;
       *)         oci_hints "$out"
                  die "$p: apply failed, and not for lack of capacity, so it is not retried (see the output above)" ;;
     esac
-    pause=$((delay + RANDOM % (delay / 5 + 1)))
-    if [[ -n "$deadline" && $((SECONDS + pause)) -gt $deadline ]]; then
-      [[ $resumes -eq 0 ]] || pause_wait "$why"
-      die "$p: still out of capacity after $WAIT_ATTEMPT attempt(s), and FREELUNCH_CAPACITY_TIMEOUT=$FREELUNCH_CAPACITY_TIMEOUT ends the wait here"
+    # No room in one availability domain says nothing about the next: try each of them
+    # before the pause. The plan of the next attempt shows when they have all been tried.
+    if [[ "$reason" == "capacity" && $rotates -eq 1 && -n "$WAIT_AD" ]]; then
+      swept="$swept|$WAIT_AD|"
+      sweeping=1
+      WAIT_ATTEMPT=$((WAIT_ATTEMPT + 1))
+      offset=(-var="availability_domain_offset=$((WAIT_ATTEMPT - 1))")
+      log "$p: $why in $WAIT_AD; trying the next availability domain right away (attempt $WAIT_ATTEMPT)"
+      continue
     fi
-    wait_state waiting "$why${WAIT_AD:+ in $WAIT_AD}" "$(($(date +%s) + pause))"
+    swept="" sweeping=0
+    nap
     WAIT_ATTEMPT=$((WAIT_ATTEMPT + 1))
     [[ $rotates -eq 0 ]] || offset=(-var="availability_domain_offset=$((WAIT_ATTEMPT - 1))")
-    log "$p: $why${WAIT_AD:+ in $WAIT_AD}; attempt $WAIT_ATTEMPT in ${pause}s (Ctrl-C stops waiting)"
-    # In the background, so that kill stops the wait right away.
-    before="$(date +%s)"
-    sleep "$pause" & SLEEP_PID=$!
-    wait "$SLEEP_PID" || true
-    SLEEP_PID=""
-    # A machine that sleeps makes no attempts meanwhile: a closed lid stops a wait for hours.
-    slept=$(($(date +%s) - before - pause))
-    if [[ $slept -gt 300 ]]; then
-      log "$p: this machine slept for $(fmt_duration "$slept") of that pause, with no attempts meanwhile. A long wait needs a machine that stays on: freelunch ci wait $p hands it to GitHub Actions (docs/ci.md)"
-    fi
+    nap_sleep
   done
   trap - INT TERM
   sync_now "$p"
@@ -1332,8 +1377,11 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
     end_wait "done" "nothing left to do on attempt $WAIT_ATTEMPT" quiet
     return 0
   fi
-  [[ $WAIT_ATTEMPT -eq 1 ]] || log "$p: applied on attempt $WAIT_ATTEMPT${WAIT_AD:+ in $WAIT_AD}"
-  end_wait "done" "got the host on attempt $WAIT_ATTEMPT${WAIT_AD:+ in $WAIT_AD}$(host_addresses "$p" | awk 'NF == 2 { s = s ", " $1 " at " $2 } END { if (s) print ":" substr(s, 2) }')"
+  [[ $WAIT_ATTEMPT -eq 1 ]] || log "$p: applied on attempt $WAIT_ATTEMPT${WAIT_AD:+ in $WAIT_AD}${WAIT_SIZE:+ ($WAIT_SIZE)}"
+  if [[ -n "$WAIT_SIZE" ]] && grep -qs '^[[:space:]]*capacity_fallbacks' "$(config_dir "$p")/terraform.tfvars"; then
+    log "$p: the host was made with $WAIT_SIZE, which may be less than instances asks for: set ocpus and memory_in_gbs in $(rel "$(config_dir "$p")/terraform.tfvars") to match, or the next plan resizes it"
+  fi
+  end_wait "done" "got the host on attempt $WAIT_ATTEMPT${WAIT_AD:+ in $WAIT_AD}${WAIT_SIZE:+ ($WAIT_SIZE)}$(host_addresses "$p" | awk 'NF == 2 { s = s ", " $1 " at " $2 } END { if (s) print ":" substr(s, 2) }')"
 }
 
 # pause_wait <why>: end this run of a wait that the next run goes on with
@@ -1359,9 +1407,9 @@ detach_wait() {
   log "freelunch status shows the attempts, $(rel "$log_file") the output, and kill $pid stops it"
   # A machine that sleeps pauses the wait, and one that sleeps for more than an hour lets a
   # session token expire, which ends it. On a Mac, caffeinate keeps it awake (closing the
-  # lid still puts it to sleep) and stops by itself when the wait ends.
+  # lid still puts it to sleep; -s also keeps it from sleeping on its own on mains power) and stops by itself when the wait ends.
   if command -v caffeinate >/dev/null; then
-    nohup caffeinate -i -w "$pid" >/dev/null 2>&1 < /dev/null &
+    nohup caffeinate -is -w "$pid" >/dev/null 2>&1 < /dev/null &
     log "$p: caffeinate keeps the Mac awake until the wait ends (kill $! lets it sleep), but not with the lid closed"
   elif [[ "$p" == "oci" && -n "$(oci_session_profile "$(config_dir oci)/terraform.tfvars")" ]]; then
     log "$p: keep this machine awake while it waits. A session token expires an hour after its last refresh, so sleeping longer than that ends the wait"
@@ -6243,11 +6291,14 @@ EOF
   if [[ "$CI_BUNDLE_MODE" != 1 ]]; then ci_env_block "        "; fi
 }
 github_workflows() {
-  local base="$1" cron="11,41 * * * *" every="half hour" visibility trigger="" contents=read
+  local base="$1" cron="11,41 * * * *" every="half hour" visibility trigger="" contents=read waitenv=""
   local minutes=$'A run takes a minute or two. A public repository runs them for free; a private one on\n# GitHub Free has 2,000 minutes a month, about 20 days of runs every half hour.'
   visibility="$(cd "$base" && gh repo view --json visibility -q .visibility 2>/dev/null)" || visibility=""
   if [[ "$visibility" == "PUBLIC" ]]; then
-    cron="4,19,34,49 * * * *" every="quarter of an hour" minutes="A run takes a minute or two, which a public repository runs for free."
+    cron="4,19,34,49 * * * *" every="quarter of an hour" minutes="A run keeps trying for 15 minutes, which a public repository runs for free."
+    # GitHub starts scheduled runs late, sometimes hours apart: a run that keeps trying
+    # makes the most of each one.
+    waitenv=$'    env:\n      FREELUNCH_CAPACITY_TIMEOUT: "900" # seconds a run keeps trying; remove the line for one attempt per run\n'
   fi
   mkdir -p "$base/.github/workflows"
   # A state kept in a branch of this repository is pushed by the jobs.
@@ -6255,9 +6306,10 @@ github_workflows() {
   {
     cat <<EOF
 # Written by freelunch ci init. Waits for cloud capacity here instead of on your machine,
-# which can sleep: every run makes one attempt with the plan you approved (freelunch ci wait
-# <stack> --plan <file>), in the next availability domain each time, and the workflow turns
-# itself off once the host exists, when nothing is approved, or after three failed runs in a
+# which can sleep: every run makes an attempt with the plan you approved (freelunch ci wait
+# <stack> --plan <file>) in every availability domain that offers the shape (a public
+# repository's run keeps trying for 15 minutes). The next run goes on where this one stopped,
+# and the workflow turns itself off once the host exists, when nothing is approved, or after three failed runs in a
 # row. freelunch ci wait turns it on again.
 #
 # $minutes
@@ -6281,7 +6333,7 @@ jobs:
   wait:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    steps:
+${waitenv}    steps:
 EOF
     ci_uses "ci resume"
   } | write_new "$base/.github/workflows/$CI_WAIT_WORKFLOW"

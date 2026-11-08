@@ -22,6 +22,15 @@ ssh_source_cidrs = ["0.0.0.0/0"]
 # Behind a Cloudflare Tunnel no port needs to be open: ingress_tcp_ports = []
 ingress_tcp_ports = [80, 443]
 
+# Out of capacity? freelunch apply --wait-for-capacity can settle for less: after every
+# availability domain has been tried with the size below, it tries each of these in turn, then
+# starts over. A host made at a smaller size stays that size; set ocpus and memory_in_gbs to
+# match afterwards, or the next plan resizes it.
+# capacity_fallbacks = [
+#   { ocpus = 1, memory_in_gbs = 6 },
+#   { ocpus = 1, memory_in_gbs = 4 },
+# ]
+
 # --- Layouts that fit Always Free (2 A1 OCPUs / 12 GB, 2 micros, 200 GB storage) ---
 
 # A) One Arm host with everything (default)

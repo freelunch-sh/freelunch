@@ -31,6 +31,26 @@ locals {
     )
   }
 
+  # The wait raises availability_domain_offset by one on each attempt, so it also tells which
+  # size an attempt is for: every availability domain with one size, then the next size. 0 is
+  # the size asked for in instances, 1 the first fallback, and so on.
+  fallback_steps = length(var.capacity_fallbacks) + 1
+  instance_step = {
+    for k, v in var.instances : k => (
+      endswith(v.shape, ".Flex") && length(var.capacity_fallbacks) > 0
+      ? floor(var.availability_domain_offset / (v.availability_domain_index != null ? 1 : max(1, try(length(local.ads_for_shape[v.shape]), 1)))) % local.fallback_steps
+      : 0
+    )
+  }
+  instance_size = {
+    for k, v in var.instances : k => (
+      local.instance_step[k] == 0 ? { ocpus = v.ocpus, memory_in_gbs = v.memory_in_gbs } : {
+        ocpus         = min(v.ocpus, var.capacity_fallbacks[local.instance_step[k] - 1].ocpus)
+        memory_in_gbs = min(v.memory_in_gbs, var.capacity_fallbacks[local.instance_step[k] - 1].memory_in_gbs)
+      }
+    )
+  }
+
   freeform_tags = { "managed-by" = "freelunch" }
 }
 
@@ -116,8 +136,8 @@ resource "oci_core_instance" "this" {
   dynamic "shape_config" {
     for_each = endswith(each.value.shape, ".Flex") ? [1] : []
     content {
-      ocpus         = each.value.ocpus
-      memory_in_gbs = each.value.memory_in_gbs
+      ocpus         = local.instance_size[each.key].ocpus
+      memory_in_gbs = local.instance_size[each.key].memory_in_gbs
     }
   }
 

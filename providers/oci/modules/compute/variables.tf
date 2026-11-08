@@ -70,6 +70,25 @@ variable "availability_domain_offset" {
   }
 }
 
+variable "capacity_fallbacks" {
+  description = <<-EOT
+    Smaller sizes for A1 instances to settle for when the region is out of capacity, tried in
+    order. freelunch apply --wait-for-capacity moves to the next size after it has tried every
+    availability domain with the one before, and starts over with the size in instances after the
+    last. An instance never gets more than instances asks for. Only a flexible shape is resized.
+  EOT
+  type = list(object({
+    ocpus         = number
+    memory_in_gbs = number
+  }))
+  default = []
+
+  validation {
+    condition     = alltrue([for f in var.capacity_fallbacks : f.ocpus >= 1 && f.memory_in_gbs >= f.ocpus && f.memory_in_gbs <= 64 * f.ocpus])
+    error_message = "Each capacity fallback needs at least 1 OCPU and 1 to 64 GB of memory per OCPU."
+  }
+}
+
 variable "operating_system" {
   description = "Platform image operating system."
   type        = string
