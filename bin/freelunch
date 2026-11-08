@@ -6515,6 +6515,8 @@ ci_secret_names() {
       northflank)   emit NORTHFLANK_API_TOKEN "Northflank API token" ;;
       scaleway)     emit SCW_SECRET_KEY "Scaleway secret key" ;;
       render)       emit RENDER_API_KEY "Render API key" ;;
+      neon)         emit NEON_API_KEY "Neon API key" ;;
+      supabase)     emit SUPABASE_ACCESS_TOKEN "Supabase access token" ;;
       cloud-run)    emit CLOUD_RUN_ACCESS_TOKEN "Google access token for Cloud Run" ;;
       backblaze-b2) emit B2_APPLICATION_KEY_ID "Backblaze key ID"; emit B2_APPLICATION_KEY "Backblaze application key" ;;
       oci)          emit FREELUNCH_OCI_CONFIG "the profile block of ~/.oci/config (the console shows it when you add an API key)"

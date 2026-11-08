@@ -2,7 +2,7 @@
 name: neon
 display_name: "Neon"
 category: databases
-status: planned
+status: ready
 layer: service
 terraform_provider: "kislerdm/neon"
 iac: community
@@ -19,3 +19,7 @@ sources:
   - "registry.terraform.io (checked 2026-10-18)"
 inspire:
   - "repos/terraform-providers/neondatabase-terraform-provider-neon"
+limits:
+  max_projects: 100
+  max_cu: 2
+  pg_versions: [14, 15, 16, 17]

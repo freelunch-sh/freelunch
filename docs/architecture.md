@@ -141,6 +141,28 @@ deployed stack that has them. An app names its bucket like a host, `bucket =
 "backblaze-b2-results"`, and gets its settings in its environment
 ([which](../deploy/README.md#appstfvars)).
 
+## Database contract
+
+A stack that makes databases (`neon`, `supabase` and the other managed databases) outputs
+`databases`, a list of objects with these attributes:
+
+| Attribute | Type | Example |
+|---|---|---|
+| `provider` | string | `neon` |
+| `name` | string | `main` (unique within the provider) |
+| `engine` | string | `postgres`, `mysql`, `redis`, `mongodb` ... |
+| `host` | string | the server's address |
+| `port` | number | `5432` |
+| `database` | string | the database's name |
+| `user` | string | the login |
+| `region` | string | where it runs |
+| `behavior` | string | what the free tier does when idle: `scale-to-zero`, `pauses`, `always-on` |
+
+and `database_credentials`, a sensitive map from `<provider>-<name>` to `{ password, url }`,
+where `url` is the full connection string. Read them with `freelunch output <provider> -json
+database_credentials`. Putting a database into an app's environment on `deploy`
+(`database = "neon-main"` in `apps.tfvars`, the way buckets work) is not built yet.
+
 ## Projects
 
 The CLI runs in one of two modes:

@@ -2,7 +2,7 @@
 name: supabase
 display_name: "Supabase"
 category: databases
-status: planned
+status: ready
 layer: service
 terraform_provider: "supabase/supabase"
 iac: community
@@ -18,3 +18,5 @@ sources:
   - "registry.terraform.io (checked 2026-10-18)"
 inspire:
   - "repos/terraform-providers/supabase-terraform-provider-supabase"
+limits:
+  max_projects: 2
