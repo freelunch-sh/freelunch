@@ -107,6 +107,9 @@ Project:
 CI:
   ci init [github|gitlab] Write the CI workflows: one that waits for capacity on a schedule, and
                           one that runs deploy after a new image, or any command you start
+                          Then the secrets they pass on: --set-secrets runs gh secret set for each,
+                          --print-secrets only prints what to run; without either it asks (and
+                          prints when nobody can answer)
   ci secrets [--print]    Put what CI needs that git doesn't have (tfvars, .env, app env files,
                           known_hosts, the OCI API key, the SSH key deploy uses) in the secret
                           FREELUNCH_BUNDLE with gh, or print it for another CI system
@@ -7240,12 +7243,17 @@ ci_secret_names() {
 
 # ci_env_block <indent>: the env: lines that hand those secrets to a step
 ci_env_block() {
-  local name what
-  while IFS=$'\t' read -r name what; do
-    [[ -n "$name" ]] || continue
+  local name what extra="${2:-}"
+  if [[ -n "$extra" ]]; then
     printf '%senv:\n' "$1"
-    break
-  done < <(ci_secret_names)
+    printf '%s  %s\n' "$1" "$extra"
+  else
+    while IFS=$'\t' read -r name what; do
+      [[ -n "$name" ]] || continue
+      printf '%senv:\n' "$1"
+      break
+    done < <(ci_secret_names)
+  fi
   while IFS=$'\t' read -r name what; do
     [[ -n "$name" ]] || continue
     # shellcheck disable=SC2016 # a GitHub expression, not ours
@@ -7311,7 +7319,8 @@ action_ref() {
 # tool_version: the version of tofu/terraform here, for CI to use the same
 tool_version() { CHECKPOINT_DISABLE=1 "$TF" version -json 2>/dev/null | jq -r '.terraform_version // empty' 2>/dev/null || true; }
 
-# ci_uses <command>: the steps of a job that runs freelunch with the action
+# ci_uses <command> [env line]: the steps of a job that runs freelunch with the action, with
+# the secrets as its environment and one more line of it when given (NAME: value)
 ci_uses() {
   cat <<EOF
       - uses: actions/checkout@v7
@@ -7320,13 +7329,13 @@ ci_uses() {
           run: $1
 EOF
   # shellcheck disable=SC2016 # a GitHub expression, not ours
-  if [[ "$CI_BUNDLE_MODE" == 1 ]]; then echo '          bundle: ${{ secrets.FREELUNCH_BUNDLE }}'; fi
+  if [[ "$CI_BUNDLE_MODE" == 1 && -z "${CI_CHECK_ONLY:-}" ]]; then echo '          bundle: ${{ secrets.FREELUNCH_BUNDLE }}'; fi
   cat <<EOF
           tool: $(tool_name)
           version: "$(tool_version)"
 EOF
   # Each secret goes to this one step, as an environment variable of its own name.
-  if [[ "$CI_BUNDLE_MODE" != 1 ]]; then ci_env_block "        "; fi
+  if [[ "$CI_BUNDLE_MODE" != 1 && -z "${CI_CHECK_ONLY:-}" ]]; then ci_env_block "        " "${2:-}"; fi
 }
 github_workflows() {
   local base="$1" cron="11,41 * * * *" every="half hour" visibility trigger="" contents=read waitenv=""
@@ -7415,6 +7424,94 @@ EOF
   fi
 }
 
+CI_PROVISION_WORKFLOW="freelunch-provision.yml"
+CI_CHECK_WORKFLOW="freelunch-ci.yml"
+
+# job_workflows <project root> <jobs: provision,ci,cd>: the workflows of the jobs engines.md
+# names. cd is freelunch.yml and the wait workflow github_workflows writes; the others are here.
+job_workflows() {
+  local base="$1" jobs=",$2," contents=read
+  mkdir -p "$base/.github/workflows"
+  [[ "$(state_backend "$(state_config)")" != "git" ]] || contents="write"
+  if [[ "$jobs" == *,provision,* && -n "$(project_stacks)" ]]; then
+    {
+      cat <<EOF
+# Written by freelunch ci init. The provision job: makes what .freelunch/ declares.
+#   pull request  freelunch plan all: what the change would do, nothing applied
+#   merge to main freelunch apply all
+#   by hand       Run workflow > plan, apply or destroy (destroy also needs the repository's name typed),
+#                 or doctor: it names the secrets that are missing and checks the ones that are there
+# A pull request from a fork gets no secrets and never provisions: the job is skipped for it.
+# One run at a time with freelunch.yml (the deploy), which would otherwise change the same state.
+name: freelunch-provision
+
+on:
+  pull_request:
+    paths: [".freelunch/**", ".github/workflows/$CI_PROVISION_WORKFLOW"]
+  push:
+    branches: [main]
+    paths: [".freelunch/**"]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do with every stack; doctor checks the secrets and the tools instead
+        type: choice
+        options: [plan, apply, destroy, doctor]
+        default: plan
+      confirm:
+        description: To destroy, type this repository's name
+        default: ""
+
+permissions:
+  contents: $contents # write when the state is kept in a branch of this repository
+
+concurrency:
+  group: freelunch
+
+jobs:
+  provision:
+    # A fork's pull request is never trusted with the secrets this job holds
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy' && inputs.confirm != github.event.repository.name
+        shell: bash
+        run: |
+          echo "::error::To destroy, type the repository's name (\${{ github.event.repository.name }}) in the confirm box."
+          exit 1
+EOF
+      # shellcheck disable=SC2016 # GitHub expressions, not ours
+      ci_uses "\${{ github.event_name == 'pull_request' && 'plan all' || github.event_name == 'push' && 'apply all' || inputs.action == 'doctor' && 'doctor' || format('{0} all', inputs.action) }}" "FREELUNCH_AUTO_APPROVE: \${{ github.event_name != 'pull_request' && inputs.action != 'plan' && inputs.action != 'doctor' && '1' || '' }}"
+    } | write_new "$base/.github/workflows/$CI_PROVISION_WORKFLOW"
+  fi
+  if [[ "$jobs" == *,ci,* ]]; then
+    {
+      cat <<EOF
+# Written by freelunch ci init. The CI job: checks the config in git, with no secret, on every
+# pull request and push to main: it is complete, its targets are real, and it holds no secret.
+# Building the image is the image workflow's job (freelunch init --image-workflow).
+name: freelunch-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+EOF
+      CI_CHECK_ONLY=1 ci_uses check
+    } | write_new "$base/.github/workflows/$CI_CHECK_WORKFLOW"
+  fi
+}
+
 # gitlab_pipeline <project root>: a pipeline that runs freelunch in the runner image
 gitlab_pipeline() {
   local base="$1" file tag state_vars=""
@@ -7483,9 +7580,13 @@ pipeline_workflow() {
 }
 
 ci_init() {
-  local where="github" base a given=0 pipeline=0
+  local where="github" base a given=0 pipeline=0 secrets=ask jobs="provision,ci,cd"
   for a in "$@"; do
     case "$a" in
+      --jobs=*)        jobs="${a#--jobs=}"
+                       [[ "$jobs" =~ ^(provision|ci|cd)(,(provision|ci|cd))*$ ]] || die "ci init: --jobs takes provision, ci and cd, separated by commas" ;;
+      --set-secrets)   secrets=set ;;
+      --print-secrets) secrets=print ;;
       --bundle) CI_BUNDLE_MODE=1 ;;
       --pipeline) pipeline=1 ;;
       -*)       die "ci init: unknown option $a" ;;
@@ -7496,7 +7597,7 @@ ci_init() {
   need_tf
   base="$(dirname "$PROJECT")"
   case "$where" in
-    github) if [[ $pipeline -eq 1 ]]; then [[ $CI_BUNDLE_MODE -eq 0 ]] || die "ci init: --pipeline hands secrets over one by one, not as a bundle"; pipeline_workflow "$base"; else github_workflows "$base"; fi ;;
+    github) if [[ $pipeline -eq 1 ]]; then [[ $CI_BUNDLE_MODE -eq 0 ]] || die "ci init: --pipeline hands secrets over one by one, not as a bundle"; pipeline_workflow "$base"; else [[ ",$jobs," != *,cd,* ]] || github_workflows "$base"; job_workflows "$base" "$jobs"; fi ;;
     gitlab) CI_BUNDLE_MODE=1; gitlab_pipeline "$base" ;;
     *)      die "ci init: github or gitlab (other CI systems: docs/ci.md#other-ci-systems)" ;;
   esac
@@ -7504,8 +7605,8 @@ ci_init() {
   local i=1
   if [[ -z "$(state_config)" ]]; then echo "  $i. freelunch state init git (or oci, r2, b2, gitlab): the state where CI reaches it" >&2; i=$((i + 1)); fi
   if [[ "$where" == "github" && $CI_BUNDLE_MODE -eq 0 ]]; then
-    echo "  $i. add these as secrets of the repository (Settings > Secrets and variables > Actions):" >&2
-    while IFS=$'\t' read -r a g; do [[ -z "$a" ]] || echo "       $a: $g" >&2; done < <(ci_secret_names)
+    echo "  $i. the secrets:" >&2
+    ci_hand_over_secrets "$secrets"
     echo "  $((i + 1)). commit and push .freelunch/ and the workflows" >&2
   elif [[ "$where" == "github" ]]; then
     echo "  $i. freelunch ci secrets: what CI needs and git doesn't have, in the secret FREELUNCH_BUNDLE" >&2
@@ -7514,6 +7615,76 @@ ci_init() {
     echo "  $i. freelunch ci secrets --print, into the CI/CD variable FREELUNCH_BUNDLE" >&2
     echo "  $((i + 1)). commit and push the pipeline" >&2
   fi
+}
+
+# ci_secret_value <name> <file>: what the secret holds, into the file. The secrets that carry a
+# file (the OCI profile and key, the SSH key deploy signs in with) hold its text; any other is
+# the variable of that name, from the shell or .freelunch/.env. Fails, and says why, when
+# there is nothing to put in it.
+ci_secret_value() {
+  local name="$1" file="$2" key
+  : > "$file"
+  case "$name" in
+    FREELUNCH_OCI_CONFIG) oci_ci_files && cp "$TMP/oci.config" "$file" ;;
+    FREELUNCH_OCI_KEY)    oci_ci_files && cp "$OCI_CI_KEY" "$file" ;;
+    FREELUNCH_SSH_PRIVATE_KEY)
+      [[ -f "$TMP/bundle" ]] || echo "freelunch-bundle 1" > "$TMP/bundle"
+      bundle_ssh_key
+      [[ -n "$SSH_KEY_BUNDLED" ]] && cp "$SSH_KEY_BUNDLED" "$file" ;;
+    *) [[ -n "${!name:-}" ]] && printf '%s' "${!name}" > "$file" ;;
+  esac
+  [[ -s "$file" ]]
+}
+
+# ci_hand_over_secrets <how: ask|set|print>: get the secrets the workflows pass on into the
+# repository. set runs gh secret set for each, the value read from a file by gh, never on a
+# command line; print only says what to run. ask lets whoever is there choose, and prints
+# when nobody can answer: putting secrets in a repository is not something to do unasked.
+ci_hand_over_secrets() {
+  local how="$1" base repo name what n=0 answer set=0 skipped="" cmd
+  base="$(dirname "$PROJECT")"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  while IFS=$'\t' read -r name what; do [[ -z "$name" ]] || n=$((n + 1)); done < <(ci_secret_names)
+  [[ $n -gt 0 ]] || return 0
+  if [[ "$how" == ask ]]; then
+    if interactive && command -v gh >/dev/null; then
+      answer="$(ask "Set the $n secrets the workflows pass on in the GitHub repository now with gh, or print the commands for you to run? (set/print)" print)"
+      case "$answer" in set|s|S|y|yes) how=set ;; *) how=print ;; esac
+    else
+      how=print
+    fi
+  fi
+  if [[ "$how" == set ]]; then
+    command -v gh >/dev/null || die "ci init: setting secrets takes gh (https://cli.github.com), signed in; or --print-secrets"
+    repo="$(cd "$base" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" \
+      || die "ci init: gh can't tell which GitHub repository this is (gh auth login, and an origin on github.com); or --print-secrets"
+    resolve_env_refs
+    while IFS=$'\t' read -r name what; do
+      [[ -n "$name" ]] || continue
+      if ci_secret_value "$name" "$TMP/secret.value"; then
+        (cd "$base" && gh secret set "$name" --repo "$repo" < "$TMP/secret.value") >/dev/null \
+          || die "ci init: gh couldn't set the secret $name in $repo (see above)"
+        log "set the secret $name in $repo ($what)"
+        set=$((set + 1))
+      else
+        skipped="$skipped $name"
+        log "$name: nothing to put in it here ($what): set it in the shell or $(rel "$PROJECT")/.env and run ci init again, or gh secret set $name"
+      fi
+      rm -f "$TMP/secret.value"
+    done < <(ci_secret_names)
+    log "$set of $n secrets set in $repo${skipped:+; still to set:$skipped}"
+    return 0
+  fi
+  echo "  add these as secrets of the repository (Settings > Secrets and variables > Actions), or run each command:" >&2
+  while IFS=$'\t' read -r name what; do
+    [[ -n "$name" ]] || continue
+    cmd="gh secret set $name"
+    case "$name" in
+      FREELUNCH_OCI_CONFIG|FREELUNCH_OCI_KEY|FREELUNCH_SSH_PRIVATE_KEY) cmd="freelunch ci init --set-secrets  # sets $name from its file" ;;
+    esac
+    echo "       $name: $what" >&2
+    echo "           $cmd" >&2
+  done < <(ci_secret_names)
 }
 
 # bundle_put <path in the bundle> <file>: add a file to the bundle in TMP, as one line of
@@ -7563,8 +7734,16 @@ bundle_ssh_key() {
 # bundle_oci: the OCI profile the oci stack signs in with, and its API key. A session token
 # can't go: CI couldn't refresh it past the session's end.
 bundle_oci() {
+  oci_ci_files || return 0
+  bundle_put home/.oci/config "$TMP/oci.config"
+  bundle_put home/.oci/freelunch_api_key.pem "$OCI_CI_KEY"
+}
+
+# oci_ci_files: the OCI profile the oci stack signs in with, as CI gets it, in $TMP/oci.config,
+# and the path of its API key in OCI_CI_KEY. Fails quietly when the project has no oci stack.
+oci_ci_files() {
   local tfvars profile key
-  if [[ ! -d "$(stack_dir oci)" ]] || ! is_configured oci; then return 0; fi
+  if [[ ! -d "$(stack_dir oci)" ]] || ! is_configured oci; then return 1; fi
   tfvars="$(config_dir oci)/terraform.tfvars"
   [[ -z "$(oci_session_profile "$tfvars")" ]] \
     || die "ci: the oci stack signs in with a session token (oci_auth = \"SecurityToken\"), which CI can't refresh past the session's end. Make an API key (oci setup bootstrap --profile-name freelunch), set oci_config_profile = \"freelunch\" and drop oci_auth in $(rel "$tfvars"), then run this again"
@@ -7574,8 +7753,7 @@ bundle_oci() {
   [[ -n "$key" && -f "$key" ]] || die "ci: the key_file of OCI profile $profile isn't there: ${key:-none set}"
   awk -v p="[$profile]" '$0 == p { s = 1; print; next } /^\[/ { s = 0 } s && !/^(key_file|security_token_file)[ \t]*=/ { print }' "$HOME/.oci/config" > "$TMP/oci.config"
   echo "key_file=~/.oci/freelunch_api_key.pem" >> "$TMP/oci.config"
-  bundle_put home/.oci/config "$TMP/oci.config"
-  bundle_put home/.oci/freelunch_api_key.pem "$key"
+  OCI_CI_KEY="$key"
 }
 
 # bundle_env: the project's .env as CI gets it: secrets from 1Password or the keychain as

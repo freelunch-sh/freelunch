@@ -51,20 +51,20 @@ Tick a box when the step is built, tested and committed. Design: [engines.md](en
 
 ## 5. Actions as the runtime
 
-- [ ] Workflow generated per job: provision (plan on PR, apply on merge, destroy on dispatch), CI, CD
-- [ ] One concurrency group per project
-- [ ] Provisioning only from trusted refs, never forks
-- [ ] Per-secret passing is the default; bundle stays optional
+- [x] Workflow generated per job: provision (plan on PR, apply on merge, destroy on dispatch), CI, CD (CD is the existing `freelunch.yml` and wait workflow)
+- [x] One concurrency group per project (provision and deploy share `freelunch`; the capacity wait keeps its own on purpose, so a deploy can run beside a wait)
+- [x] Provisioning only from trusted refs, never forks
+- [x] Per-secret passing is the default; bundle stays optional
 - [ ] `ci init`: guided token steps per provider (where to get it, what scope)
 - [ ] `ci init`: create the state store and store its credentials as secrets
-- [ ] `ci init`: `gh secret set`, repository variables, workflow files
+- [ ] `ci init`: `gh secret set`, repository variables, workflow files (secrets done: `ci init` asks set-now or print, `--set-secrets` / `--print-secrets` skip the question; variables and the workflows are left)
 - [ ] `ci init`: first dry run in Actions so the user sees it work
 - [ ] OIDC (keyless) for AWS
 - [ ] OIDC (keyless) for GCP
 - [ ] OIDC (keyless) for Azure
-- [ ] `doctor` runs in Actions and reports missing or bad secrets
+- [x] `doctor` runs in Actions and reports missing or bad secrets
 - [ ] Docs: Actions is the default path, local is optional
-- [ ] Tests: generated workflows per job
+- [x] Tests: generated workflows per job
 
 ## 6. First `api` providers
 

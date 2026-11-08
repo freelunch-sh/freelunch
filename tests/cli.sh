@@ -3584,6 +3584,79 @@ test_ci_init_hands_each_secret_to_the_step() {
   fails grep -q 'CLOUDFLARE_API_TOKEN' "$w"
 }
 
+# ci init puts the secrets the workflows pass on in the repository with gh when asked to, and
+# only then: --set-secrets does, --print-secrets and a run nobody can answer only print, and an
+# interactive run asks which. The values never reach gh's command line.
+test_ci_init_hands_over_secrets_only_as_asked() {
+  local p="$WORK/ci-hand" out
+  doctor_project "$p"
+  state_store "$p"
+  echo "CLOUDFLARE_API_TOKEN=cf-from-env" >> "$p/.freelunch/.env"
+  # Nobody to answer: it prints what to run and sets nothing.
+  out="$(ci_in "$p" ci init < /dev/null 2>&1)"
+  contains "$out" "CLOUDFLARE_API_TOKEN: Cloudflare API token"
+  contains "$out" "gh secret set CLOUDFLARE_API_TOKEN"
+  fails grep -q '^gh secret set' "$p/fake.log"
+  rm -r "$p/.github"
+  out="$(ci_in "$p" ci init --print-secrets 2>&1)"
+  fails grep -q '^gh secret set' "$p/fake.log"
+  rm -r "$p/.github"
+  # --set-secrets: the value from .env, read from stdin; what has no value here is said, not invented.
+  out="$(ci_in "$p" ci init --set-secrets 2>&1)"
+  contains "$out" "set the secret CLOUDFLARE_API_TOKEN in me/shop"
+  grep -qx 'gh secret set CLOUDFLARE_API_TOKEN --repo me/shop' "$p/fake.log"
+  equals "$(cat "$p/gh/CLOUDFLARE_API_TOKEN")" "cf-from-env"
+  fails grep -q 'cf-from-env' "$p/fake.log"
+  grep -qx 'key_file=~/.oci/freelunch_api_key.pem' "$p/gh/FREELUNCH_OCI_CONFIG"
+  fails grep -q 'user=' "$p/fake.log"
+  contains "$out" "FREELUNCH_STATE_PASSPHRASE"
+  contains "$out" "still to set:"
+  rm -r "$p/.github" "$p/gh"
+  # Asked, and the answer is print or set.
+  out="$(printf 'print\n' | FREELUNCH_INTERACTIVE=1 ci_in "$p" ci init 2>&1)"
+  contains "$out" "Set the"
+  absent "$p/gh/CLOUDFLARE_API_TOKEN"
+  rm -r "$p/.github"
+  printf 'set\n' | FREELUNCH_INTERACTIVE=1 ci_in "$p" ci init >/dev/null 2>&1
+  equals "$(cat "$p/gh/CLOUDFLARE_API_TOKEN")" "cf-from-env"
+}
+
+# One workflow per job: provision plans on a pull request, applies on a merge and destroys only
+# by hand with the repository's name typed; CI checks the config with no secret; provision and
+# the deploy share a concurrency group; and a fork's pull request never provisions.
+test_ci_init_writes_a_workflow_per_job() {
+  local p="$WORK/ci-jobs" prov check
+  doctor_project "$p"
+  state_store "$p"
+  ci_in "$p" ci init --print-secrets >/dev/null 2>&1
+  prov="$p/.github/workflows/freelunch-provision.yml"
+  check="$p/.github/workflows/freelunch-ci.yml"
+  exists "$prov"; exists "$check"; exists "$p/.github/workflows/freelunch.yml"
+  # provision: plan, apply, destroy
+  grep -q "run: \${{ github.event_name == 'pull_request' && 'plan all' || github.event_name == 'push' && 'apply all' || inputs.action == 'doctor' && 'doctor' || format('{0} all', inputs.action) }}" "$prov"
+  grep -q "FREELUNCH_AUTO_APPROVE: \${{ github.event_name != 'pull_request' && inputs.action != 'plan' && inputs.action != 'doctor' && '1' || '' }}" "$prov"
+  grep -q "inputs.confirm != github.event.repository.name" "$prov"
+  grep -qx '    paths: \[".freelunch/\*\*"\]' "$prov"
+  # one run at a time with the deploy
+  grep -qx '  group: freelunch' "$prov"
+  grep -qx '  group: freelunch' "$p/.github/workflows/freelunch.yml"
+  # never from a fork
+  grep -q "github.event.pull_request.head.repo.full_name == github.repository" "$prov"
+  # the secrets reach the freelunch step and no other
+  grep -q 'CLOUDFLARE_API_TOKEN: \${{ secrets.CLOUDFLARE_API_TOKEN }}' "$prov"
+  equals "$(grep -c 'secrets\.' "$prov")" "$(grep -c 'secrets\.' <(sed -n '/uses: freelunch-sh/,$p' "$prov"))"
+  # CI: the check, with no secret at all, and read-only
+  grep -q '          run: check' "$check"
+  fails grep -q 'secrets\.' "$check"
+  grep -qx '  contents: read' "$check"
+  if command -v actionlint >/dev/null; then actionlint "$prov" "$check" "$p/.github/workflows/freelunch.yml" "$p/.github/workflows/freelunch-wait.yml"; fi
+  # --jobs picks which
+  rm -r "$p/.github"
+  ci_in "$p" ci init --print-secrets --jobs=ci >/dev/null 2>&1
+  exists "$check"; absent "$prov"; absent "$p/.github/workflows/freelunch.yml"; absent "$p/.github/workflows/freelunch-wait.yml"
+  if ci_in "$p" ci init --jobs=deploy >/dev/null 2>&1; then echo "an unknown job should fail"; return 1; fi
+}
+
 # ci restore writes the files the secrets carry, and the key that goes with the profile.
 test_ci_restore_writes_files_from_secrets() {
   local q="$WORK/restore-env" out

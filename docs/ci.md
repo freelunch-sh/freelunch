@@ -130,7 +130,18 @@ store too.
 freelunch ci init
 ```
 
-This writes two workflows:
+This writes one workflow per job (`--jobs=provision,ci,cd` picks some):
+
+- **Provision**, `.github/workflows/freelunch-provision.yml`: `freelunch plan all` on a pull
+  request that changes `.freelunch/`, `apply all` when it merges, and from the Actions tab
+  (Run workflow) plan, apply, destroy or doctor. Destroy also needs the repository's name typed
+  in. A pull request from a fork gets no secrets and never provisions: the job is skipped for
+  it. It shares a concurrency group with the deploy, so the two never change the same state at
+  once. `doctor` names the secrets that are missing and checks the ones that are there.
+- **CI**, `.github/workflows/freelunch-ci.yml`: `freelunch check` on every pull request and
+  push, read-only and with no secret. Building the image is the image workflow's job.
+- **CD**, the two below.
+
 
 - `.github/workflows/freelunch-wait.yml` waits for capacity on a schedule. Each run makes an
   attempt in every availability domain with the plan you approved (in a public repository it keeps
@@ -152,6 +163,15 @@ without an edit.
 The pin is a release tag, or a full commit for a version that has no release yet
 (`curl ... install.sh | bash -s <commit>`, or `freelunch upgrade <commit>`); the workflows
 never run a moving branch such as `main`, so a CI run is the code you tested. Commit and push both files.
+
+### Putting the secrets in the repository
+
+`ci init` ends with the secrets the workflows pass on. It asks whether to set them in the
+repository now with `gh secret set`, or to print what to run yourself. `--set-secrets` and
+`--print-secrets` skip the question, and with nobody to answer (a script, no terminal) it only
+prints: it never sets a secret unasked. Each value comes from `.freelunch/.env` or your shell and
+reaches gh on its standard input, not a command line; a secret it has no value for is named so
+you can set it later. The OCI profile, the OCI key and the SSH key are set from their files.
 
 ## 3. The secret
 
