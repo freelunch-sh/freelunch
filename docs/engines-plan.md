@@ -6,13 +6,13 @@ Tick a box when the step is built, tested and committed. Design: [engines.md](en
 
 ## 1. Records in the state store
 
-- [ ] Record format: one JSON object per provider (`engine`, `resources[]` with id, name, kind, marker, created)
-- [ ] `record_pull` / `record_push` through the existing state store paths (S3, http), newer-wins guard
-- [ ] Passphrase encryption of records, same as tofu state
-- [ ] Records work with no local copy (cache only)
-- [ ] Test: clean directory, store only, round trip
-- [ ] Test: older copy is refused
-- [ ] Docs: state section in `docs/architecture.md`
+- [x] Record format: one JSON object per provider (`engine`, `resources[]` with id, name, kind, marker, created)
+- [x] `record_pull` / `record_push` through the existing state store paths (S3, http), newer-wins guard
+- [x] Passphrase encryption of records, same as tofu state
+- [x] Records work with no local copy (cache only)
+- [x] Test: clean directory, store only, round trip
+- [x] Test: older copy is refused
+- [x] Docs: state section in `docs/architecture.md`
 
 ## 2. Engine dispatch (no behaviour change)
 

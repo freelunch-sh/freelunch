@@ -884,6 +884,90 @@ sync_start() {
   done
 }
 
+# --- engine records -------------------------------------------------------------------
+#
+# Engines that don't run tofu (api, cli, guided) have no state file, so what they made is a
+# record per provider: {engine, lineage, serial, resources[{id, name, kind, marker, created}]}.
+# It goes to the same store as the stacks' state, under the name record-<provider>, wrapped as
+# a state whose one output holds the record. So the store's own rules apply as they do to a
+# stack: push refuses a serial that isn't newer or another lineage, and OpenTofu's encryption
+# with FREELUNCH_STATE_PASSPHRASE covers it. The store is the truth; records/<provider>.json
+# in the project is a cache of the last one read or written, and nothing needs it.
+
+record_valid_name() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "record: '$1' is not a provider name"; }
+
+# record_wrap <record file> <serial>: the record as the state the store keeps, at that serial.
+# The store may raise the serial of what it takes, so the record keeps its own.
+record_wrap() {
+  jq -c --argjson wrapper "${2:-0}" '{version: 4, terraform_version: "1.0.0", serial: $wrapper, lineage: .lineage,
+          outputs: {record: {value: tojson, type: "string"}}, resources: []}' "$1"
+}
+
+# record_pull <provider>: the store's record on stdout, nothing when it has none
+record_pull() {
+  local p="$1" key wrapped
+  record_valid_name "$p"
+  [[ $STATE_ON -eq 1 ]] || state_setup
+  key="record-$p"
+  wrapped="$TMP/state/$key.pulled"
+  mkdir -p "$TMP/state"
+  state_pull_copy "$key" "$wrapped"
+  [[ -n "$(state_id "$wrapped")" ]] || return 0
+  jq -er '.outputs.record.value' "$wrapped" | jq -c .
+}
+
+# record_push <provider> <record file> [force]: the record into the store as the next serial.
+# The file is what record_pull gave, changed; a new record has no lineage or serial yet.
+# Returns 2, and pushes nothing, when the store has a newer one or another lineage.
+record_push() {
+  local p="$1" file="$2" force="${3:-}" key wrapped remote there out base lineage serial cache wserial
+  record_valid_name "$p"
+  [[ -f "$file" ]] && jq -e . "$file" >/dev/null 2>&1 || die "record: $file is not a JSON record"
+  [[ $STATE_ON -eq 1 ]] || state_setup
+  key="record-$p"
+  mkdir -p "$TMP/state"
+  remote="$TMP/state/$key.pulled"
+  state_pull_copy "$key" "$remote"
+  there=""; wserial=0
+  if [[ -n "$(state_id "$remote")" ]]; then
+    wserial="$(state_id "$remote" | cut -d' ' -f2)"
+    there="$(jq -er '.outputs.record.value' "$remote" | jq -r '"\(.lineage) \(.serial // 0)"')"
+  fi
+  base="$(jq -r '.serial // 0' "$file")"
+  lineage="$(jq -r '.lineage // empty' "$file")"
+  if [[ -n "$there" ]]; then
+    if [[ -z "$force" ]]; then
+      if [[ -n "$lineage" && "$lineage" != "${there% *}" ]]; then
+        log "$p: the store's record is another one (lineage ${there% *}), so this one isn't copied"; return 2
+      fi
+      if [[ ${there#* } -gt $base ]]; then
+        log "$p: the store has a newer record (serial ${there#* }; this one is from serial $base), from another machine or CI, so this one isn't copied"; return 2
+      fi
+    fi
+    [[ -n "$lineage" ]] || lineage="${there% *}"
+    serial=$(( ${there#* } > base ? ${there#* } + 1 : base + 1 ))
+  else
+    [[ -n "$lineage" ]] || lineage="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    serial=$((base + 1))
+  fi
+  jq --arg l "$lineage" --argjson s "$serial" '.lineage = $l | .serial = $s' "$file" > "$TMP/state/$key.record"
+  record_wrap "$TMP/state/$key.record" $((wserial + 1)) > "$TMP/state/$key.wrapped"
+  wrapped="$TMP/state/$key.push"
+  if ! state_try "$key" "$wrapped" state push -lock-timeout=120s ${force:+-force} "$TMP/state/$key.wrapped"; then
+    out="$(cat "$wrapped" "$wrapped.err" | strip_colors)"
+    case "$out" in
+      *"newer state"*|*"same serial"*|*"unrelated state"*)
+        log "$p: the store has a newer record than this one, so this one isn't copied"; return 2 ;;
+    esac
+    state_error "$out"
+    die "record: couldn't copy the record of $p to the store"
+  fi
+  if [[ "$(state_backend "$(state_config)")" == "git" ]]; then git_store_save "$key" || return 1; fi
+  cache="$(state_root)/records/$p.json"
+  mkdir -p "$(dirname "$cache")" && (umask 077 && cp "$TMP/state/$key.record" "$cache") || true
+  log "$p: copied the record to the store (serial $serial)"
+}
+
 # --- OCI sign-in ----------------------------------------------------------------------
 
 tfvar() { # tfvar <file> <name>: a string variable set on one line of a tfvars file
@@ -6140,14 +6224,31 @@ state_where() {
   fi
 }
 
+# cmd_state_record pull <provider> | push <provider> <file> [--force]: an engine's record in
+# the store (see engine records)
+cmd_state_record() {
+  local sub="${1:-}" p="${2:-}" file="${3:-}" force="" out
+  [[ -n "$(state_config)" ]] || die "state record: this project has no state store (freelunch state init)"
+  [[ -n "$p" ]] || die "state record: pull <provider> or push <provider> <file>"
+  state_setup
+  case "$sub" in
+    pull) out="$(record_pull "$p")"; [[ -z "$out" ]] || printf '%s\n' "$out" ;;
+    push) [[ -n "$file" ]] || die "state record push: give the record's file"
+          [[ "${4:-}" != "--force" ]] || force=force
+          record_push "$p" "$file" "$force" ;;
+    *)    die "state record: pull <provider> or push <provider> <file>" ;;
+  esac
+}
+
 cmd_state() {
   local sub="${1:-status}" force="" s a cfg rc=0 stacks=()
   [[ $# -eq 0 ]] || shift
   [[ -n "$PROJECT" ]] || die "state: run it in a project, where its .freelunch/ folder is (freelunch init makes one)"
   case "$sub" in
     init)             state_init_store "$@"; return ;;
+    record)           cmd_state_record "$@"; return ;;
     status|push|pull) ;;
-    *)                die "state: status, push, pull or init <store> (freelunch help)" ;;
+    *)                die "state: status, push, pull, record or init <store> (freelunch help)" ;;
   esac
   for a in "$@"; do
     case "$a" in

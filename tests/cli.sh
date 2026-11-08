@@ -3085,6 +3085,53 @@ state_store() {
 # with_ip <state file> <ip>: the state as an apply that moved oci-main to <ip> leaves it
 with_ip() { jq --arg ip "$2" '.serial += 1 | .outputs.hosts.value[0].public_ip = $ip' "$1" > "$1.new" && mv "$1.new" "$1"; }
 
+# An engine's record goes to the store as a state of its own, and works with nothing local
+# but the store's settings: a clean directory reads it, changes it, and its cache is optional.
+test_records_round_trip_through_the_store() {
+  local p="$WORK/rec" q="$WORK/rec-clean" out
+  mkdir -p "$p/.freelunch"
+  state_store "$p"
+  printf '{"engine":"api","resources":[{"id":"app-1","name":"freelunch","kind":"app","marker":"freelunch","created":"2026-11-08"}]}\n' > "$p/rec.json"
+  in_dir "$p" "$CLI" state record push deno "$p/rec.json" 2>&1 | grep -q "copied the record to the store (serial 1)"
+  exists "$p-store/record-deno.tfstate"
+  if grep -q OpenTofu <<< "$(CHECKPOINT_DISABLE=1 "$REAL_TF" version)"; then fails grep -q 'app-1' "$p-store/record-deno.tfstate"; fi
+  # A clean directory: the settings and the passphrase, no records folder, no stacks.
+  mkdir -p "$q/.freelunch"
+  cp "$p/.freelunch/state.local.tfbackend" "$p/.freelunch/.env" "$q/.freelunch/"
+  out="$(in_dir "$q" "$CLI" state record pull deno 2>/dev/null)"
+  equals "$(jq -r '.resources[0].id' <<< "$out")" app-1
+  equals "$(jq -r '.serial' <<< "$out")" 1
+  # Change it there, push; the first directory sees the new one without any cache.
+  jq '.resources += [{"id":"dom-1","name":"d","kind":"domain","marker":"freelunch","created":"2026-11-08"}]' <<< "$out" > "$q/rec.json"
+  in_dir "$q" "$CLI" state record push deno "$q/rec.json" 2>&1 | grep -q "(serial 2)"
+  rm -rf "$p/.freelunch/records"
+  equals "$(in_dir "$p" "$CLI" state record pull deno 2>/dev/null | jq -r '.resources | length')" 2
+  # A provider with no record yet pulls nothing.
+  equals "$(in_dir "$p" "$CLI" state record pull zeabur 2>/dev/null)" ""
+}
+
+test_records_older_copy_is_refused() {
+  local p="$WORK/rec-old" out base
+  mkdir -p "$p/.freelunch"
+  state_store "$p"
+  printf '{"engine":"api","resources":[]}\n' > "$p/rec.json"
+  in_dir "$p" "$CLI" state record push deno "$p/rec.json" >/dev/null 2>&1
+  base="$(in_dir "$p" "$CLI" state record pull deno 2>/dev/null)"
+  # Two machines start from serial 1; the first one gets in, the second is refused.
+  jq '.resources += [{"id":"a"}]' <<< "$base" > "$p/a.json"
+  jq '.resources += [{"id":"b"}]' <<< "$base" > "$p/b.json"
+  in_dir "$p" "$CLI" state record push deno "$p/a.json" >/dev/null 2>&1
+  if out="$(in_dir "$p" "$CLI" state record push deno "$p/b.json" 2>&1)"; then echo "push should have been refused"; return 1; fi
+  contains "$out" "the store has a newer record"
+  equals "$(in_dir "$p" "$CLI" state record pull deno 2>/dev/null | jq -r '.resources[0].id')" a
+  # Another lineage is refused too; --force takes it.
+  jq '.lineage = "somebody-else" | .serial = 9' <<< "$base" > "$p/c.json"
+  if out="$(in_dir "$p" "$CLI" state record push deno "$p/c.json" 2>&1)"; then echo "push should have been refused"; return 1; fi
+  contains "$out" "another one"
+  in_dir "$p" "$CLI" state record push deno "$p/c.json" --force >/dev/null 2>&1
+  equals "$(in_dir "$p" "$CLI" state record pull deno 2>/dev/null | jq -r '.lineage')" "$(jq -r .lineage "$p/c.json")"
+}
+
 # With a state store, a command starts from the store's copy of each stack's state when it
 # is newer, and one that applies copies it back, so another machine sees what one did. Two
 # that changed the same stack at once are stopped, not merged.
