@@ -9,7 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | None. Automate through the provider's API or CLI. |
-| **Last verified** | 2026-10-18 |
+| **Last verified** | 2026-11-08 |
 
 ## What's free
 
@@ -19,7 +19,7 @@ Hobby plan: 20 projects, 100k serverless invocations/month, 3 GB-hours compute, 
 
 ## Notes
 
-Figures come from third-party trackers (May 2026). Verify on the pricing page.
+Figures come from third-party trackers (May 2026). Verify on the pricing page. No public API reference for creating services was found (2026-11-08), so it cannot be automated yet.
 
 ## Plan
 

@@ -9,13 +9,17 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | None. Automate through the provider's API or CLI. |
-| **Last verified** | 2026-10-18 |
+| **Last verified** | 2026-11-08 |
 
 ## What's free
 
 4 containers, 100 container-hours/month, 512 MB / 0.25 vCPU; sleeps after 15 min idle
 
 > Free tiers change without notice. Check <https://snapdeploy.dev/pricing> before relying on this.
+
+## Notes
+
+Has an API (snapdeploy.dev/api, X-API-Key or sd_pat_ tokens, POST /api/containers/deploy from Docker Hub/ghcr/quay/ECR images), but its own docs say tokens cannot delete containers, so freelunch could not destroy what it creates. Two docs disagree on the deploy endpoint.
 
 ## Plan
 

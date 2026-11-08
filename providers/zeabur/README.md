@@ -19,7 +19,7 @@ $0 plan with auto-sleep
 
 ## Notes
 
-The old shared free cluster is not generally available; the free plan is for deploying to your own server.
+The old shared free cluster is not generally available; the free plan is for deploying to your own server. Public GraphQL API at api.zeabur.com/graphql (bearer API key) with a ZIP upload endpoint and a DeployTemplate mutation; the schema is only browsable in Apollo Explorer, so it is not yet pinned for freelunch.
 
 ## Plan
 

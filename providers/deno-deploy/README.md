@@ -19,7 +19,7 @@
 
 ## Notes
 
-Free-plan egress fell from 100 GB to 20 GiB in April 2026 and CPU time was cut again later; sources disagree on the CPU figure. Apps pause at the cap instead of being billed. Terraform provider has had no release since 2023.
+Free-plan egress fell from 100 GB to 20 GiB in April 2026 and CPU time was cut again later; sources disagree on the CPU figure. Apps pause at the cap instead of being billed. The Terraform provider has had no release since 2023. A REST API exists (api.deno.com/v2: apps, revisions, domains, KV database instances; bearer token DENO_DEPLOY_TOKEN) but it deploys source assets, not container images, so it does not fit the image-based platform contract yet.
 
 ## Plan
 
