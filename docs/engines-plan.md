@@ -212,11 +212,28 @@ it; a **registry** (`engine: registry`, or any provider with a `registry:` host)
 - [ ] HCP Terraform, Spacelift, Scalr: **not built on purpose.** They run the plans themselves, on their runners, which is the opposite of freelunch running them where you are with your credentials and its capacity wait; and as a state backend they would replace the store freelunch already offers (git, OCI, R2, B2, GitLab). A project that wants one can use its own backend config in a stack
 - [ ] Live-account run for each pipeline
 
+## 12. Providers with no Terraform provider, or a stale one (was phase 6)
+
+The `api` and `cli` engines exist; what a database from them lacked was a way into the database
+contract. A `cli.yaml` with a `database:` block now writes it into the provider's record
+([engines.md](engines.md#the-cli-engine)), and `deploy` and `check` read it.
+
+- [x] Contract outputs from the `cli` engine: `database:` (engine, url, token, connection) written to the record's outputs; removed on destroy; the token made once and never printed; needs the state store
+- [x] Records are nodes: `freelunch check` asks the databases in the records
+- [x] Turso (`cli`): `providers/turso/cli.yaml`, fake `turso` in the tests, README (CLI flags and `TURSO_API_TOKEN` from its docs, not run)
+- [x] Back4App, Leapcell, SnapDeploy (`guided`) and Deno Deploy (`api`) were done in sections 6 and 7
+- [ ] The same `database:` block for the `api` engine (no provider needs it yet: the databases left have no API I could check)
+- [ ] Services (secrets, observability, messaging) from a record: `outputs.services` and `service_credentials` in `deploy/`, for UptimeRobot and StatusCake (observability), Phase (secrets). Their APIs take form-encoded bodies, which the `api` engine does not send yet
+- [ ] Storage from a record (`outputs.buckets`, `bucket_keys`): Filebase
+- [ ] Databases whose tool or API is not checked yet: Tinybird, Nile, Prisma Postgres, InfluxDB Cloud, CrateDB Cloud
+- [ ] GPU providers (Modal, Vast.ai, Paperspace): no contract for them yet (a GPU is a host that is rented by the hour); out of scope until there is one
+- [ ] Live-account run for each
+
 ## Later phases (from the rollout)
 
 - [ ] Phase 3: networking and DNS glue: now section 9 above (built except the 9d providers still unchecked there, and the live runs)
 - [ ] Phase 4: secrets, observability, messaging: now section 10 above (contract and four providers built)
 - [ ] Phase 5: IaC state, CI, registries: now section 11 above (CI systems and Docker Hub built; the IaC platforms left out on purpose)
-- [ ] Phase 6: no-provider and stale-provider cases (uses the `api` and `cli` engines)
+- [ ] Phase 6: no-provider and stale-provider cases: now section 12 above (the cli engine's database outputs and Turso built; the rest waits on checkable APIs or a contract)
 - [ ] SingleStore: unblocked only if a provider can create a free workspace
 - [ ] Live-account run for each `fake-api` provider

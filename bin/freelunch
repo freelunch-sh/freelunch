@@ -4282,6 +4282,15 @@ cmd_api() {
 #   deploy: [turso, db, shell, "{name}", ...]      # optional: after create or on a repeat
 #   delete: [turso, db, destroy, "{name}", --yes]
 #   gone: "not found"              # optional: text in a failed delete that means it was gone already
+#   database:                      # optional: the provider's resources are databases (database contract)
+#     engine: libsql               # what deploy tells the app it is
+#     url: [turso, db, show, "{name}", --url]            # prints the address
+#     token: [turso, db, tokens, create, "{name}"]       # prints a token (optional)
+#     connection: "{url}?authToken={token}"              # the connection string (default: the address)
+#
+# With database:, deploy <app> also asks for the address and token, and keeps them in the
+# provider's record in the state store (outputs.databases, outputs.database_credentials), where
+# deploy reads them: an app says database = "<provider>-<app>".
 #
 # {name} is <name_prefix>-<app>; {prefix}, {app} and each setting can be used too. A command line
 # tool has no label to mark what freelunch made, so the provider's record in the state store does:
@@ -4313,7 +4322,7 @@ cli_load() {
 cli_words() {
   local p="$1" verb="$2" vars="${3:-$TMP/api/$1.vars}" out
   out="$(jq -r --arg v "$verb" --slurpfile x "$vars" '
-    (if $v == "list" then .list.command else .[$v] end) as $words
+    (if $v == "list" then .list.command else getpath($v | split(".")) end) as $words
     | ($x[0] + ($x[0].settings // {})) as $vars
     | $words[] | tostring
     | reduce ($vars | to_entries[] | select(.value | type | . == "string" or . == "number")) as $e (.; gsub("\\{" + $e.key + "\\}"; $e.value | tostring))' "$TMP/api/$p.json")"
@@ -4364,6 +4373,61 @@ cli_recorded() {
   [[ -n "$rec" ]] && jq -e --arg n "$2" 'any(.resources[]?; .name == $n)' <<< "$rec" >/dev/null
 }
 
+# record_outputs <provider> set|remove <name> [database json] [credentials json]: a database the
+# engine made is in its record's outputs, in the shape of the database contract (databases and
+# database_credentials), which deploy reads like a stack's output. The record is encrypted like state.
+record_outputs() {
+  local p="$1" op="$2" name="$3" db="${4:-null}" cred="${5:-null}" cur rc=0
+  [[ -n "$(state_config)" ]] || return 0
+  cur="$(record_pull "$p")"
+  [[ -n "$cur" ]] || cur='{"engine":"cli","resources":[]}'
+  case "$op" in
+    set)    jq -c --arg n "$name" --argjson d "$db" --argjson c "$cred" --arg k "$p-$name" \
+              '.outputs.databases = (((.outputs.databases // []) | map(select(.name != $n))) + [$d]) | .outputs.database_credentials = ((.outputs.database_credentials // {}) + {($k): $c})' <<< "$cur" > "$TMP/api/$p.record" ;;
+    remove) jq -c --arg n "$name" --arg k "$p-$name" \
+              'if .outputs then .outputs.databases = ((.outputs.databases // []) | map(select(.name != $n))) | .outputs.database_credentials = ((.outputs.database_credentials // {}) | del(.[$k])) else . end' <<< "$cur" > "$TMP/api/$p.record" ;;
+  esac
+  record_push "$p" "$TMP/api/$p.record" || rc=$?
+  [[ $rc -ne 2 ]] || die "cli: the store's record of $p changed while this ran (another machine or CI): run it again"
+  return $rc
+}
+
+# cli_capture <provider> <verb>: run the verb's command and print its output (not its errors),
+# trimmed; the errors are in $TMP/api/<provider>.cli.err
+cli_capture() {
+  local p="$1" words=() w
+  while IFS= read -r w; do words+=("$w"); done < <(cli_words "$p" "$2")
+  "${words[@]}" 2> "$TMP/api/$p.cli.err" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$' | tail -1
+}
+
+# cli_database_outputs <provider> <app> <name>: for a provider whose resources are databases, ask
+# the tool for the address and a token, and keep them in the record as the database contract. The
+# token is not printed or logged; a database already in the record keeps its token.
+cli_database_outputs() {
+  local p="$1" app="$2" name="$3" url token conn host port eng rec
+  api_has "$p" .database.url || return 0
+  [[ -n "$(state_config)" ]] || die "cli: $p makes databases, and the connection string is kept in the provider's record in the state store, which this project doesn't have yet (freelunch state init)"
+  rec="$(record_pull "$p")"
+  if [[ -n "$rec" ]] && jq -e --arg n "$app" 'any(.outputs.databases[]?; .name == $n)' <<< "$rec" >/dev/null; then return 0; fi
+  url="$(cli_capture "$p" database.url)" || true
+  [[ -n "$url" ]] || die "cli: $p gave no address for $name: $(head -c 300 "$TMP/api/$p.cli.err")"
+  token=""
+  if api_has "$p" .database.token; then
+    token="$(cli_capture "$p" database.token)" || true
+    [[ -n "$token" ]] || die "cli: $p gave no token for $name: $(head -c 300 "$TMP/api/$p.cli.err")"
+  fi
+  conn="$(api_cfg "$p" .database.connection)"; [[ -n "$conn" ]] || conn="{url}"
+  conn="${conn//\{url\}/$url}"; conn="${conn//\{token\}/$token}"
+  host="${url#*://}"; host="${host%%[/?:]*}"
+  port="$(api_cfg "$p" .database.port)"; [[ -n "$port" ]] || port=443
+  eng="$(api_cfg "$p" .database.engine)"
+  record_outputs "$p" set "$app" \
+    "$(jq -nc --arg p "$p" --arg n "$app" --arg e "${eng:-unknown}" --arg h "$host" --argjson port "$port" --arg d "$name" --arg b "$(api_cfg "$p" .database.behavior)" \
+      '{provider: $p, name: $n, engine: $e, host: $h, port: $port, database: $d, behavior: (if $b == "" then null else $b end)}')" \
+    "$(jq -nc --arg u "$conn" --arg t "$token" '{url: $u} + (if $t == "" then {} else {password: $t} end)')"
+  log "$p: $name: its connection string is in the record: an app says database = \"$p-$app\""
+}
+
 # cli_deploy <provider> <app> <adopt 0|1> <dry run 0|1>: make <prefix>-<app> if it isn't there; run
 # the deploy command when there is one; leave alone what freelunch didn't make
 cli_deploy() {
@@ -4372,7 +4436,7 @@ cli_deploy() {
   name="$(jq -r .name "$TMP/api/$p.vars")"
   if [[ "$dry" == 1 ]]; then
     log "$p: $name: would run, nothing sent:"
-    for w in create deploy; do
+    for w in create deploy database.url database.token; do
       api_has "$p" ".$w" || continue
       echo "  $w: $(cli_words "$p" "$w" | paste -sd' ' -)"
     done
@@ -4402,6 +4466,7 @@ cli_deploy() {
     cli_run "$p" deploy || die "cli: the deploy of $name at $p failed: $(head -c 300 "$TMP/api/$p.cli.out")"
     log "$p: $name: deployed"
   fi
+  cli_database_outputs "$p" "$app" "$name"
 }
 
 # cli_destroy <provider> <all with the prefix 0|1>: delete what the provider's record names
@@ -4431,6 +4496,7 @@ cli_destroy() {
       log "$p: deleted $name"
     fi
     api_record "$p" remove "$name"
+    api_has "$p" .database.url && record_outputs "$p" remove "${name#"$(jq -r .prefix "$TMP/api/$p.vars")"-}"
     done_any=1
   done <<< "$names"
   [[ $done_any -eq 1 ]] || log "$p: nothing of freelunch's to delete"
@@ -7324,6 +7390,24 @@ probe_stack_nodes() {
   done
 }
 
+# probe_record_nodes: databases that engines without a state file (api, cli) made, from the
+# outputs of their records in the state store
+probe_record_nodes() {
+  local p rec row host port
+  [[ -n "$(state_config)" && $STATE_ON -eq 1 ]] || return 0
+  for p in $(cd "$PROVIDERS_DIR" && ls -d -- */ 2>/dev/null | sed 's|/$||' | grep -v '^_'); do
+    [[ -d "$PROJECT/$p" ]] || continue
+    [[ -f "$PROVIDERS_DIR/$p/api.yaml" || -f "$PROVIDERS_DIR/$p/cli.yaml" ]] || continue
+    rec="$(record_pull "$p")"
+    [[ -n "$rec" ]] && jq -e '.outputs.databases' <<< "$rec" >/dev/null 2>&1 || continue
+    while IFS=$'\x1f' read -r row host port; do
+      [[ -n "$row" ]] || continue
+      if [[ -n "$host" && -n "$port" ]]; then probe_tcp "$row" database "$host" "$port"
+      else probe_row "$row" database true null null "it gave no address to ask"; fi
+    done < <(jq -r '.outputs.databases[]? | ["\(.provider)-\(.name)", (.host // ""), (.port // "" | tostring)] | join("\u001f")' <<< "$rec")
+  done
+}
+
 # probe_hosts_and_apps: hosts (over SSH), the apps on them, and the platforms, from the deploy plan
 # shellcheck disable=SC2016 # the remote script is expanded by the remote shell
 probe_hosts_and_apps() {
@@ -7410,7 +7494,7 @@ cmd_probe() {
   done
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   [[ -n "$PROJECT" ]] || die "check: run it in a project, where its .freelunch/ folder is"
-  rows="$( { probe_hosts_and_apps; probe_stack_nodes; probe_tunnels; probe_dns; } | jq -sc '.')"
+  rows="$( { probe_hosts_and_apps; probe_stack_nodes; probe_record_nodes; probe_tunnels; probe_dns; } | jq -sc '.')"
   if [[ -n "$node" ]]; then
     jq -e --arg n "$node" 'any(.[]; .node == $n)' <<< "$rows" >/dev/null \
       || die "check: no node named $node. Nodes: $(jq -r '[.[].node] | join(", ")' <<< "$rows")"
@@ -7530,7 +7614,7 @@ cmd_journey() {
   done
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   [[ -n "$PROJECT" ]] || die "journey: run it in a project, where its .freelunch/ folder is"
-  rows="$( { probe_hosts_and_apps; probe_stack_nodes; probe_tunnels; probe_dns; } | jq -sc '.')"
+  rows="$( { probe_hosts_and_apps; probe_stack_nodes; probe_record_nodes; probe_tunnels; probe_dns; } | jq -sc '.')"
   [[ -f "$TMP/graph.json" ]] || die "journey: there are no apps to follow (apps.tfvars)"
   JOURNEY_ROUTES='{}'
   if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then JOURNEY_ROUTES="$(jq -c '.outputs.routes.value // {}' "$(config_dir cloudflare)/terraform.tfstate")"; fi

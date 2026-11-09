@@ -3450,6 +3450,25 @@ esac
 EOF
 chmod +x "$WORK/cli-bin/fakecli"
 
+
+# A made-up turso: turso auth whoami | db list | db create <n> | db show <n> --url | db tokens create <n> |
+# db destroy <n> --yes. Its databases are the lines of $FAKE_TURSO_DIR/dbs, and it logs to $FAKE_TURSO_DIR/log.
+# Every token it makes is different (eyJ-mock-token-<n>); whoami fails without TURSO_API_TOKEN.
+cat > "$WORK/cli-bin/turso" <<'EOF'
+#!/usr/bin/env bash
+d="${FAKE_TURSO_DIR:?}"; mkdir -p "$d"; touch "$d/dbs"
+echo "turso $*" >> "$d/log"
+case "$1 $2" in
+  "auth whoami") [[ -n "${TURSO_API_TOKEN:-}" ]] || { echo "not signed in" >&2; exit 1; }; echo me ;;
+  "db list") echo "NAME GROUP URL"; while read -r n; do [[ -z "$n" ]] || echo "$n default libsql://$n-org.turso.io"; done < "$d/dbs" ;;
+  "db create") grep -qx "$3" "$d/dbs" && { echo "database $3 already exists" >&2; exit 1; }; echo "$3" >> "$d/dbs"; echo "Created database $3" ;;
+  "db show") grep -qx "$3" "$d/dbs" || { echo "database $3 not found" >&2; exit 1; }; echo "libsql://$3-org.turso.io" ;;
+  "db tokens") n=$(( $(cat "$d/tokens" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$d/tokens"; echo "eyJ-mock-token-$n" ;;
+  "db destroy") grep -qx "$3" "$d/dbs" || { echo "database $3 not found" >&2; exit 1; }; grep -vx "$3" "$d/dbs" > "$d/dbs.new"; mv "$d/dbs.new" "$d/dbs" ;;
+esac
+EOF
+chmod +x "$WORK/cli-bin/turso"
+
 # engine_checkout <dir> <name>: a copy of the CLI whose providers folder has that fixture's
 # provider files (its yaml and scripts, not its scenario)
 engine_checkout() {
@@ -4151,6 +4170,59 @@ test_image_workflow_pushes_to_the_registry_asked_for() {
   rm -r "$p/.github"
   if out="$(cd "$p" && "$CLI" init --image-workflow --registry neon 2>&1)"; then echo "init should have failed"; return 1; fi
   contains "$out" "neon has no container registry freelunch can push to (--registry takes: codeberg docker-hub"
+}
+
+# --- a database from the cli engine (Turso) ---------------------------------------------------
+
+turso_in() { # turso_in <dir> <args...>: freelunch with the fake turso, its token and its databases in <dir>/turso
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/cli-bin:$WORK/bin:$PATH" FAKE_TURSO_DIR="$dir/turso" TURSO_API_TOKEN="${TURSO_API_TOKEN-tursotok}" \
+    FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" FREELUNCH_SSH="$WORK/bin/ssh" "$CLI" "$@")
+}
+
+# A database the cli engine makes is in the database contract through the provider's record: deploy
+# gives the app its connection string, check asks its address, the token is made once and never
+# printed, and destroy takes it out of the record.
+test_cli_engine_makes_a_database_for_deploy() {
+  local p="$WORK/turso" out before url="libsql://freelunch-main-org.turso.io?authToken=eyJ-mock-token-1"
+  new_project "$p"
+  state_store "$p"
+  mkdir -p "$p/.freelunch/turso"
+  sed -i.bak 's|env_file = "api.env" }|env_file = "api.env", database = "turso-main" }|' "$p/.freelunch/apps.tfvars"
+  contains "$(turso_in "$p" cli turso check 2>&1)" "turso signs in"
+  # a dry run says what it would ask, and asks nothing
+  before="$(wc -l < "$p/turso/log")"
+  out="$(turso_in "$p" cli turso deploy main --dry-run 2>&1)"
+  contains "$out" "create: turso db create freelunch-main"
+  contains "$out" "database.token: turso db tokens create freelunch-main"
+  equals "$(wc -l < "$p/turso/log")" "$before"
+  out="$(turso_in "$p" cli turso deploy main 2>&1)"
+  contains "$out" "turso: freelunch-main: made"
+  contains "$out" 'an app says database = "turso-main"'
+  lacks "$out" "eyJ-mock-token"
+  # the app gets it
+  GHCR_TOKEN=x turso_in "$p" deploy >/dev/null 2>&1
+  contains "$(cat "$p/host/apps/api/.env")" "DATABASE_URL=$url"
+  lacks "$(cat "$p/fake.log")" "eyJ-mock-token"
+  # a repeat makes no second token, and the node is asked
+  turso_in "$p" cli turso deploy main >/dev/null 2>&1
+  equals "$(grep -c 'tokens create' "$p/turso/log")" "1"
+  out="$(turso_in "$p" check --json 2>/dev/null)"
+  equals "$(jq -r '.[] | select(.node == "turso-main") | "\(.type) \(.healthy)"' <<< "$out")" "database true"
+  contains "$(cat "$p/fake.log")" "nc -z -w 5 freelunch-main-org.turso.io 443"
+  # destroy deletes it and takes it out of the record: the app can't name it any more
+  turso_in "$p" cli turso destroy >/dev/null 2>&1
+  fails grep -qx "freelunch-main" "$p/turso/dbs"
+  if out="$(GHCR_TOKEN=x turso_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "api (database turso-main)"
+}
+
+# With no state store there is nowhere to keep the connection string, so nothing is made
+test_cli_engine_database_needs_a_state_store() {
+  local p="$WORK/turso-nostore" out
+  new_project "$p"
+  if out="$(turso_in "$p" cli turso deploy main 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "the connection string is kept in the provider's record in the state store"
 }
 
 # A provider's engine is what its provider.yaml says, or what its iac implies.

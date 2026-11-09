@@ -63,6 +63,15 @@ exists and is not in the record is never changed or deleted (`--adopt` says it i
 with no state store nothing that exists is touched (`destroy --all-with-prefix` is the explicit
 way). `doctor` checks the tool is installed, its variable is set and `check` succeeds.
 
+A provider whose resources are **databases** adds a `database:` block (`engine`, `url`, `token`,
+`connection`): after `deploy <name>` makes the database, freelunch runs `url` and `token` and keeps the
+result in the provider's record as `outputs.databases` and `outputs.database_credentials`, which is the
+[database contract](architecture.md#database-contract). An app then says `database = "<provider>-<name>"`
+and `deploy` reads it like a stack's output, `freelunch check` asks its address, and `destroy` takes it
+out of the record. The token is made once with the database and never printed. This needs the state store,
+which is where the record, and so the connection string, lives. [Turso](../providers/turso/README.md) is
+the first.
+
 ### The `guided` engine
 
 `providers/<name>/guided.yaml` holds the steps to do by hand, and, when the provider has any way to
