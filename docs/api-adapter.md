@@ -102,3 +102,27 @@ stops with the provider's status, and destroy deletes only ours.
 1. Driver and generic test with a throwaway fixture provider.
 2. Deno Deploy (REST apps; source upload as the first `custom` function).
 3. Phase 6 providers.
+
+## Form bodies, and providers that make keys, monitors or databases
+
+`body_format: form` (top level) sends the body's keys as `application/x-www-form-urlencoded` fields
+instead of JSON: a scalar is `key=value`, an array is repeated as `key[]=value`, a null is left out.
+The body template is still the jq object it always was. StatusCake needs it.
+
+`outputs:` is for a provider whose resources are not apps but things an app uses: a heartbeat
+monitor, a key, a database. After the create call it turns the answer into the entry and the
+credentials of a contract and keeps them in the provider's record, where `deploy` and `freelunch
+check` read them ([engines.md](engines.md#the-cli-engine)):
+
+```yaml
+outputs:
+  kind: service                 # database, service or bucket
+  fetch: GET /heartbeat/{id}    # optional: one more call, when the create answer holds only the id
+  entry: '{ kind: "observability", host: "push.example.com", port: 443 }'
+  credentials: '{ env: { PUSH_URL: $item.data.url } }'
+```
+
+The programs see `$item` (the `fetch` answer, or the create answer), `$created` (the create answer),
+`$app`, `$name` and `$prefix`. A provider with `outputs:` takes `deploy <name>` with no `--image`, and
+the engine does not print the address of what it made, since it can hold a key. Used by
+[StatusCake](../providers/statuscake/README.md) and [UptimeRobot](../providers/uptimerobot/README.md).

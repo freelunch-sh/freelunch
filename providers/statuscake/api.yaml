@@ -1,0 +1,32 @@
+# StatusCake push (heartbeat) monitoring, read from its API reference (developers.statuscake.com/api,
+# v1.2.0) and not yet run against a live account (verified: fake-api). Its requests are form-encoded,
+# and the answer to creating a monitor holds only its id, so outputs.fetch reads the push URL.
+#
+# A monitor is made with name <name_prefix>-<app> and the tag <name_prefix>, which marks it as ours.
+body_format: form
+base_url: https://api.statuscake.com/v1
+auth:
+  env: STATUSCAKE_API_TOKEN
+  header: "Authorization: Bearer {token}"
+check:
+  request: GET /heartbeat?limit=1
+  ok: [200]
+list:
+  request: GET /heartbeat?limit=100
+  items: ".data[]"
+  fields: { id: ".id", name: ".name", marker: ".tags[0]" }
+create:
+  request: POST /heartbeat
+  body: |
+    { name: $name, period: 3600, tags: [$prefix] }
+  id: ".data.new_id"
+delete:
+  request: DELETE /heartbeat/{id}
+  ok: [204, 404]
+outputs:
+  kind: service
+  fetch: GET /heartbeat/{id}
+  entry: |
+    { kind: "observability", host: "push.statuscake.com", port: 443 }
+  credentials: |
+    { env: { STATUSCAKE_PUSH_URL: $item.data.url } }

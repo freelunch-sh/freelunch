@@ -224,7 +224,9 @@ contract. A `cli.yaml` with a `database:` block now writes it into the provider'
 - [x] Back4App, Leapcell, SnapDeploy (`guided`) and Deno Deploy (`api`) were done in sections 6 and 7
 - [x] The same for the `api` engine: `outputs:` (database, service or bucket) in `api.yaml`, tested with a made-up provider
 - [x] Services and buckets from a record: `deploy/` and the CLI read `outputs.services`/`service_credentials` and `outputs.buckets`/`bucket_keys`, `check` and the deploy gate ask them
-- [ ] UptimeRobot and StatusCake (observability), Phase (secrets): their APIs take form-encoded bodies, which the `api` engine does not send yet (a `body_format: form` is the next step), and their calls are not checked
+- [x] `body_format: form` and `outputs.fetch` in the `api` engine
+- [x] StatusCake (form bodies, push URL by a second read) and UptimeRobot (v3, JSON): calls read from their docs/OpenAPI, fixtures and tests, not run live; their free-plan allowance for heartbeats is not in their API docs
+- [ ] Phase (secrets): its CLI is not checked yet
 - [ ] Filebase (storage): its keys come from its console, not an API, so nothing for an engine to make
 - [ ] Databases whose tool or API is not checked yet: Tinybird, Nile, Prisma Postgres, InfluxDB Cloud, CrateDB Cloud
 - [ ] GPU providers (Modal, Vast.ai, Paperspace): no contract for them yet (a GPU is a host that is rented by the hour); out of scope until there is one

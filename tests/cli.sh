@@ -4304,6 +4304,51 @@ test_deploy_reads_services_and_buckets_from_engine_records() {
   contains "$out" "api needs uptimerobot-hb: nothing answers at heartbeat.uptimerobot.com:443"
 }
 
+# StatusCake: form-encoded requests, a second call for the push URL, the tag as the marker
+test_api_engine_sends_forms_and_reads_the_push_url() {
+  local dir="$WORK/api-statuscake" p="$WORK/api-statuscake-proj" out rec
+  api_checkout "$dir" statuscake
+  mkdir -p "$p/.freelunch"; state_store "$p"
+  contains "$(api_run "$dir" statuscake check check 2>&1)" "the token works"
+  out="$(API_CWD="$p" api_run "$dir" statuscake create deploy hb 2>&1)" || { echo "$out"; return 1; }
+  contains "$out" "freelunch-hb: made"
+  lacks "$out" "pk-mock-key"
+  # the body is a form, an array is key[]=, and the token is in a header, not in the arguments
+  equals "$(grep -v '^$' "$dir/fake/bodies")" "name=freelunch-hb&period=3600&tags%5B%5D=freelunch"
+  contains "$(cat "$dir/fake/headers")" "Content-Type: application/x-www-form-urlencoded"
+  lacks "$(cat "$dir/fake/argv")" "sc-token-9876"
+  contains "$(cat "$dir/fake/log")" "GET /v1/heartbeat/7"
+  rec="$(cd "$p" && "$dir/bin/freelunch" state record pull statuscake)"
+  equals "$(jq -c '.outputs.service_credentials["statuscake-hb"].env' <<< "$rec")" '{"STATUSCAKE_PUSH_URL":"https://push.statuscake.com/?PK=pk-mock-key&TestID=7&time=0"}'
+  equals "$(jq -c '.outputs.services[0] | [.provider, .name, .kind, .host, .port]' <<< "$rec")" '["statuscake","hb","observability","push.statuscake.com",443]'
+  # destroy deletes ours (tag = prefix) and leaves a monitor with another tag
+  out="$(API_CWD="$p" api_run "$dir" statuscake destroy destroy 2>&1)"
+  contains "$out" "deleted freelunch-hb"
+  contains "$out" "left alone"
+  contains "$(cat "$dir/fake/log")" "DELETE /v1/heartbeat/7"
+  lacks "$(cat "$dir/fake/log")" "DELETE /v1/heartbeat/8"
+}
+
+# UptimeRobot: JSON with a bearer token; the heartbeat URL is in the create answer and never printed
+test_api_engine_keeps_the_heartbeat_url_of_a_monitor() {
+  local dir="$WORK/api-uptimerobot" p="$WORK/api-uptimerobot-proj" out rec
+  api_checkout "$dir" uptimerobot
+  mkdir -p "$p/.freelunch"; state_store "$p"
+  contains "$(api_run "$dir" uptimerobot check check 2>&1)" "the token works"
+  out="$(API_CWD="$p" api_run "$dir" uptimerobot create deploy hb 2>&1)" || { echo "$out"; return 1; }
+  contains "$out" "freelunch-hb: made"
+  lacks "$out" "m4711-mock-key"
+  equals "$(jq -c . "$dir/fake/bodies")" '{"type":"HEARTBEAT","friendlyName":"freelunch-hb","interval":3600,"gracePeriod":300,"tagNames":["freelunch"]}'
+  contains "$(cat "$dir/fake/headers")" "Content-Type: application/json"
+  lacks "$(cat "$dir/fake/argv")" "ur-key-5432"
+  rec="$(cd "$p" && "$dir/bin/freelunch" state record pull uptimerobot)"
+  equals "$(jq -c '.outputs.service_credentials["uptimerobot-hb"].env' <<< "$rec")" '{"UPTIMEROBOT_HEARTBEAT_URL":"https://heartbeat.uptimerobot.com/m4711-mock-key"}'
+  out="$(API_CWD="$p" api_run "$dir" uptimerobot destroy destroy 2>&1)"
+  contains "$out" "deleted freelunch-hb"
+  contains "$(cat "$dir/fake/log")" "DELETE /v3/monitors/4711"
+  lacks "$(cat "$dir/fake/log")" "DELETE /v3/monitors/4712"
+}
+
 # A provider's engine is what its provider.yaml says, or what its iac implies.
 test_engine_of_defaults_from_iac() {
   equals "$("$CLI" engine render)" tofu

@@ -3958,10 +3958,17 @@ api_call() {
   header="$(api_cfg "$p" .auth.header)"
   header="${header//\{token\}/$token}"
   cfg="$TMP/api/$p.curl"
+  local ctype="application/json"
+  # body_format: form sends the body's keys as application/x-www-form-urlencoded fields; an array
+  # is repeated as key[]=...
+  if [[ -n "$body" && "$(api_cfg "$p" .body_format)" == form ]]; then
+    jq -r 'to_entries[] | select(.value != null) | .key as $k | (.value | if type == "array" then .[] | [($k + "[]"), tostring] else [$k, tostring] end) | map(@uri) | join("=")' "$body" | paste -sd'&' - | tr -d '\n' > "$body.form"
+    body="$body.form"; ctype="application/x-www-form-urlencoded"
+  fi
   (umask 077; {
     printf 'header = "%s"\n' "$(printf '%s' "$header" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
     printf 'header = "Accept: application/json"\n'
-    [[ -z "$body" ]] || printf 'header = "Content-Type: application/json"\n'
+    [[ -z "$body" ]] || printf 'header = "Content-Type: %s"\n' "$ctype"
   } > "$cfg")
   [[ -z "$body" ]] || args=(--data-binary "@$body")
   code="$(curl -sS --max-time 60 -o "$TMP/api/$p.out" -w '%{http_code}' -X "$method" -K "$cfg" ${args[@]+"${args[@]}"} "$(api_cfg "$p" .base_url)$path")" || code=000
@@ -4104,7 +4111,7 @@ api_wait() {
 # api_outputs <provider> <app> <name>: for a provider whose resources are databases, services or
 # buckets (outputs: in api.yaml), turn the answer to the create call into the contract's entry and
 # credentials with the two jq programs the file gives, and keep them in the provider's record.
-# Their input is $item (the create answer), $app, $name and $prefix. Nothing secret is printed.
+# Their input is $item (the create answer, or the fetch: answer when there is one), $created (the create answer), $app, $name and $prefix. Nothing secret is printed.
 api_outputs() {
   local p="$1" app="$2" name="$3" kind entry cred pre
   api_has "$p" .outputs.kind || return 0
@@ -4113,9 +4120,17 @@ api_outputs() {
   [[ -n "$(state_config)" ]] || die "api: $p makes ${kind}s, and what an app needs of one is kept in the provider's record in the state store, which this project doesn't have yet (freelunch state init)"
   pre="$(jq -r .prefix "$TMP/api/$p.vars")"
   [[ -s "$TMP/api/$p.out" ]] || echo '{}' > "$TMP/api/$p.out"
-  entry="$(jq -nc --argjson item "$(cat "$TMP/api/$p.out")" --arg app "$app" --arg name "$name" --arg prefix "$pre" "($(api_cfg "$p" .outputs.entry)) + {provider: \"$p\", name: \$app}" 2>"$TMP/api/$p.out.err")" \
+  # outputs.fetch: when the create answer has only an id, one more call (with {id}) reads the rest;
+  # its answer is $item, and the create answer stays as $created
+  cp "$TMP/api/$p.out" "$TMP/api/$p.created"
+  if api_has "$p" .outputs.fetch; then
+    local code
+    code="$(api_call "$p" "$(api_cfg "$p" .outputs.fetch)" "$TMP/api/$p.vars" "")"
+    [[ "$code" == 2?? ]] || die "api: can't read $name from $p after making it ($code): $(api_error "$p")"
+  fi
+  entry="$(jq -nc --argjson item "$(cat "$TMP/api/$p.out")" --argjson created "$(cat "$TMP/api/$p.created")" --arg app "$app" --arg name "$name" --arg prefix "$pre" "($(api_cfg "$p" .outputs.entry)) + {provider: \"$p\", name: \$app}" 2>"$TMP/api/$p.out.err")" \
     || die "api: the outputs.entry in providers/$p/api.yaml doesn't render: $(head -c 300 "$TMP/api/$p.out.err")"
-  cred="$(jq -nc --argjson item "$(cat "$TMP/api/$p.out")" --arg app "$app" --arg name "$name" --arg prefix "$pre" "$(api_cfg "$p" .outputs.credentials)" 2>"$TMP/api/$p.out.err")" \
+  cred="$(jq -nc --argjson item "$(cat "$TMP/api/$p.out")" --argjson created "$(cat "$TMP/api/$p.created")" --arg app "$app" --arg name "$name" --arg prefix "$pre" "$(api_cfg "$p" .outputs.credentials)" 2>"$TMP/api/$p.out.err")" \
     || die "api: the outputs.credentials in providers/$p/api.yaml don't render: $(head -c 300 "$TMP/api/$p.out.err")"
   record_outputs "$p" set "$kind" "$app" "$entry" "$cred"
   log "$p: $name: what an app needs of it is in the record: an app says $([[ $kind == database ]] && echo database || echo needs) = \"$p-$app\""
@@ -4191,7 +4206,8 @@ api_deploy() {
   api_list "$p"
   url="$(jq -r --arg n "$name" 'map(select(.name == $n)) | first | .url // empty' "$TMP/api/$p.items.json")"
   [[ -n "$url" ]] || url="$(cat "$TMP/api/$p.waiturl" 2>/dev/null || true)"
-  if [[ -n "$url" ]]; then
+  # a provider with outputs: makes things whose address can hold a key; it is in the record, not in the log
+  if [[ -n "$url" ]] && ! api_has "$p" .outputs.kind; then
     api_has "$p" .url && url="$(api_expand "$(api_cfg "$p" .url)" <(jq -cn --arg url "$url" '{url: $url}'))"
     report_url "$p" "$url" "$app"
   fi
@@ -4286,7 +4302,9 @@ cmd_api() {
         esac
         shift
       done
-      [[ -n "$image" || -n "$source" ]] || die "api deploy: --image (a container image) or --source (a folder of source code) is needed"
+      api_load "$p"
+      # a provider whose resources are monitors, keys or the like (outputs:) takes neither
+      [[ -n "$image" || -n "$source" ]] || api_has "$p" .outputs.kind || die "api deploy: --image (a container image) or --source (a folder of source code) is needed"
       api_deploy "$p" "$app" "$image" "$port" "$envfile" "$dry" "$source" ;;
     *) die "api: check, list, status, destroy or deploy" ;;
   esac
