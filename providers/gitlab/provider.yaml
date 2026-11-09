@@ -2,8 +2,10 @@
 name: gitlab
 display_name: "GitLab"
 category: iac-ci
-status: planned
+status: ready
 layer: service
+engine: ci
+ci_builtin: true
 terraform_provider: "gitlabhq/gitlab"
 iac: partner
 free_tier_type: always-free
@@ -13,8 +15,14 @@ url: "https://about.gitlab.com/pricing/"
 registry: "registry.gitlab.com"
 registry_user: "GITLAB_USERNAME"
 registry_token: "GITLAB_TOKEN"
+ci_file: ".gitlab-ci.yml"
+ci_secret: "Settings > CI/CD > Variables: FREELUNCH_BUNDLE, masked"
+ci_run: "Build > Pipelines > Run pipeline"
+registry: "registry.gitlab.com"
+registry_user: "GITLAB_USERNAME"
+registry_token: "GITLAB_TOKEN"
 last_verified: "2026-10-18"
-notes: null
+notes: "freelunch's own CI support for this system is built into the CLI (freelunch ci init gitlab), not a template: see docs/ci.md. Not run on a real account by the tests."
 sources:
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"

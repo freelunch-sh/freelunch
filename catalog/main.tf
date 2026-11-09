@@ -65,7 +65,7 @@ locals {
     no_stack        = [for k, p in local.providers : k if local.resolved_engine[k] == "tofu" && (try(p.engine, null) != null || try(p.status, "") == "ready") && !contains(local.stack_dirs, k)]
     no_api_yaml     = [for k, p in local.providers : k if local.resolved_engine[k] == "api" && !contains(local.api_dirs, k)]
     no_dns_sh       = [for k, p in local.providers : k if local.resolved_engine[k] == "dns" && !contains(local.dns_dirs, k)]
-    no_pipeline_tpl = [for k, p in local.providers : k if local.resolved_engine[k] == "ci" && !contains(local.ci_dirs, k)]
+    no_pipeline_tpl = [for k, p in local.providers : k if local.resolved_engine[k] == "ci" && try(p.ci_builtin, false) != true && !contains(local.ci_dirs, k)]
     no_registry     = [for k, p in local.providers : k if local.resolved_engine[k] == "registry" && try(p.registry, null) == null]
     bad_terraform   = [for k, p in local.providers : k if(try(p.terraform_provider, null) == null) != (try(p.iac, "") == "none")]
     bad_recommended = [for k, p in local.providers : k if !(try(p.recommended, false) == true || try(p.recommended, false) == false) || (contains(local.recommended, k) && try(p.status, "") == "excluded")]

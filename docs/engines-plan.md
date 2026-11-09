@@ -208,8 +208,8 @@ it; a **registry** (`engine: registry`, or any provider with a `registry:` host)
 - [x] CircleCI, Bitbucket Pipelines, Buildkite, Azure DevOps, Codeberg (Forgejo Actions): valid YAML, tested; none has run on a real account, and the vendor-specific lines (Buildkite's docker plugin version, Codeberg's runner label and checkout action, CircleCI's `trigger_source`) are from memory of their docs
 - [x] The `registry` engine and `--registry`: Docker Hub, Codeberg (needs `--registry-image`); GHCR stays the default
 - [x] Catalog checks for both engines (a `ci` provider has a template, a `registry` one a host)
-- [ ] GitLab's own registry and pipeline as providers (its pipeline and state kind exist in the CLI; the provider.yaml is still `planned`)
-- [ ] GitHub as a provider (the workflows exist in the CLI; the provider.yaml is still `planned`)
+- [x] GitLab as a provider: `engine: ci` with `ci_builtin` (its pipeline, state kind and registry are in the CLI)
+- [x] GitHub as a provider: `engine: ci` with `ci_builtin` (its workflows, GHCR and git-branch state are in the CLI)
 - [ ] HCP Terraform, Spacelift, Scalr: **not built on purpose.** They run the plans themselves, on their runners, which is the opposite of freelunch running them where you are with your credentials and its capacity wait; and as a state backend they would replace the store freelunch already offers (git, OCI, R2, B2, GitLab). A project that wants one can use its own backend config in a stack
 - [ ] Live-account run for each pipeline
 
