@@ -1,0 +1,12 @@
+# A made-up provider with no API freelunch can drive, for tests/cli.sh.
+steps: |
+  1. Sign in at https://sample.example and make an API token.
+  2. Create an app from the image freelunch deploy prints.
+  3. Put the token in .freelunch/.env as SAMPLEG_TOKEN.
+base_url: https://api.sampleg.test
+auth:
+  env: SAMPLEG_TOKEN
+  header: "Authorization: Bearer {token}"
+check:
+  request: GET /me
+  ok: [200]

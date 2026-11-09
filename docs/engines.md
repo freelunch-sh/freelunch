@@ -38,6 +38,35 @@ Every engine implements these verbs: `check`, `apply`, `outputs`, `deploy`, `sta
 `engine:` in `provider.yaml` defaults from `iac` (official, partner, community means `tofu`; stale,
 none means `api`, `cli` or `guided`) and can be overridden per resource kind.
 
+### The `cli` engine
+
+`providers/<name>/cli.yaml` declares the vendor's command line tool and one command per verb, each
+a list of words that is run without a shell (so a name can't become more words):
+
+```yaml
+tool: turso
+install: "brew install tursodatabase/tap/turso"
+auth: { env: TURSO_API_TOKEN }
+check: [turso, auth, whoami]
+list: { command: [turso, db, list], format: lines, skip: 1 }   # or format: json with items and fields
+create: [turso, db, create, "{name}"]
+delete: [turso, db, destroy, "{name}", --yes]
+gone: "not found"            # text of a failed delete that means it was gone already
+```
+
+`freelunch cli <provider> check | status | deploy <app> | destroy`. A command line tool has no label
+to mark what freelunch made, so the provider's **record** in the state store does: something that
+exists and is not in the record is never changed or deleted (`--adopt` says it is yours), and
+with no state store nothing that exists is touched (`destroy --all-with-prefix` is the explicit
+way). `doctor` checks the tool is installed, its variable is set and `check` succeeds.
+
+### The `guided` engine
+
+`providers/<name>/guided.yaml` holds the steps to do by hand, and, when the provider has any way to
+ask, how to check a token (the same `base_url`, `auth` and `check` keys as `api.yaml`).
+`freelunch guided <provider>` prints the steps and checks the token; `doctor` checks it for every
+guided provider the project has a folder for. Back4App, Leapcell and SnapDeploy are guided.
+
 ## Credentials in the workflow
 
 - One GitHub secret per credential, named as the provider's own tools name it

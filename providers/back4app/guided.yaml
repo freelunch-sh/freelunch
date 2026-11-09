@@ -1,0 +1,9 @@
+# Back4App Containers has no documented API for creating containers (checked 2026-11-08), so
+# freelunch can't make or remove one. These are the steps to do by hand.
+steps: |
+  1. Sign in at https://www.back4app.com and open its Containers product
+     (pricing and the free container: https://www.back4app.com/pricing/container-as-a-service).
+  2. Create a container from your repository or your image. The menu names change; what
+     matters is the image or repository, the port the app listens on, and its environment.
+  3. Put the app's environment variables (your .freelunch env file) in the container's settings.
+  4. To remove it, delete the container in the same place. freelunch has no record of it.

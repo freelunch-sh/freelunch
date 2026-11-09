@@ -55,6 +55,10 @@ Use [`providers/oci`](../providers/oci/) as the reference.
       `deploy/`'s `platforms` output), `_status`, `_check` (doctor) and `_destroy`, which
       `engine_call` finds by name ([engines.md](engines.md)). Northflank is the
       reference; `tests/cli.sh` runs it against a fake API
+- [ ] API-only providers: `api.yaml` instead of a `stack/` ([api-adapter](api-adapter.md)), a
+      fixture in `tests/fixtures/<name>/scenario.json`, `engine: api` and `verified: fake-api`.
+      Providers with a command line tool use `cli.yaml`, and providers with neither a
+      `guided.yaml` of steps ([engines](engines.md#the-cli-engine))
 - [ ] Glue providers: the stack takes `inventory_state_path` and checks its hosts against the
       inventory, following the [glue contract](architecture.md#glue-contract)
 - [ ] Offline tests (`tests/*.tftest.hcl`) using `mock_provider`: the default layout plans,

@@ -3558,7 +3558,7 @@ api_yaml_json() {
       if (trim(cur) != "") parts[++n] = cur
       return n
     }
-    function flow(v,   inner, parts, n, i, out, k, p, colon) {
+    function flow(v,   inner, parts, n, i, out, k, p, colon, v2) {
       v = trim(v); sub(/[ \t]+#.*$/, "", v)
       inner = substr(v, 2, length(v) - 2)
       n = split_top(inner, parts)
@@ -3571,7 +3571,8 @@ api_yaml_json() {
       for (i = 1; i <= n; i++) {
         p = trim(parts[i]); colon = index(p, ":")
         k = trim(substr(p, 1, colon - 1)); gsub(/^["\x27]|["\x27]$/, "", k)
-        out = out (i > 1 ? "," : "") "\"" esc(k) "\":" scalar(substr(p, colon + 1))
+        v2 = trim(substr(p, colon + 1))
+        out = out (i > 1 ? "," : "") "\"" esc(k) "\":" ((substr(v2, 1, 1) == "[" || substr(v2, 1, 1) == "{") ? flow(v2) : scalar(v2))
       }
       return out "}"
     }
@@ -3792,7 +3793,10 @@ api_record() {
   [[ -n "$(state_config)" ]] || return 0
   prefix="$(jq -r .prefix "$TMP/api/$p.vars")"
   cur="$(record_pull "$p")"
-  [[ -n "$cur" ]] || cur='{"engine":"api","resources":[]}'
+  if [[ -z "$cur" ]]; then
+    cur='{"engine":"api","resources":[]}'
+    [[ ! -f "$PROVIDERS_DIR/$p/cli.yaml" ]] || cur='{"engine":"cli","resources":[]}'
+  fi
   case "$op" in
     add)    jq -c --arg id "$id" --arg n "$name" --arg m "$prefix" --arg d "$(date -u +%Y-%m-%d)" \
               '.resources = ((.resources // []) | map(select(.id != $id))) + [{id: $id, name: $n, kind: "app", marker: $m, created: $d}]' <<< "$cur" > "$TMP/api/$p.record" ;;
@@ -4007,6 +4011,303 @@ cmd_api() {
       api_deploy "$p" "$app" "$image" "$port" "$envfile" "$dry" "$source" ;;
     *) die "api: check, list, status, destroy or deploy" ;;
   esac
+}
+
+# --- The cli engine ----------------------------------------------------------------------
+#
+# For a provider whose supported way in is its own command line tool (Turso's turso, say):
+# providers/<name>/cli.yaml declares the tool and one command per verb, each as a list of words
+# that is run without a shell, so what is substituted into it can't be taken for more words.
+#
+#   tool: turso                    # the program; doctor checks it is installed
+#   install: "brew install tursodatabase/tap/turso"
+#   auth:
+#     env: TURSO_API_TOKEN         # optional: the variable the tool reads; doctor checks it is set
+#   settings: [org]                # keys read from terraform.tfvars
+#   check: [turso, auth, whoami]   # does it sign in?
+#   list: { command: [turso, db, list], format: lines, skip: 1 }   # or format: json, items, fields
+#   create: [turso, db, create, "{name}"]
+#   deploy: [turso, db, shell, "{name}", ...]      # optional: after create or on a repeat
+#   delete: [turso, db, destroy, "{name}", --yes]
+#   gone: "not found"              # optional: text in a failed delete that means it was gone already
+#
+# {name} is <name_prefix>-<app>; {prefix}, {app} and each setting can be used too. A command line
+# tool has no label to mark what freelunch made, so the provider's record in the state store does:
+# something that exists and isn't in the record is never changed or deleted (--adopt says it is
+# yours). Without a store there is no record, so freelunch changes nothing that already exists.
+
+# yaml_load <provider> <file>: the provider's yaml as JSON in $TMP/api/<provider>.json
+yaml_load() {
+  local p="$1" f="$PROVIDERS_DIR/$1/$2"
+  command -v jq >/dev/null || die "jq is required for the $2 engine"
+  [[ -f "$f" ]] || die "$p has no $2 (providers/$p/)"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  mkdir -p "$TMP/api"
+  [[ -f "$TMP/api/$p.json" ]] || api_yaml_json "$f" > "$TMP/api/$p.json" || die "can't read providers/$p/$2"
+}
+
+# cli_load <provider>: cli.yaml, checked for what the driver needs
+cli_load() {
+  local p="$1" path
+  yaml_load "$p" cli.yaml
+  for path in tool check.0 list.command.0 create.0 delete.0; do
+    jq -e --arg p "$path" 'getpath($p | split(".") | map(tonumber? // .)) | . != null' "$TMP/api/$p.json" >/dev/null 2>&1 \
+      || die "cli: providers/$p/cli.yaml needs ${path%.0}"
+  done
+}
+
+# cli_words <provider> <verb> [json of the vars]: the verb's command as words, one a line, with
+# {name} and the other variables put in. A name with no value stops the run.
+cli_words() {
+  local p="$1" verb="$2" vars="${3:-$TMP/api/$1.vars}" out
+  out="$(jq -r --arg v "$verb" --slurpfile x "$vars" '
+    (if $v == "list" then .list.command else .[$v] end) as $words
+    | ($x[0] + ($x[0].settings // {})) as $vars
+    | $words[] | tostring
+    | reduce ($vars | to_entries[] | select(.value | type | . == "string" or . == "number")) as $e (.; gsub("\\{" + $e.key + "\\}"; $e.value | tostring))' "$TMP/api/$p.json")"
+  if [[ "$out" =~ \{([a-z_]+)\} ]]; then die "cli: the $verb command of $p needs {${BASH_REMATCH[1]}}, which has no value here"; fi
+  printf '%s\n' "$out"
+}
+
+# cli_run <provider> <verb> [vars file]: run the verb's command; its output is in
+# $TMP/api/<provider>.cli.out and the status is returned
+cli_run() {
+  local p="$1" verb="$2" words=() w
+  while IFS= read -r w; do words+=("$w"); done < <(cli_words "$p" "$verb" "${3:-}")
+  "${words[@]}" > "$TMP/api/$p.cli.out" 2>&1
+}
+
+# cli_tool <provider>: whether the tool is installed
+cli_tool() { command -v "$(api_cfg "$1" .tool)" >/dev/null; }
+
+# cli_need_tool <provider>: stop, saying how to get the tool, when it isn't there
+cli_need_tool() {
+  cli_tool "$1" || die "cli: $1 takes $(api_cfg "$1" .tool), which isn't installed$(api_cfg "$1" .install | sed 's/.*/ (&)/')"
+}
+
+# cli_names <provider>: the names the account has, one a line
+cli_names() {
+  local p="$1"
+  cli_run "$p" list "$TMP/api/$p.vars" || die "cli: $(api_cfg "$p" .tool) couldn't list what $p has: $(head -c 300 "$TMP/api/$p.cli.out")"
+  if [[ "$(api_cfg "$p" .list.format)" == json ]]; then
+    jq -r "($(api_cfg "$p" .list.items)) | ($(api_cfg "$p" .list.fields.name))" "$TMP/api/$p.cli.out"
+  else
+    awk -v skip="$(api_cfg "$p" .list.skip)" 'NR > skip + 0 && NF { print $1 }' "$TMP/api/$p.cli.out"
+  fi
+}
+
+# cli_prepare <provider> <app>: the vars of a command: prefix, settings, app and name
+cli_prepare() {
+  local p="$1" app="${2:-}"
+  cli_load "$p"
+  api_base "$p" > "$TMP/api/$p.vars.base"
+  jq -c --arg app "$app" '. + {app: $app, name: (.prefix + "-" + $app)}' "$TMP/api/$p.vars.base" > "$TMP/api/$p.vars"
+}
+
+# cli_recorded <provider> <name>: whether the provider's record in the store names it
+cli_recorded() {
+  local rec
+  [[ -n "$(state_config)" ]] || return 1
+  rec="$(record_pull "$1")"
+  [[ -n "$rec" ]] && jq -e --arg n "$2" 'any(.resources[]?; .name == $n)' <<< "$rec" >/dev/null
+}
+
+# cli_deploy <provider> <app> <adopt 0|1> <dry run 0|1>: make <prefix>-<app> if it isn't there; run
+# the deploy command when there is one; leave alone what freelunch didn't make
+cli_deploy() {
+  local p="$1" app="$2" adopt="$3" dry="$4" name w exists=0 names
+  cli_prepare "$p" "$app"
+  name="$(jq -r .name "$TMP/api/$p.vars")"
+  if [[ "$dry" == 1 ]]; then
+    log "$p: $name: would run, nothing sent:"
+    for w in create deploy; do
+      api_has "$p" ".$w" || continue
+      echo "  $w: $(cli_words "$p" "$w" | paste -sd' ' -)"
+    done
+    return 0
+  fi
+  cli_need_tool "$p"
+  # listed first, on its own: a list that fails must stop the run, not look like "not there"
+  names="$(cli_names "$p")" || exit 1
+  ! grep -qx "$name" <<< "$names" || exists=1
+  if [[ $exists -eq 1 ]]; then
+    if [[ "$adopt" == 1 ]] || cli_recorded "$p" "$name"; then :
+    elif [[ -z "$(state_config)" ]]; then
+      die "cli: $p has $name already, and with no state store there is no record to say freelunch made it, so it is left alone. freelunch state init keeps one; --adopt says it is yours"
+    else
+      die "cli: $p has $name already, which freelunch didn't make (it isn't in the record). Pick another name_prefix in $(rel "$(config_dir "$p")/terraform.tfvars"), or --adopt if it is yours"
+    fi
+  fi
+  if [[ $exists -eq 0 ]]; then
+    cli_run "$p" create || die "cli: can't make $name at $p: $(head -c 300 "$TMP/api/$p.cli.out")"
+    api_record "$p" add "$name" "$name"
+    log "$p: $name: made"
+  else
+    log "$p: $name: there already, and ours"
+    [[ "$adopt" != 1 ]] || api_record "$p" add "$name" "$name"
+  fi
+  if api_has "$p" .deploy; then
+    cli_run "$p" deploy || die "cli: the deploy of $name at $p failed: $(head -c 300 "$TMP/api/$p.cli.out")"
+    log "$p: $name: deployed"
+  fi
+}
+
+# cli_destroy <provider> <all with the prefix 0|1>: delete what the provider's record names
+# (with --all-with-prefix, with no record, everything that starts with the prefix)
+cli_destroy() {
+  local p="$1" byprefix="$2" rec names name done_any=0 gone
+  cli_prepare "$p"
+  cli_need_tool "$p"
+  names=""
+  if [[ -n "$(state_config)" ]]; then
+    rec="$(record_pull "$p")"
+    names="$(jq -r '.resources[]?.name' <<< "${rec:-"{}"}")"
+  elif [[ "$byprefix" == 1 ]]; then
+    names="$(cli_names "$p")" || exit 1
+    names="$(grep "^$(jq -r .prefix "$TMP/api/$p.vars")-" <<< "$names" || true)"
+  else
+    die "cli: with no state store there is no record of what freelunch made at $p. freelunch state init keeps one; --all-with-prefix deletes everything there that starts with $(jq -r .prefix "$TMP/api/$p.vars")-"
+  fi
+  gone="$(api_cfg "$p" .gone)"
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    jq -c --arg n "$name" '. + {name: $n}' "$TMP/api/$p.vars.base" > "$TMP/api/$p.vars.del"
+    if ! cli_run "$p" delete "$TMP/api/$p.vars.del"; then
+      if [[ -n "$gone" ]] && grep -qiF "$gone" "$TMP/api/$p.cli.out"; then log "$p: $name was gone already"
+      else die "cli: can't delete $name at $p: $(head -c 300 "$TMP/api/$p.cli.out")"; fi
+    else
+      log "$p: deleted $name"
+    fi
+    api_record "$p" remove "$name"
+    done_any=1
+  done <<< "$names"
+  [[ $done_any -eq 1 ]] || log "$p: nothing of freelunch's to delete"
+}
+
+# cli_status <provider>: what is there
+cli_status() {
+  local p="$1" pre name rec
+  cli_prepare "$p"
+  pre="$(jq -r .prefix "$TMP/api/$p.vars")"
+  echo "Apps on $p ($pre-*)"
+  if ! cli_tool "$p"; then echo "  not asked: $(api_cfg "$p" .tool) isn't installed"; return 0; fi
+  if ! (cli_names "$p") > "$TMP/api/$p.names" 2>"$TMP/api/$p.names.err"; then echo "  can't ask: $(sed 's/^freelunch: //' "$TMP/api/$p.names.err")"; return 0; fi
+  if [[ -n "$(state_config)" ]]; then
+    rec="$(record_pull "$p")"
+    while IFS= read -r name; do
+      [[ "$name" == "$pre-"* ]] || continue
+      if [[ -n "$rec" ]] && jq -e --arg n "$name" 'any(.resources[]?; .name == $n)' <<< "$rec" >/dev/null; then printf '  %-24s %s\n' "$name" "ours"
+      else printf '  %-24s %s\n' "$name" "not in the record (freelunch didn't make it)"; fi
+    done < "$TMP/api/$p.names"
+  else
+    grep "^$pre-" "$TMP/api/$p.names" | sed 's/^/  /' || true
+  fi
+}
+
+# doctor_cli <provider>: the tool is installed, its variable is set, and it signs in
+doctor_cli() {
+  local p="$1" tool var
+  cli_load "$p"; cli_prepare "$p" doctor
+  tool="$(api_cfg "$p" .tool)"
+  echo "$p (cli engine: $tool)"
+  if ! cli_tool "$p"; then check fail "$tool isn't installed$(api_cfg "$p" .install | sed 's/.*/ (&)/')"; return 0; fi
+  check ok "$tool is installed"
+  var="$(api_cfg "$p" .auth.env)"
+  if [[ -n "$var" && -z "${!var:-}" ]]; then check fail "$var is not set: export it or put it in $(rel "$(state_root)")/.env (providers/$p/README.md)"; return 0; fi
+  if cli_run "$p" check; then check ok "$tool signs in"; else check fail "$tool doesn't sign in: $(head -c 200 "$TMP/api/$p.cli.out")"; fi
+}
+
+cmd_cli() {
+  local p="${1:-}" sub="${2:-}" app="" adopt=0 dry=0 byprefix=0
+  [[ -n "$p" && -n "$sub" ]] || die "cli: freelunch cli <provider> check | status | destroy | deploy <app> [--adopt] [--dry-run]"
+  [[ -f "$PROVIDERS_DIR/$p/cli.yaml" ]] || die "cli: $p has no cli.yaml"
+  shift 2
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if [[ -n "$(state_config)" ]]; then state_setup; fi
+  case "$sub" in
+    check)   doctor_cli "$p"; [[ $FAILS -eq 0 ]] ;;
+    status)  cli_status "$p" ;;
+    destroy) [[ "${1:-}" != --all-with-prefix ]] || byprefix=1; cli_destroy "$p" "$byprefix" ;;
+    deploy)
+      app="${1:-}"; [[ -n "$app" ]] || die "cli deploy: give the app's name"; shift
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --adopt)   adopt=1 ;;
+          --dry-run) dry=1 ;;
+          *)         die "cli deploy: unknown option $1" ;;
+        esac
+        shift
+      done
+      cli_deploy "$p" "$app" "$adopt" "$dry" ;;
+    *) die "cli: check, status, destroy or deploy" ;;
+  esac
+}
+
+# --- The guided engine -------------------------------------------------------------------
+#
+# For a provider with no usable API or command line: providers/<name>/guided.yaml holds the
+# steps to do by hand and, if the provider has any way to ask, how to check the token:
+#
+#   steps: |
+#     1. Sign in at ...
+#   base_url: https://api.example.com      # optional, with auth and check, as api.yaml has them
+#   auth: { env: EXAMPLE_TOKEN, header: "Authorization: Bearer {token}" }
+#   check: { request: GET /me, ok: [200] }
+#
+# freelunch guided <provider> prints the steps and checks the token when it can; doctor checks
+# it for every guided provider the project has a folder for.
+
+guided_load() { yaml_load "$1" guided.yaml; jq -e '.steps | strings | length > 0' "$TMP/api/$1.json" >/dev/null 2>&1 || die "guided: providers/$1/guided.yaml needs steps"; }
+
+# guided_check <provider>: 0 with a line saying how the token stands, 1 when it is wrong
+guided_check() {
+  local p="$1" var code vars="$TMP/api/$1.vars"
+  guided_load "$p"
+  if ! api_has "$p" .check.request; then check warn "$p has no way to check a token: the steps above are the whole of it"; return 0; fi
+  var="$(api_cfg "$p" .auth.env)"
+  if [[ -n "$var" && -z "${!var:-}" ]]; then check fail "$var is not set: export it or put it in $(rel "$(state_root)")/.env (providers/$p/README.md)"; return 1; fi
+  api_base "$p" > "$vars"; api_secrets "$p" "$vars"
+  code="$(api_do "$p" check "$vars")"
+  if api_ok "$p" check "$code" '[200]'; then check ok "$p takes the token in $var"; return 0; fi
+  check fail "$p doesn't take the token in $var ($code): $(api_error "$p")"; return 1
+}
+
+doctor_guided() {
+  echo "$1 (guided engine: steps by hand)"
+  guided_check "$1" || true
+}
+
+cmd_guided() {
+  local p="${1:-}"
+  [[ -n "$p" ]] || die "guided: freelunch guided <provider>"
+  [[ -f "$PROVIDERS_DIR/$p/guided.yaml" ]] || die "guided: $p has no guided.yaml"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  guided_load "$p"
+  echo "$p has no API or command line freelunch can drive, so these steps are yours:"
+  echo
+  api_cfg "$p" .steps
+  echo
+  guided_check "$p" >&2
+}
+
+# doctor_engines: the api, cli and guided providers the project has a folder for
+doctor_engines() {
+  local p
+  [[ -n "$PROJECT" ]] || return 0
+  for p in $(cd "$PROVIDERS_DIR" && ls -d -- */ 2>/dev/null | sed 's|/$||' | grep -v '^_'); do
+    [[ -d "$PROJECT/$p" ]] || continue
+    if [[ -f "$PROVIDERS_DIR/$p/api.yaml" ]]; then
+      echo "$p (api engine)"
+      api_load "$p"; api_base "$p" > "$TMP/api/$p.vars"
+      local var; var="$(api_cfg "$p" .auth.env)"
+      if [[ -z "${!var:-}" ]]; then check fail "$var is not set: export it or put it in $(rel "$(state_root)")/.env (providers/$p/README.md)"; continue; fi
+      api_secrets "$p" "$TMP/api/$p.vars"
+      local code; code="$(api_do "$p" check "$TMP/api/$p.vars")"
+      if api_ok "$p" check "$code" '[200]'; then check ok "$p takes the token in $var"; else check fail "$p doesn't take the token in $var ($code): $(api_error "$p")"; fi
+    elif [[ -f "$PROVIDERS_DIR/$p/cli.yaml" ]]; then doctor_cli "$p"
+    elif [[ -f "$PROVIDERS_DIR/$p/guided.yaml" ]]; then doctor_guided "$p"
+    fi
+  done
 }
 
 is_platform() { [[ "$(meta "$1" layer)" == "platform" ]]; }
@@ -6498,6 +6799,7 @@ cmd_doctor() {
   for engine in $(engine_providers); do
     if engine_defined "$engine" check && [[ -d "$(stack_dir "$engine")" ]] && is_configured "$engine"; then engine_call "$engine" check; fi
   done
+  doctor_engines
   doctor_ssh
   doctor_images
   doctor_cloudflare
@@ -8715,6 +9017,8 @@ main() {
     output)               cmd_output "$@" ;;
     catalog)              cmd_catalog ;;
     api)                  resolve_state_refs; cmd_api "$@" ;;
+    cli)                  resolve_state_refs; cmd_cli "$@" ;;
+    guided)               resolve_state_refs; cmd_guided "$@" ;;
     engine)               [[ -d "$PROVIDERS_DIR/${1:-}" ]] || die "engine: freelunch engine <provider> [kind]"; engine_of "$@" ;;
     test)                 cmd_test "$@" ;;
     fmt)                  cmd_fmt "$@" ;;

@@ -3386,6 +3386,180 @@ test_deno_deploy_uploads_the_source() {
   [[ ! -e "$dir/fake/log" ]] || { echo "a dry run sent requests"; return 1; }
 }
 
+# --- the cli and guided engines --------------------------------------------------------------
+
+# A made-up command line tool: fakecli whoami | list | create <n> | deploy <n> | destroy <n> --yes.
+# Its databases are the lines of $FAKE_CLI_DIR/dbs; it logs what it is asked to $FAKE_CLI_DIR/log.
+# whoami fails without FAKECLI_TOKEN; list fails with FAKE_CLI_LIST_FAIL=1; create fails for a
+# name it has; destroy says "not found" for one it hasn't.
+mkdir -p "$WORK/cli-bin"
+cat > "$WORK/cli-bin/fakecli" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p "$FAKE_CLI_DIR"; touch "$FAKE_CLI_DIR/dbs"
+echo "fakecli $*" >> "$FAKE_CLI_DIR/log"
+case "$1" in
+  whoami) [[ -n "${FAKECLI_TOKEN:-}" ]] || { echo "not signed in" >&2; exit 1; }; echo me ;;
+  list) [[ -z "${FAKE_CLI_LIST_FAIL:-}" ]] || { echo "boom" >&2; exit 1; }; echo "NAME  REGION"; sed 's/$/  eu/' "$FAKE_CLI_DIR/dbs" ;;
+  create) grep -qx "$2" "$FAKE_CLI_DIR/dbs" && { echo "$2 exists" >&2; exit 1; }; echo "$2" >> "$FAKE_CLI_DIR/dbs" ;;
+  deploy) ;;
+  destroy) grep -qx "$2" "$FAKE_CLI_DIR/dbs" || { echo "database $2 not found" >&2; exit 1; }; grep -vx "$2" "$FAKE_CLI_DIR/dbs" > "$FAKE_CLI_DIR/dbs.new"; mv "$FAKE_CLI_DIR/dbs.new" "$FAKE_CLI_DIR/dbs" ;;
+esac
+EOF
+chmod +x "$WORK/cli-bin/fakecli"
+
+# engine_checkout <dir> <name>: a copy of the CLI whose providers folder has that fixture's
+# provider files (its yaml and scripts, not its scenario)
+engine_checkout() {
+  local dir="$1" name="$2" f
+  mkdir -p "$dir/bin" "$dir/providers/$name"
+  cp "$CLI" "$dir/bin/"
+  for f in "$ROOT/tests/fixtures/$name"/*; do [[ "$(basename "$f")" == scenario.json ]] || cp "$f" "$dir/providers/$name/"; done
+}
+
+# cli_in <checkout> <project> <command...>: freelunch there, with fakecli, its token and its
+# databases in the checkout
+cli_in() {
+  local co="$1" proj="$2"; shift 2
+  (cd "$proj" && PATH="$WORK/cli-bin:$PATH" FAKE_CLI_DIR="$co/fakecli" FAKECLI_TOKEN="${FAKECLI_TOKEN-tok}" "$co/bin/freelunch" "$@")
+}
+
+# The cli engine runs the tool's own commands, and trusts only its record for what is
+# freelunch's: it makes what is missing, leaves what it didn't make, and deletes what it did.
+test_cli_engine_lifecycle() {
+  local co="$WORK/cli-co" p="$WORK/cli-proj" out
+  engine_checkout "$co" sample-cli
+  mkdir -p "$p/.freelunch"; state_store "$p"
+  # a first deploy: made, deployed, recorded
+  out="$(cli_in "$co" "$p" cli sample-cli deploy web 2>&1)"
+  contains "$out" "sample-cli: freelunch-web: made"
+  contains "$out" "sample-cli: freelunch-web: deployed"
+  grep -qx 'fakecli create freelunch-web' "$co/fakecli/log"
+  grep -qx 'fakecli deploy freelunch-web' "$co/fakecli/log"
+  equals "$(cli_in "$co" "$p" state record pull sample-cli 2>/dev/null | jq -r '.engine + " " + .resources[0].name')" "cli freelunch-web"
+  # again: it is ours, so only the deploy runs
+  : > "$co/fakecli/log"
+  out="$(cli_in "$co" "$p" cli sample-cli deploy web 2>&1)"
+  contains "$out" "there already, and ours"
+  fails grep -q 'fakecli create' "$co/fakecli/log"
+  grep -qx 'fakecli deploy freelunch-web' "$co/fakecli/log"
+  # something there that is not in the record is never touched
+  echo freelunch-api >> "$co/fakecli/dbs"
+  : > "$co/fakecli/log"
+  if out="$(cli_in "$co" "$p" cli sample-cli deploy api 2>&1)"; then echo "a foreign database should stop the deploy"; return 1; fi
+  contains "$out" "which freelunch didn't make"
+  fails grep -q 'fakecli \(create\|deploy\|destroy\)' "$co/fakecli/log"
+  # a list that fails stops the run, and does not look like "not there"
+  : > "$co/fakecli/log"
+  if out="$(FAKE_CLI_LIST_FAIL=1 cli_in "$co" "$p" cli sample-cli deploy cache 2>&1)"; then echo "a failed list should stop the deploy"; return 1; fi
+  contains "$out" "couldn't list what sample-cli has: boom"
+  fails grep -q 'fakecli create' "$co/fakecli/log"
+  # status says which are ours
+  out="$(cli_in "$co" "$p" cli sample-cli status 2>&1)"
+  contains "$out" "freelunch-web"
+  contains "$out" "ours"
+  contains "$out" "freelunch-api            not in the record"
+  # destroy deletes what the record names, and the foreign one stays
+  out="$(cli_in "$co" "$p" cli sample-cli destroy 2>&1)"
+  contains "$out" "deleted freelunch-web"
+  grep -qx 'freelunch-api' "$co/fakecli/dbs"
+  fails grep -qx 'freelunch-web' "$co/fakecli/dbs"
+  equals "$(cli_in "$co" "$p" state record pull sample-cli 2>/dev/null | jq -c .resources)" "[]"
+  # --adopt takes over what is there
+  out="$(cli_in "$co" "$p" cli sample-cli deploy api --adopt 2>&1)"
+  contains "$out" "there already, and ours"
+  equals "$(cli_in "$co" "$p" state record pull sample-cli 2>/dev/null | jq -r '.resources[0].name')" freelunch-api
+  # a delete of something already gone is a success
+  sed -i.bak '/freelunch-api/d' "$co/fakecli/dbs" && rm "$co/fakecli/dbs.bak"
+  out="$(cli_in "$co" "$p" cli sample-cli destroy 2>&1)"
+  contains "$out" "freelunch-api was gone already"
+  # the dry run runs nothing
+  : > "$co/fakecli/log"
+  out="$(cli_in "$co" "$p" cli sample-cli deploy web --dry-run 2>&1)"
+  contains "$out" "create: fakecli create freelunch-web"
+  [[ ! -s "$co/fakecli/log" ]] || { echo "a dry run ran the tool"; return 1; }
+}
+
+# With no state store there is no record, so nothing that exists is changed.
+test_cli_engine_without_a_record_changes_nothing_that_exists() {
+  local co="$WORK/cli-co2" p="$WORK/cli-proj2" out
+  engine_checkout "$co" sample-cli
+  mkdir -p "$p/.freelunch"
+  out="$(cli_in "$co" "$p" cli sample-cli deploy web 2>&1)"
+  contains "$out" "sample-cli: freelunch-web: made"
+  if out="$(cli_in "$co" "$p" cli sample-cli deploy web 2>&1)"; then echo "an existing database with no record should stop the deploy"; return 1; fi
+  contains "$out" "with no state store there is no record"
+  : > "$co/fakecli/log"
+  if out="$(cli_in "$co" "$p" cli sample-cli destroy 2>&1)"; then echo "destroy with no record should stop"; return 1; fi
+  contains "$out" "--all-with-prefix"
+  fails grep -q 'fakecli destroy' "$co/fakecli/log"
+  echo other-thing >> "$co/fakecli/dbs"
+  cli_in "$co" "$p" cli sample-cli destroy --all-with-prefix >/dev/null 2>&1
+  grep -qx 'other-thing' "$co/fakecli/dbs"
+  fails grep -qx 'freelunch-web' "$co/fakecli/dbs"
+}
+
+# doctor checks the tool is installed, its variable is set and it signs in; guided providers get
+# their token checked when the provider has a way to ask.
+test_doctor_checks_cli_and_guided_providers() {
+  local co="$WORK/cli-co3" p="$WORK/cli-proj3" out
+  engine_checkout "$co" sample-cli
+  engine_checkout "$co" sample-guided
+  mkdir -p "$p/.freelunch/sample-cli" "$p/.freelunch/sample-guided"
+  out="$(cli_in "$co" "$p" doctor 2>&1 || true)"
+  contains "$out" "sample-cli (cli engine: fakecli)"
+  contains "$out" "ok    fakecli is installed"
+  contains "$out" "ok    fakecli signs in"
+  contains "$out" "sample-guided (guided engine: steps by hand)"
+  # the tool's token not set, and the tool not installed
+  out="$(FAKECLI_TOKEN= cli_in "$co" "$p" doctor 2>&1 || true)"
+  contains "$out" "FAKECLI_TOKEN is not set"
+  out="$(cd "$p" && PATH="/usr/bin:/bin" FAKECLI_TOKEN=tok "$co/bin/freelunch" doctor 2>&1 || true)"
+  contains "$out" "fail  fakecli isn't installed (pip install fakecli)"
+  # no folder in the project, no check
+  rmdir "$p/.freelunch/sample-cli"
+  out="$(cli_in "$co" "$p" doctor 2>&1 || true)"
+  lacks "$out" "sample-cli (cli engine"
+}
+
+test_guided_engine_prints_the_steps_and_checks_the_token() {
+  local co="$WORK/guided-co" out
+  engine_checkout "$co" sample-guided
+  mkdir -p "$WORK/guided-proj/.freelunch"
+  rm -rf "$co/fake"; mkdir -p "$co/fake"; cp "$ROOT/tests/fixtures/sample-guided/scenario.json" "$co/fake/"
+  guided() { (cd "$WORK/guided-proj" && PATH="$WORK/api-bin:$PATH" FAKE_API_DIR="$co/fake" FAKE_API_PHASE="$1" SAMPLEG_TOKEN="${SAMPLEG_TOKEN-sampleg-token-77}" "$co/bin/freelunch" guided sample-guided); }
+  out="$(guided check 2>&1)"
+  contains "$out" "1. Sign in at https://sample.example and make an API token."
+  contains "$out" "3. Put the token in .freelunch/.env as SAMPLEG_TOKEN."
+  contains "$out" "ok    sample-guided takes the token in SAMPLEG_TOKEN"
+  # a token it turns down, and the token not hidden in what it says
+  out="$(guided bad 2>&1 || true)"
+  if guided bad >/dev/null 2>&1; then echo "a token turned down should fail the command"; return 1; fi
+  contains "$out" "fail  sample-guided doesn't take the token in SAMPLEG_TOKEN (401): invalid token <redacted>"
+  lacks "$out" "sampleg-token-77"
+  # no token set
+  out="$(SAMPLEG_TOKEN= guided check 2>&1 || true)"
+  contains "$out" "SAMPLEG_TOKEN is not set"
+  # a provider with no way to check says so
+  sed -i.bak '/^base_url:/,$d' "$co/providers/sample-guided/guided.yaml" && rm "$co/providers/sample-guided/guided.yaml.bak"
+  rm -f "$co/.cache"; out="$(guided check 2>&1)"
+  contains "$out" "sample-guided has no way to check a token"
+}
+
+# Every provider with a guided.yaml has steps that print, and a cli.yaml or guided.yaml is the
+# provider's whole engine: the catalogue agrees (a guided provider needs no stack or api.yaml).
+test_guided_providers_print_their_steps() {
+  local f name out n=0
+  for f in "$ROOT"/providers/*/guided.yaml; do
+    name="$(basename "$(dirname "$f")")"
+    out="$("$CLI" guided "$name" 2>&1)"
+    contains "$out" "$name has no API or command line freelunch can drive"
+    contains "$out" "1. "
+    equals "$("$CLI" engine "$name")" guided
+    n=$((n + 1))
+  done
+  [[ $n -ge 3 ]]
+}
+
 # A provider's engine is what its provider.yaml says, or what its iac implies.
 test_engine_of_defaults_from_iac() {
   equals "$("$CLI" engine render)" tofu

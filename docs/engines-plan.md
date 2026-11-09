@@ -79,10 +79,10 @@ Tick a box when the step is built, tested and committed. Design: [engines.md](en
 
 ## 7. `cli` and `guided` engines
 
-- [ ] `cli` engine: declared commands per verb, tool presence in `doctor`
-- [ ] `cli` engine: tests with a fake binary
-- [ ] `guided` engine: prints steps, `doctor` checks the token
-- [ ] `guided` engine: tests
+- [x] `cli` engine: declared commands per verb, tool presence in `doctor`
+- [x] `cli` engine: tests with a fake binary
+- [x] `guided` engine: prints steps, `doctor` checks the token
+- [x] `guided` engine: tests
 
 ## 8. Database credentials into deploy
 

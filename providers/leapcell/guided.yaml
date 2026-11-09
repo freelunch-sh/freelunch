@@ -1,0 +1,9 @@
+# Leapcell has no public API reference for creating services (checked 2026-11-08), so freelunch
+# can't make or remove one. These are the steps to do by hand.
+steps: |
+  1. Sign in at https://leapcell.io (pricing: https://leapcell.io/pricing; its free figures come
+     from third-party trackers, so check them there).
+  2. Create a service from your repository or your image. The menu names change; what matters
+     is the source, the port the app listens on, and its environment.
+  3. Put the app's environment variables (your .freelunch env file) in the service's settings.
+  4. To remove it, delete the service in the same place. freelunch has no record of it.
