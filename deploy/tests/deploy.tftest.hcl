@@ -656,8 +656,8 @@ run "a_database_puts_its_url_in_the_apps_environment" {
     database_state_paths = ["tests/fixtures/database.tfstate"]
     storage_state_paths  = ["tests/fixtures/storage.tfstate"]
     apps = {
-      api = { host = "oci-main", compose = "compose.yaml", database = "neon-main" }
-      web = { host = "oci-main", compose = "compose.yaml" }
+      api  = { host = "oci-main", compose = "compose.yaml", database = "neon-main" }
+      web  = { host = "oci-main", compose = "compose.yaml" }
       both = { host = "oci-main", compose = "compose.yaml", database = "neon-main", bucket = "backblaze-b2-results" }
     }
   }

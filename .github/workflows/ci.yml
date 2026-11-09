@@ -23,11 +23,15 @@ jobs:
           - tool: terraform
             suites: ""
           # The OCI compute and Azure suites rely on Terraform-only mock features
-          # (keyed override targets, partial mock objects), so OpenTofu runs the rest.
+          # (keyed override targets, partial mock objects), so OpenTofu runs the rest. The
+          # other way round, cockroachdb, mongodb-atlas, tidb-cloud and yugabyte mock nested
+          # attributes in a way only OpenTofu accepts: they carry tests/.tofu-only, which makes
+          # Terraform skip them, and OpenTofu runs them.
           - tool: tofu
             suites: >-
               catalog deploy hybrid shared tests providers/aws providers/backblaze-b2 providers/cloudflare providers/gcp
               providers/northflank providers/oci/modules/network
+              providers/cockroachdb providers/mongodb-atlas providers/tidb-cloud providers/yugabyte
     env:
       FREELUNCH_TF: ${{ matrix.tool }}
       TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.plugin-cache

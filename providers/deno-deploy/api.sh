@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # The deploy of Deno Deploy, which api.yaml can't express: the app's source files go to
 # POST /v2/apps/{app}/deploy inline, each as base64 under its path relative to the app's folder.
 # The answer is a revision, whose id the generic wait step polls.

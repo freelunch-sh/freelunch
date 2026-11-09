@@ -1687,15 +1687,15 @@ hybrid_tf() {
 
 cmd_hybrid() {
   need_tf
-  local hosts platforms state=() vars=()
+  local hosts platforms state=() hyb_vars=()
   hosts="$(deployed_json host)"
   platforms="$(deployed_json platform)"
   check_checkout_tfvars "$ROOT/hybrid"
   if [[ -n "$PROJECT" || $SCRATCH_HYBRID -eq 1 ]]; then state=(-state="$(hybrid_state)"); fi
-  [[ -z "$PROJECT" ]] || vars=(-var "state_dir=$PROJECT")
+  [[ -z "$PROJECT" ]] || hyb_vars=(-var "state_dir=$PROJECT")
   log "hybrid: aggregating $hosts$([[ "$platforms" == "[]" ]] || echo ", platforms $platforms")"
   hybrid_tf init -input=false -upgrade=false >/dev/null
-  hybrid_tf apply -input=false -auto-approve ${state[@]+"${state[@]}"} ${vars[@]+"${vars[@]}"} -var "host_providers=$hosts" -var "platform_providers=$platforms" >/dev/null
+  hybrid_tf apply -input=false -auto-approve ${state[@]+"${state[@]}"} ${hyb_vars[@]+"${hyb_vars[@]}"} -var "host_providers=$hosts" -var "platform_providers=$platforms" >/dev/null
   hybrid_tf output ${state[@]+"${state[@]}"} hosts_by_provider
 }
 
@@ -3676,7 +3676,8 @@ api_yaml_json() {
 # api_load <provider>: api.yaml as JSON in $TMP/api/<provider>.json, checked for what the
 # driver needs. A provider whose API can't delete is refused: destroy could not clean up.
 api_load() {
-  local p="$1" f="$PROVIDERS_DIR/$p/api.yaml" j path
+  local p="$1" j path f
+  f="$PROVIDERS_DIR/$p/api.yaml"
   command -v jq >/dev/null || die "jq is required for the api engine"
   command -v curl >/dev/null || die "curl is required for the api engine"
   [[ -f "$f" ]] || die "api: $p has no api.yaml (providers/$p/)"
@@ -7654,21 +7655,21 @@ ci_token_help() {
 
 # ci_env_block <indent>: the env: lines that hand those secrets to a step
 ci_env_block() {
-  local indent="$1" extra="${2:-}" name what lines=()
-  [[ -z "$extra" ]] || lines+=("$extra")
+  local indent="$1" first_line="${2:-}" name what env_lines=()
+  [[ -z "$first_line" ]] || env_lines+=("$first_line")
   while IFS=$'\t' read -r name what; do
     [[ -n "$name" ]] || continue
     # shellcheck disable=SC2016 # a GitHub expression, not ours
-    lines+=("$(printf '%s: ${{ secrets.%s }}' "$name" "$name")")
+    env_lines+=("$(printf '%s: ${{ secrets.%s }}' "$name" "$name")")
   done < <(ci_secret_names)
   while IFS=$'\t' read -r name what; do
     [[ -n "$name" ]] || continue
     # shellcheck disable=SC2016 # a GitHub expression, not ours
-    lines+=("$(printf '%s: ${{ vars.%s }}' "$name" "$name")")
+    env_lines+=("$(printf '%s: ${{ vars.%s }}' "$name" "$name")")
   done < <(ci_variable_names)
-  [[ ${#lines[@]} -gt 0 ]] || return 0
+  [[ ${#env_lines[@]} -gt 0 ]] || return 0
   printf '%senv:\n' "$indent"
-  for name in "${lines[@]}"; do printf '%s  %s\n' "$indent" "$name"; done
+  for name in "${env_lines[@]}"; do printf '%s  %s\n' "$indent" "$name"; done
 }
 
 # ci_restore_env: write the files that secrets carry as text: the OCI profile and key, and the
@@ -8040,7 +8041,7 @@ ci_init() {
       --no-first-run)  first_run=no ;;
       --jobs=*)        jobs="${a#--jobs=}"
                        [[ "$jobs" =~ ^(provision|ci|cd)(,(provision|ci|cd))*$ ]] || die "ci init: --jobs takes provision, ci and cd, separated by commas" ;;
-      --set-secrets)   secrets=set ;;
+      --set-secrets)   secrets="set" ;;
       --print-secrets) secrets=print ;;
       --bundle) CI_BUNDLE_MODE=1 ;;
       --pipeline) pipeline=1 ;;
@@ -8346,7 +8347,7 @@ ci_oidc_gcp() {
 # scoped to the subscription, and none without: how much of the subscription CI may change is yours
 # to say.
 ci_oidc_azure() {
-  local how=ask repo subscription="" tenant="" app_name="" roles=() tfvars app_id obj_id names r subj n suffix creds
+  local how=ask repo subscription="" tenant="" app_name="" roles=() tfvars app_id obj_id names r subj n creds
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --run)          how=run ;;
@@ -8446,7 +8447,7 @@ ci_secret_value() {
 # command line; print only says what to run. ask lets whoever is there choose, and prints
 # when nobody can answer: putting secrets in a repository is not something to do unasked.
 ci_hand_over_secrets() {
-  local how="$1" base repo name what n=0 v=0 answer set=0 skipped="" cmd
+  local how="$1" base repo name what n=0 v=0 answer set=0 left_over="" cmd
   base="$(dirname "$PROJECT")"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   while IFS=$'\t' read -r name what; do [[ -z "$name" ]] || n=$((n + 1)); done < <(ci_secret_names)
@@ -8455,7 +8456,7 @@ ci_hand_over_secrets() {
   if [[ "$how" == ask ]]; then
     if interactive && command -v gh >/dev/null; then
       answer="$(ask "Set the $n secrets and $v variables the workflows pass on in the GitHub repository now with gh, or print the commands for you to run? (set/print)" print)"
-      case "$answer" in set|s|S|y|yes) how=set ;; *) how=print ;; esac
+      case "$answer" in set|s|S|y|yes) how="set" ;; *) how=print ;; esac
     else
       how=print
     fi
@@ -8473,7 +8474,7 @@ ci_hand_over_secrets() {
         log "set the secret $name in $repo ($what)"
         set=$((set + 1))
       else
-        skipped="$skipped $name"
+        left_over="$left_over $name"
         log "$name: nothing to put in it here ($what). Get it from: $(ci_token_help "$name"). Then put it in the shell or $(rel "$PROJECT")/.env and run ci init again, or gh secret set $name"
       fi
       rm -f "$TMP/secret.value"
@@ -8484,7 +8485,7 @@ ci_hand_over_secrets() {
         || die "ci init: gh couldn't set the variable $name in $repo (see above)"
       log "set the variable $name in $repo ($what)"
     done < <(ci_variable_names)
-    log "$set of $n secrets set in $repo${skipped:+; still to set:$skipped}"
+    log "$set of $n secrets set in $repo${left_over:+; still to set:$left_over}"
     return 0
   fi
   echo "  add these as secrets of the repository (Settings > Secrets and variables > Actions), or run each command:" >&2
@@ -9012,6 +9013,11 @@ cmd_test() { # cmd_test [folder...]: folders are relative to the checkout; `test
   fi
   if [[ ${#roots[@]} -gt 0 ]]; then
     while IFS= read -r dir; do
+      # A suite whose mocks only OpenTofu understands says so with tests/.tofu-only
+      if [[ -f "$dir/tests/.tofu-only" && "$(tool_name)" != tofu ]]; then
+        log "test ${dir#"$ROOT"/}: skipped, its mocks need OpenTofu"
+        continue
+      fi
       log "test ${dir#"$ROOT"/}"
       init_dir "$dir"
       tf_in "$dir" test || failed=1

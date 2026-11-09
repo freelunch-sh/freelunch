@@ -51,14 +51,14 @@ locals {
   recommended = [for k, p in local.providers : k if try(p.recommended, false) == true]
 
   invalid = {
-    missing_fields  = [for k, p in local.providers : k if !alltrue([for f in local.required_fields : try(p[f], null) != null])]
-    name_mismatch   = [for k, p in local.providers : k if try(p.name, "") != k]
-    bad_category    = [for k, p in local.providers : k if !contains(local.category_keys, try(p.category, ""))]
-    bad_enum        = [for k, p in local.providers : k if !alltrue([for f, allowed in local.enums : contains(allowed, try(tostring(p[f]), ""))])]
-    bad_behavior    = [for k, p in local.providers : k if try(p.behavior, null) != null && !contains(keys(local.behaviors), tostring(p.behavior))]
-    bad_engine      = [for k, p in local.providers : k if !alltrue([for f, v in p : contains(local.engines, tostring(v)) if f == "engine" || startswith(f, "engine_")])]
-    bad_jobs        = [for k, p in local.providers : k if try(p.jobs, null) != null && !alltrue([for j in p.jobs : contains(local.jobs, tostring(j))])]
-    bad_verified    = [for k, p in local.providers : k if try(p.verified, null) != null && !contains(local.verified, tostring(p.verified))]
+    missing_fields = [for k, p in local.providers : k if !alltrue([for f in local.required_fields : try(p[f], null) != null])]
+    name_mismatch  = [for k, p in local.providers : k if try(p.name, "") != k]
+    bad_category   = [for k, p in local.providers : k if !contains(local.category_keys, try(p.category, ""))]
+    bad_enum       = [for k, p in local.providers : k if !alltrue([for f, allowed in local.enums : contains(allowed, try(tostring(p[f]), ""))])]
+    bad_behavior   = [for k, p in local.providers : k if try(p.behavior, null) != null && !contains(keys(local.behaviors), tostring(p.behavior))]
+    bad_engine     = [for k, p in local.providers : k if !alltrue([for f, v in p : contains(local.engines, tostring(v)) if f == "engine" || startswith(f, "engine_")])]
+    bad_jobs       = [for k, p in local.providers : k if try(p.jobs, null) != null && !alltrue([for j in p.jobs : contains(local.jobs, tostring(j))])]
+    bad_verified   = [for k, p in local.providers : k if try(p.verified, null) != null && !contains(local.verified, tostring(p.verified))]
     # a ready provider (or one that says so) has what its engine runs on: tofu a stack, api an api.yaml
     no_stack        = [for k, p in local.providers : k if local.resolved_engine[k] == "tofu" && (try(p.engine, null) != null || try(p.status, "") == "ready") && !contains(local.stack_dirs, k)]
     no_api_yaml     = [for k, p in local.providers : k if local.resolved_engine[k] == "api" && !contains(local.api_dirs, k)]
@@ -95,8 +95,8 @@ locals {
 
   entries = {
     for k in local.sorted : k => merge(local.providers[k], {
-      iac_icon  = try(local.icons.iac[local.providers[k].iac], "?")
-      tier_icon = try(local.icons.tier[local.providers[k].free_tier_type], "?")
+      iac_icon     = try(local.icons.iac[local.providers[k].iac], "?")
+      tier_icon    = try(local.icons.tier[local.providers[k].free_tier_type], "?")
       behavior_tag = try(" · ${local.behaviors[local.providers[k].behavior]}", "")
       engine       = local.resolved_engine[k]
       # the engine, jobs and verification of an implemented provider, for the checklist

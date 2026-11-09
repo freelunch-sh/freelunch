@@ -16,6 +16,9 @@ for v in $(compgen -v FREELUNCH_STATE_); do unset "$v"; done
 REAL_TF="${FREELUNCH_TF:-$(command -v tofu || command -v terraform || true)}"
 REAL_TF="$(command -v "$REAL_TF" || true)"
 export REAL_TF
+# Not version | grep -q: grep quits at the first match, and a tofu that writes after that dies of
+# SIGPIPE, which pipefail turns into "not OpenTofu" (it did, on CI).
+is_opentofu() { local v; v="$(CHECKPOINT_DISABLE=1 "$REAL_TF" version 2>/dev/null)" || true; [[ "$v" == *OpenTofu* ]]; }
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 passed=0
@@ -1081,7 +1084,8 @@ between()  { { [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]; } || { echo "expected $2 
 run_test() { # run_test <name>: run test_<name> in a subshell with errexit on; its result in $WORK/results/<name>
   local rc start=$SECONDS
   set +e
-  (set -e; "test_$1") > "$WORK/$1.log" 2>&1
+  # The ERR trap names the command that failed, so a test that fails without saying why still shows where.
+  (set -eE; trap 'echo "  failed: $BASH_COMMAND (line $LINENO)" >&2' ERR; "test_$1") > "$WORK/$1.log" 2>&1
   rc=$?
   set -e
   mkdir -p "$WORK/results"
@@ -3134,7 +3138,7 @@ test_wait_goes_on_from_an_earlier_run() {
 state_store() {
   mkdir -p "$1-store"
   printf '# A folder stands in for the bucket.\npath = "%s/{stack}.tfstate"\n' "$1-store" > "$1/.freelunch/state.local.tfbackend"
-  if CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu; then
+  if is_opentofu; then
     echo "FREELUNCH_STATE_PASSPHRASE=correct horse battery staple" >> "$1/.freelunch/.env"
   else
     echo "FREELUNCH_STATE_PASSPHRASE=none" >> "$1/.freelunch/.env"
@@ -3214,7 +3218,7 @@ api_run() {
 # stops with the provider's status, an API error hides the app's secrets, and destroy deletes
 # only what freelunch made. A provider with an api.yaml and no fixture fails here.
 test_api_engine_lifecycle_for_every_provider() {
-  local f name dir out fake token scen src=() ours foreign other
+  local f name dir out fake token scen src_args=() ours foreign other
   printf 'SECRET_KEY=supersecretvalue\nPLAIN=1\n' > "$WORK/api-lifecycle.env"
   for f in "$ROOT"/providers/*/api.yaml "$ROOT"/tests/fixtures/*/api.yaml; do
     [[ -f "$f" ]] || continue
@@ -3226,35 +3230,35 @@ test_api_engine_lifecycle_for_every_provider() {
     token="$(jq -r .token "$scen")"
     ours="$(jq -r .ours_id "$scen")"; foreign="$(jq -r .foreign_id "$scen")"; other="$(jq -r .other_id "$scen")"
     # a provider that deploys source gets a folder of it
-    src=()
+    src_args=()
     if jq -e '.source_files' "$scen" >/dev/null; then
       rm -rf "$WORK/src-$name"; mkdir -p "$WORK/src-$name"
       while IFS= read -r f; do
         mkdir -p "$WORK/src-$name/$(dirname "$f")"; jq -r --arg f "$f" '.source_files[$f]' "$scen" > "$WORK/src-$name/$f"
       done < <(jq -r '.source_files | keys[]' "$scen")
-      src=(--source "$WORK/src-$name")
+      src_args=(--source "$WORK/src-$name")
     fi
     api_checkout "$dir" "$name"
     # create: the token goes in the config file, never on curl's command line
-    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --port 8080 --env-file "$WORK/api-lifecycle.env" ${src[@]+"${src[@]}"} 2>&1)"
+    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --port 8080 --env-file "$WORK/api-lifecycle.env" ${src_args[@]+"${src_args[@]}"} 2>&1)"
     contains "$out" "$name: freelunch-web: made"
     contains "$(cat "$fake/headers")" "$token"
     lacks "$(cat "$fake/argv")" "$token"
     contains "$(cat "$fake/bodies")" supersecretvalue
     lacks "$out" supersecretvalue
     # update: a service of ours is there, so it is changed, not made again
-    out="$(api_run "$dir" "$name" update deploy web --image ghcr.io/me/web:2 --env-file "$WORK/api-lifecycle.env" ${src[@]+"${src[@]}"} 2>&1)"
+    out="$(api_run "$dir" "$name" update deploy web --image ghcr.io/me/web:2 --env-file "$WORK/api-lifecycle.env" ${src_args[@]+"${src_args[@]}"} 2>&1)"
     contains "$out" "$name: freelunch-web: updated"
     lacks "$out" ": made"
     # a service of that name that freelunch didn't make is never touched
-    if out="$(api_run "$dir" "$name" foreign deploy web --image ghcr.io/me/web:1 ${src[@]+"${src[@]}"} 2>&1)"; then echo "$name: deploy over a foreign service should fail"; return 1; fi
+    if out="$(api_run "$dir" "$name" foreign deploy web --image ghcr.io/me/web:1 ${src_args[@]+"${src_args[@]}"} 2>&1)"; then echo "$name: deploy over a foreign service should fail"; return 1; fi
     contains "$out" "which freelunch didn't make"
     equals "$(grep -vc '^GET ' "$fake/log" || true)" 0
     # a deploy that ends badly stops with the provider's status
-    if out="$(api_run "$dir" "$name" failed deploy web --image ghcr.io/me/web:1 ${src[@]+"${src[@]}"} 2>&1)"; then echo "$name: a failed deploy should fail"; return 1; fi
+    if out="$(api_run "$dir" "$name" failed deploy web --image ghcr.io/me/web:1 ${src_args[@]+"${src_args[@]}"} 2>&1)"; then echo "$name: a failed deploy should fail"; return 1; fi
     contains "$out" "$(jq -r '.failed_says' "$ROOT/tests/fixtures/$name/scenario.json")"
     # an API error doesn't repeat the app's secrets
-    if out="$(api_run "$dir" "$name" rejected deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api-lifecycle.env" ${src[@]+"${src[@]}"} 2>&1)"; then echo "$name: a rejected create should fail"; return 1; fi
+    if out="$(api_run "$dir" "$name" rejected deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api-lifecycle.env" ${src_args[@]+"${src_args[@]}"} 2>&1)"; then echo "$name: a rejected create should fail"; return 1; fi
     contains "$out" "bad value <redacted> in env"
     lacks "$out" supersecretvalue
     # destroy: only ours (a 404 says it was gone already); the other two stay
@@ -3266,7 +3270,7 @@ test_api_engine_lifecycle_for_every_provider() {
     lacks "$(cat "$fake/log")" "$foreign"
     lacks "$(cat "$fake/log")" "$other"
     # dry run: nothing is sent, and the env value is hidden
-    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api-lifecycle.env" ${src[@]+"${src[@]}"} --dry-run 2>&1)"
+    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api-lifecycle.env" ${src_args[@]+"${src_args[@]}"} --dry-run 2>&1)"
     contains "$out" "would"
     lacks "$out" supersecretvalue
     [[ ! -e "$fake/log" ]] || { echo "$name: a dry run sent requests"; return 1; }
@@ -3511,7 +3515,7 @@ test_doctor_checks_cli_and_guided_providers() {
   contains "$out" "ok    fakecli signs in"
   contains "$out" "sample-guided (guided engine: steps by hand)"
   # the tool's token not set, and the tool not installed
-  out="$(FAKECLI_TOKEN= cli_in "$co" "$p" doctor 2>&1 || true)"
+  out="$(FAKECLI_TOKEN="" cli_in "$co" "$p" doctor 2>&1 || true)"
   contains "$out" "FAKECLI_TOKEN is not set"
   out="$(cd "$p" && PATH="/usr/bin:/bin" FAKECLI_TOKEN=tok "$co/bin/freelunch" doctor 2>&1 || true)"
   contains "$out" "fail  fakecli isn't installed (pip install fakecli)"
@@ -3537,7 +3541,7 @@ test_guided_engine_prints_the_steps_and_checks_the_token() {
   contains "$out" "fail  sample-guided doesn't take the token in SAMPLEG_TOKEN (401): invalid token <redacted>"
   lacks "$out" "sampleg-token-77"
   # no token set
-  out="$(SAMPLEG_TOKEN= guided check 2>&1 || true)"
+  out="$(SAMPLEG_TOKEN="" guided check 2>&1 || true)"
   contains "$out" "SAMPLEG_TOKEN is not set"
   # a provider with no way to check says so
   sed -i.bak '/^base_url:/,$d' "$co/providers/sample-guided/guided.yaml" && rm "$co/providers/sample-guided/guided.yaml.bak"
@@ -4006,7 +4010,8 @@ test_ci_init_hands_over_secrets_only_as_asked() {
   fails grep -q 'cf-from-env' "$p/fake.log"
   grep -qx 'key_file=~/.oci/freelunch_api_key.pem' "$p/gh/FREELUNCH_OCI_CONFIG"
   fails grep -q 'user=' "$p/fake.log"
-  contains "$out" "FREELUNCH_STATE_PASSPHRASE"
+  # Terraform can't encrypt the state, so there is no passphrase to hand over.
+  if is_opentofu; then contains "$out" "FREELUNCH_STATE_PASSPHRASE"; fi
   contains "$out" "still to set:"
   rm -r "$p/.github" "$p/gh"
   # Asked, and the answer is print or set.
@@ -4220,7 +4225,8 @@ test_ci_init_guides_the_secrets_and_the_first_run() {
   # where to get each, in what is printed and in what is left unset
   out="$(ci_in "$p" ci init --print-secrets 2>&1)"
   contains "$out" "get it from: dash.cloudflare.com > My Profile > API Tokens"
-  contains "$out" "get it from: the FREELUNCH_STATE_PASSPHRASE line in .freelunch/.env"
+  # Terraform can't encrypt the state, so there is no passphrase to hand over.
+  if is_opentofu; then contains "$out" "get it from: the FREELUNCH_STATE_PASSPHRASE line in .freelunch/.env"; fi
   # the state store's credentials are secrets of their own, and the account ID a variable
   contains "$out" "FREELUNCH_STATE_AWS_ACCESS_KEY_ID: the state store's credential"
   contains "$out" "CLOUDFLARE_ACCOUNT_ID (a variable, not a secret)"
@@ -4254,7 +4260,7 @@ test_ci_init_guides_the_secrets_and_the_first_run() {
 # repository), and its passphrase is then among the secrets.
 test_ci_init_creates_the_state_store_when_asked() {
   local p="$WORK/ci-store" out
-  CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu || return 0
+  is_opentofu || return 0
   git_project "$p"
   # nothing asked, nobody to answer: no store, and it says what to run
   out="$(ci_in "$p" ci init --print-secrets < /dev/null 2>&1)"
@@ -5168,7 +5174,7 @@ test_setup_says_what_is_wrong() {
   # The state goes in a branch of the project's repository, which has to be one.
   sed -i.bak 's/^NORTHFLANK_API_TOKEN=.*/NORTHFLANK_API_TOKEN=x/' "$p/.freelunch/.env" && rm "$p/.freelunch/.env.bak"
   if out="$(TEST_NO_HOME=1 setup_in "$p" --ci --no-doctor 2>&1)"; then echo "setup should have failed"; return 1; fi
-  if CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu; then
+  if is_opentofu; then
     contains "$out" "state init git: $p isn't a git repository"
   else
     contains "$out" "state init git: the state goes into your repository"
@@ -5212,7 +5218,7 @@ git_project() {
 # nothing else, shared with a clone through the remote, and nothing of it left in the checkout.
 test_git_state_store_keeps_the_state_in_a_branch() {
   local p="$WORK/gitstore" q="$WORK/gitstore-clone" out
-  CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu || return 0
+  is_opentofu || return 0
   git_project "$p"
   out="$(in_dir "$p" "$CLI" state init git 2>&1)"
   contains "$out" "state.git.tfbackend: the state goes to the branch freelunch-state of this repository, encrypted"
@@ -5253,7 +5259,7 @@ test_git_state_store_needs_a_repository_and_opentofu() {
   new_project "$p"
   if out="$(in_dir "$p" "$CLI" state init git 2>&1)"; then echo "state init should have failed"; return 1; fi
   # Terraform can't encrypt the state, so it stops before it looks at the repository.
-  if CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu; then
+  if is_opentofu; then
     contains "$out" "isn't a git repository (git init, commit, and add a remote)"
   else
     contains "$out" "takes OpenTofu"
@@ -5264,7 +5270,7 @@ test_git_state_store_needs_a_repository_and_opentofu() {
 # A state kept in the repository's own branch is pushed by the workflows, so they may write.
 test_ci_init_lets_the_workflows_push_the_git_state() {
   local p="$WORK/ci-git" wait
-  CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu || return 0
+  is_opentofu || return 0
   git_project "$p"
   in_dir "$p" "$CLI" state init git >/dev/null 2>&1
   ci_in "$p" ci init >/dev/null 2>&1
@@ -5281,7 +5287,7 @@ test_ci_init_lets_the_workflows_push_the_git_state() {
 # A state file changed in the branch is refused, not read: the encryption is authenticated.
 test_git_state_store_refuses_a_tampered_file() {
   local p="$WORK/gitstore-tamper" t="$WORK/gitstore-tamper-edit" out
-  CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu || return 0
+  is_opentofu || return 0
   git_project "$p"
   in_dir "$p" "$CLI" state init git >/dev/null 2>&1
   in_dir "$p" "$CLI" state push >/dev/null 2>&1
@@ -5342,6 +5348,7 @@ test_up_with_no_domain_says_where_the_app_is() {
 jobs="${TEST_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 if [[ "${1:-}" == -j ]]; then jobs="${2:?-j takes a number}"; shift 2; fi
 echo "tests/cli.sh"
+# shellcheck disable=SC2207 # bash 3.2 has no mapfile
 tests=($(declare -F | awk '{print $3}' | grep '^test_' | sed 's/^test_//' | grep -E "${1:-.}"))
 reported=" "
 if [[ $jobs -le 1 ]]; then
