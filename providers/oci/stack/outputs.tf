@@ -13,3 +13,8 @@ output "free_tier_usage" {
   description = "Always Free consumption (used/cap)."
   value       = module.docker_host.free_tier_usage
 }
+
+output "budget_alert" {
+  description = "Whether a budget alert watches the tenancy."
+  value       = module.budget.enabled
+}

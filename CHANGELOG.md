@@ -12,6 +12,15 @@ release can change commands and the project layout.
 
 ### Added
 
+- **OCI cost safety nets.** A `budget` module (`budget_alert_emails`) makes a $1 monthly budget
+  with email alerts with the stack; `doctor` reports whether the tenancy can be charged at all,
+  checks the whole tenancy's volumes, reserved IPs and load balancers against Always Free; `plan oci` prints its cost; `status` and the end of
+  `apply` show the month's bill from OCI's usage API.
+- **`.freelunch/billing.tfvars`:** a monthly `spend_cap_usd` across targets, a `paid_fallback`
+  that `up` uses after N days without room if it fits under the cap, and `credit_expires_<provider>`
+  dates in `status` and `doctor`.
+- **A wait that ends says why:** SIGTERM and SIGHUP are named, a wait that vanished says what that
+  usually means, and `ci wait --cancel` turns the workflow off without rewriting FREELUNCH_BUNDLE.
 - **`capacity_fallbacks` for the OCI stack.** Smaller A1 sizes to settle for while a wait for
   capacity goes on: after every availability domain has been tried with the size asked for, the
   wait steps down the list, then starts over. The wait names the size it got. In a public

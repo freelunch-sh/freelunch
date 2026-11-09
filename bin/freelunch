@@ -1358,6 +1358,12 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
     log "$p: the session of profile $profile ends at $(fmt_time "$WAIT_SESSION"), in $(fmt_duration $((WAIT_SESSION - $(date +%s)))), and the wait with it. An API key doesn't expire (oci setup bootstrap)"
   fi
   wait_state waiting "starting"
+  # Ctrl-C is you stopping it. A TERM or HUP is something else ending it (a kill, a shutdown, the
+  # terminal closing), so it says which, and tells you like any other end. Only a KILL gets
+  # no word, and status then says what a wait that vanished means.
+  trap 'WAIT_INTERRUPTED=1; [[ -z "$SLEEP_PID" ]] || kill "$SLEEP_PID" 2>/dev/null; die "$p: stopped waiting for capacity (interrupted with Ctrl-C) after $(attempts "$WAIT_TRIES")"' INT
+  trap '[[ -z "$SLEEP_PID" ]] || kill "$SLEEP_PID" 2>/dev/null; die "$p: stopped waiting for capacity: got SIGTERM (a kill, a shutdown or a restart) after $(attempts "$WAIT_TRIES")"' TERM
+  trap '[[ -z "$SLEEP_PID" ]] || kill "$SLEEP_PID" 2>/dev/null; die "$p: stopped waiting for capacity: got SIGHUP (the terminal or the SSH session closed) after $(attempts "$WAIT_TRIES"). Run it with nohup, in tmux, or hand it to CI (freelunch ci wait)"' HUP
   prepare_stack apply "$p"
   while IFS= read -r a; do
     args+=("$a")
@@ -1383,7 +1389,6 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
     WAIT_AD="$(ads_in "$TMP/reviewed.json")" WAIT_SIZE="$(sizes_in "$TMP/reviewed.json")"
     exact=1
   fi
-  trap 'WAIT_INTERRUPTED=1; [[ -z "$SLEEP_PID" ]] || kill "$SLEEP_PID" 2>/dev/null; die "$p: stopped waiting for capacity"' INT TERM
 
   delay="$interval"
   [[ $rotates -eq 0 || $WAIT_ATTEMPT -eq 1 ]] || offset=(-var="availability_domain_offset=$((WAIT_ATTEMPT - 1))")
@@ -1478,7 +1483,7 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
     [[ $rotates -eq 0 ]] || offset=(-var="availability_domain_offset=$((WAIT_ATTEMPT - 1))")
     nap_sleep
   done
-  trap - INT TERM
+  trap - INT TERM HUP
   sync_now "$p"
   if [[ $nothing -eq 1 ]]; then
     log "$p: attempt $WAIT_ATTEMPT had nothing left to do: the plan has no changes"
@@ -1567,6 +1572,7 @@ plan_warnings() {
   destroyed="$(jq -r '[.resource_changes[]? | select(.change.actions == ["delete"]) | .address] | join(", ")' "$json")"
   [[ -z "$replaced" ]] || log "$1: this plan replaces $replaced. Each one is destroyed and created again, along with what is in it (a VCN takes its hosts with it)"
   [[ -z "$destroyed" ]] || log "$1: this plan destroys $destroyed"
+  [[ "$1" != "oci" ]] || plan_cost_oci "$json"
   if [[ "$1" == "northflank" && -n "${NORTHFLANK_API_TOKEN:-}" ]]; then
     id="$(tfvar "$(config_dir northflank)/terraform.tfvars" name_prefix)"; id="${id:-freelunch}"
     if [[ "$(nf GET "/projects/$id")" == 404 ]]; then
@@ -1587,6 +1593,73 @@ plan_warnings() {
     log "$1: the tenancy has no VCN to spare in $(tfvar "$tfvars" region) ($used in use), and OCI goes on counting a deleted VCN for a while, so the new one would fail with LimitExceeded. Destroy first (freelunch destroy oci), and plan again a few minutes later"
   else
     log "$1: the tenancy has no VCN left in $(tfvar "$tfvars" region) ($used in use), so creating this one would fail with LimitExceeded. Delete one you don't use first"
+  fi
+}
+
+# plan_cost_oci <plan json>: one line for plan: "$0, within Always Free" or what the plan
+# keeps or makes outside it. It adds up everything the plan leaves in place (the stack's
+# hosts, volumes, IPs and load balancers) against the Always Free allowance in
+# providers/oci/provider.yaml.
+plan_cost_oci() {
+  local json="$1" a1_max mem_max micro_max gb_max out
+  a1_max="$(sed -n 's/^ *max_ocpus: *\([0-9]*\).*/\1/p' "$PROVIDERS_DIR/oci/provider.yaml" | head -1)"
+  mem_max="$(sed -n 's/^ *max_memory_gb: *\([0-9]*\).*/\1/p' "$PROVIDERS_DIR/oci/provider.yaml" | head -1)"
+  micro_max="$(sed -n 's/^ *max_instances: *\([0-9]*\).*/\1/p' "$PROVIDERS_DIR/oci/provider.yaml" | head -1)"
+  gb_max="$(sed -n 's/^ *max_block_storage_gb: *\([0-9]*\).*/\1/p' "$PROVIDERS_DIR/oci/provider.yaml" | head -1)"
+  out="$(jq -r --argjson a1 "${a1_max:-2}" --argjson mem "${mem_max:-12}" --argjson micro "${micro_max:-2}" --argjson gb "${gb_max:-200}" '
+    [.resource_changes[]? | select(.change.actions != ["delete"] and .change.after != null)] as $r
+    | [$r[] | select(.type == "oci_core_instance") | .change.after] as $i
+    | ([$i[] | select(.shape == "VM.Standard.A1.Flex") | (.shape_config[0].ocpus // 0)] | add // 0) as $o
+    | ([$i[] | select(.shape == "VM.Standard.A1.Flex") | (.shape_config[0].memory_in_gbs // 0)] | add // 0) as $m
+    | ([$i[] | select(.shape == "VM.Standard.E2.1.Micro")] | length) as $e
+    | [$i[] | select(.shape != "VM.Standard.A1.Flex" and .shape != "VM.Standard.E2.1.Micro") | .shape] as $paid
+    | (([$i[] | (.source_details[0].boot_volume_size_in_gbs // 0 | tonumber)] | add // 0)
+      + ([$r[] | select(.type == "oci_core_volume") | (.change.after.size_in_gbs // 0 | tonumber)] | add // 0)) as $s
+    | ([$r[] | select(.type == "oci_load_balancer_load_balancer")] | length) as $lb
+    | [ (if $o > $a1 then "A1 \($o) OCPUs (free: \($a1))" else empty end),
+        (if $m > $mem then "A1 \($m) GB memory (free: \($mem))" else empty end),
+        (if $e > $micro then "\($e) AMD micro VMs (free: \($micro))" else empty end),
+        (if ($paid | length) > 0 then "paid shape \($paid | unique | join(", "))" else empty end),
+        (if $s > $gb then "\($s) GB of volumes (free: \($gb))" else empty end),
+        (if $lb > 1 then "\($lb) load balancers (free: 1)" else empty end) ] | join("; ")
+    ' "$json" 2>/dev/null)" || return 0
+  if [[ -z "$out" ]]; then
+    log "oci: cost: \$0, within Always Free"
+  else
+    log "oci: cost: outside Always Free, so billed: $out"
+  fi
+}
+
+# oci_month_cost <tenancy> [tfvars]: what the tenancy has been billed since the 1st of this
+# month, from OCI's usage API, as a number. Fails when OCI can't say.
+oci_month_cost() {
+  local from to out
+  from="$(date -u +%Y-%m-01T00:00:00Z)"
+  to="$(date -u -d tomorrow +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -v+1d +%Y-%m-%dT00:00:00Z)"
+  out="$(oci usage-api usage-summary request-summarized-usages --tenant-id "$1" \
+    --time-usage-started "$from" --time-usage-ended "$to" --granularity MONTHLY --query-type COST "${OCI_ARGS[@]}" 2>&1)" \
+    && jq -er '[.data.items[]? | .["computed-amount"] // 0] | add // 0' <<< "$out" 2>/dev/null && return 0
+  echo "$out"
+  return 1
+}
+
+# billing_line_oci: "billing this month: $0.00", for status and the end of an apply. Nothing
+# without the OCI CLI or a tenancy.
+billing_line_oci() {
+  local tfvars tenancy cost
+  command -v oci >/dev/null || return 0
+  tfvars="$(config_dir oci)/terraform.tfvars"
+  tenancy="$(tfvar "$tfvars" tenancy_ocid)"
+  [[ -n "$tenancy" ]] || return 0
+  oci_args "$tfvars"
+  if cost="$(oci_month_cost "$tenancy")"; then
+    if awk -v c="$cost" 'BEGIN { exit !(c > 0) }'; then
+      printf '  %-14s billing this month: $%.2f. Always Free costs nothing, so something is billed: Console > Cost Analysis shows what\n' oci "$cost"
+    else
+      printf '  %-14s billing this month: $0.00\n' oci
+    fi
+  else
+    printf '  %-14s billing this month: unknown (%s)\n' oci "$(oci_error "$cost")"
   fi
 }
 
@@ -1796,7 +1869,7 @@ cmd_lifecycle() { # plan|apply|destroy
       [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
       for a in ${hosts[@]+"${hosts[@]}"} ${platforms[@]+"${platforms[@]}"} ${services[@]+"${services[@]}"} ${glue[@]+"${glue[@]}"}; do
         saved="$out"
-        [[ -n "$saved" || $user_data -eq 0 || "$(meta "$a" layer)" != "host" ]] || saved="$TMP/$a.tfplan"
+        [[ -n "$saved" || ( $user_data -eq 0 && "$a" != "oci" ) || "$(meta "$a" layer)" != "host" ]] || saved="$TMP/$a.tfplan"
         if [[ -n "$saved" ]]; then
           # A plan holds the stack's variables and state, so nobody else may read it, not
           # even while it is written. tofu/terraform keep the mode of a file that exists.
@@ -1836,6 +1909,7 @@ cmd_lifecycle() { # plan|apply|destroy
       for a in ${glue[@]+"${glue[@]}"}; do apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; done
       # apply all also keeps the project's DNS records (after the hosts have their addresses)
       if [[ " ${names[*]-} " == *" all "* ]]; then dns_all apply; fi
+      [[ " ${hosts[*]-} " != *" oci "* ]] || { echo "Billing"; billing_line_oci; }
       next_steps ${hosts[@]+"${hosts[@]}"} ${platforms[@]+"${platforms[@]}"} ;;
     destroy)
       # destroy all first removes the records the project made, while it still knows the hosts
@@ -1901,6 +1975,7 @@ show_wait() { # show_wait <provider> <wait.state>
       else
         echo "$p: the wait for capacity ended unexpectedly after $(attempts "$attempt"), $(fmt_time "$updated") (pid $pid is gone)"
         echo "  last: $last"
+        echo "  a wait that vanishes was killed (SIGKILL, out of memory) or lost its machine (shutdown, power, a sleep that never ended). freelunch apply $p --wait-for-capacity goes on; for a wait that outlives this machine: freelunch ci wait"
       fi ;;
     done)
       echo "$p: $last"
@@ -2078,6 +2153,14 @@ status_tokens() {
   printf '%s' "$lines"
 }
 
+# status_billing: what the clouds that can say have billed this month
+status_billing() {
+  local line
+  [[ -d "$(stack_dir oci)" && -f "$(config_dir oci)/terraform.tfstate" ]] || return 0
+  line="$(billing_line_oci)"
+  [[ -z "$line" ]] || printf 'Billing\n%s\n' "$line"
+}
+
 status_waits() {
   local p file approval made header=0
   for p in $(all_providers); do
@@ -2113,6 +2196,8 @@ cmd_status() {
   [[ $found -ne 0 ]] || status_apps
   status_tunnels "$found"
   status_tokens
+  status_billing
+  status_money
   status_waits
 }
 
@@ -3341,6 +3426,137 @@ project_targets() {
     | sed -nE 's/.*(^|[[:space:]])targets[[:space:]]*=[[:space:]]*\[([^]]*)\].*/\2/p' | { grep -o '"[^"]*"' || true; } | tr -d '"'
 }
 
+# --- the project's money rules ---------------------------------------------------------
+#
+# .freelunch/billing.tfvars holds what freelunch can't know about the accounts, one quoted
+# value per line:
+#   spend_cap_usd             = "10"    # one limit for a month's bill across every target
+#   paid_fallback             = "aws"   # a paid target up uses only after the free ones had no room
+#   paid_fallback_after_days  = "7"     # for this many days in a row
+#   paid_fallback_monthly_usd = "6"     # what that target costs a month (freelunch has no price list)
+#   credit_expires_gcp        = "2027-02-01"   # when a free-trial credit ends, per provider
+# With paid_fallback set and a spend_cap_usd, the fallback is only used when its monthly cost
+# and what OCI has billed so far this month fit under the cap.
+
+billing_file() { echo "$(state_root)/billing.tfvars"; }
+billing_var() { [[ -f "$(billing_file)" ]] || return 0; tfvar "$(billing_file)" "$1"; }
+
+# no_room_file: when up first found no room anywhere, as seconds since the epoch
+no_room_file() { echo "$(state_root)/no-room.since"; }
+
+# billed_so_far: this month's bill so far in dollars where freelunch can read it (OCI's usage
+# API), 0 where it can't
+billed_so_far() {
+  local tfvars tenancy cost
+  command -v oci >/dev/null || { echo 0; return 0; }
+  tfvars="$(config_dir oci)/terraform.tfvars"
+  tenancy="$(tfvar "$tfvars" tenancy_ocid)"
+  [[ -n "$tenancy" ]] || { echo 0; return 0; }
+  oci_args "$tfvars"
+  cost="$(oci_month_cost "$tenancy")" && echo "$cost" || echo 0
+}
+
+# paid_fallback_gate: succeeds when up may use the paid fallback now; otherwise says why not
+# (to stderr) and fails
+paid_fallback_gate() {
+  local days since cost cap billed now elapsed
+  days="$(billing_var paid_fallback_after_days)"; days="${days:-7}"
+  since="$(cat "$(no_room_file)" 2>/dev/null || true)"
+  now="$(date +%s)"
+  if [[ ! "$since" =~ ^[0-9]+$ ]]; then
+    log "up: the paid fallback $(billing_var paid_fallback) waits until the free targets have had no room for $days day(s); the clock starts when a run finds none" >&2
+    return 1
+  fi
+  elapsed=$((now - since))
+  if [[ $elapsed -lt $((days * 86400)) ]]; then
+    log "up: no free target has had room for $(fmt_duration "$elapsed"); the paid fallback $(billing_var paid_fallback) is used after $days day(s)" >&2
+    return 1
+  fi
+  cost="$(billing_var paid_fallback_monthly_usd)"
+  cap="$(billing_var spend_cap_usd)"
+  if [[ -n "$cap" ]]; then
+    if [[ ! "$cost" =~ ^[0-9.]+$ ]]; then
+      log "up: the paid fallback is held back: spend_cap_usd is set, but paid_fallback_monthly_usd isn't, so what it would cost can't be checked against the cap" >&2
+      return 1
+    fi
+    billed="$(billed_so_far)"
+    if awk -v c="$cost" -v b="$billed" -v cap="$cap" 'BEGIN { exit !(c + b > cap) }'; then
+      log "up: the paid fallback is held back by spend_cap_usd: it costs about \$$cost a month, \$$billed is billed this month already, and the cap is \$$cap" >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# money_credits <line printer>: the free-trial credits of billing.tfvars as "provider date days
+# state" lines, state being ended, soon, ok or bad (not a date)
+money_credits() {
+  local file key date exp now
+  file="$(billing_file)"
+  [[ -f "$file" ]] || return 0
+  now="$(date +%s)"
+  while IFS= read -r key; do
+    date="$(billing_var "$key")"
+    exp="$(date -j -f %Y-%m-%d "$date" +%s 2>/dev/null || date -d "$date" +%s 2>/dev/null || true)"
+    if [[ -z "$exp" ]]; then echo "${key#credit_expires_} $date 0 bad"
+    elif [[ $now -ge $exp ]]; then echo "${key#credit_expires_} $date 0 ended"
+    elif [[ $(((exp - now) / 86400)) -le $TOKEN_WARN_DAYS ]]; then echo "${key#credit_expires_} $date $(((exp - now) / 86400)) soon"
+    else echo "${key#credit_expires_} $date $(((exp - now) / 86400)) ok"; fi
+  done < <(sed -n 's/^[[:space:]]*\(credit_expires_[a-z0-9_]*\)[[:space:]]*=.*/\1/p' "$file")
+}
+
+# status_money: the spend cap, the paid fallback, and when each free-trial credit ends
+status_money() {
+  local cap fb name date days state lines=""
+  [[ -f "$(billing_file)" ]] || return 0
+  cap="$(billing_var spend_cap_usd)"
+  fb="$(billing_var paid_fallback)"
+  [[ -z "$cap" ]] || lines="$lines$(printf '  %-14s spend cap $%s a month across every target (billed so far on OCI: $%s)' cap "$cap" "$(billed_so_far)")"$'\n'
+  [[ -z "$fb" ]] || lines="$lines$(printf '  %-14s paid fallback %s after %s day(s) without room, about $%s a month' fallback "$fb" "$(billing_var paid_fallback_after_days)" "$(billing_var paid_fallback_monthly_usd)")"$'\n'
+  while read -r name date days state; do
+    case "$state" in
+      bad)   lines="$lines$(printf '  %-14s %s is not a date (YYYY-MM-DD)' "$name" "$date")"$'\n' ;;
+      ended) lines="$lines$(printf '  %-14s free-trial credit ended on %s: the account bills now' "$name" "$date")"$'\n' ;;
+      soon)  lines="$lines$(printf '  %-14s free-trial credit ends on %s, in %s days: move off it or expect a bill' "$name" "$date" "$days")"$'\n' ;;
+      ok)    lines="$lines$(printf '  %-14s free-trial credit ends on %s, in %s days' "$name" "$date" "$days")"$'\n' ;;
+    esac
+  done < <(money_credits)
+  [[ -n "$lines" ]] || return 0
+  echo "Money"
+  printf '%s' "$lines"
+}
+
+# doctor_money: billing.tfvars makes sense: a fallback that can be made, a cap it fits under,
+# credits that haven't ended
+doctor_money() {
+  local fb cost cap name date days state
+  [[ -f "$(billing_file)" ]] || return 0
+  echo "Money ($(rel "$(billing_file)"))"
+  fb="$(billing_var paid_fallback)"; cost="$(billing_var paid_fallback_monthly_usd)"; cap="$(billing_var spend_cap_usd)"
+  if [[ -n "$fb" ]]; then
+    if [[ ! -f "$PROVIDERS_DIR/$fb/provider.yaml" || ! -d "$(stack_dir "$fb")" ]]; then
+      check fail "paid_fallback $fb has no stack to make: freelunch list shows the ones that exist (Hetzner is only planned)"
+    elif ! is_configured "$fb"; then
+      check fail "paid_fallback $fb has no terraform.tfvars yet: freelunch init $fb writes an example"
+    else
+      check ok "paid fallback $fb, used after $(billing_var paid_fallback_after_days) day(s) without room"
+    fi
+    [[ -z "$cap" || "$cost" =~ ^[0-9.]+$ ]] || check warn "spend_cap_usd is set but paid_fallback_monthly_usd isn't, so the fallback is never used: freelunch can't check an unknown cost against the cap"
+    if [[ -n "$cap" && "$cost" =~ ^[0-9.]+$ ]] && awk -v c="$cost" -v cap="$cap" 'BEGIN { exit !(c > cap) }'; then
+      check fail "the paid fallback costs about \$$cost a month, over spend_cap_usd \$$cap, so it can never be used"
+    fi
+  fi
+  [[ -z "$cap" ]] || check ok "spend cap \$$cap a month across every target"
+  while read -r name date days state; do
+    case "$state" in
+      bad)   check warn "$name: $date is not a date (YYYY-MM-DD)" ;;
+      ended) check warn "$name: the free-trial credit ended on $date, so the account bills now" ;;
+      soon)  check warn "$name: the free-trial credit ends on $date, in $days days" ;;
+      ok)    check ok "$name: free-trial credit until $date" ;;
+    esac
+  done < <(money_credits)
+}
+
 # up_targets: the targets in the order up tries them. A name apps.tfvars lists that isn't a
 # stack with a terraform.tfvars is an error; auto takes whatever is configured.
 up_targets() {
@@ -3464,6 +3680,22 @@ cmd_up() {
   list="$(up_targets)" || exit 1
   local targets=()
   while IFS= read -r t; do [[ -z "$t" ]] || targets+=("$t"); done <<< "$list"
+  # A paid fallback is tried last, and only once the free targets have had no room long enough
+  # and its cost fits under the cap (see the money rules above).
+  local fallback; fallback="$(billing_var paid_fallback)"
+  if [[ -n "$fallback" ]]; then
+    local ordered=() fb_listed=0
+    for t in "${targets[@]}"; do
+      if [[ "$t" == "$fallback" ]]; then fb_listed=1; continue; fi
+      ordered+=("$t")
+    done
+    if is_deployed "$fallback" || { [[ -d "$(stack_dir "$fallback")" ]] && is_configured "$fallback" && { [[ $dry_run -eq 1 ]] || paid_fallback_gate; }; }; then
+      ordered+=("$fallback")
+    elif [[ $fb_listed -eq 1 && $dry_run -eq 1 ]]; then
+      log "up: the paid fallback $fallback would be held back"
+    fi
+    targets=(${ordered[@]+"${ordered[@]}"})
+  fi
   [[ ${#targets[@]} -gt 0 ]] || die "up: nothing to deploy to: no host or container platform has a terraform.tfvars in $(rel "$(state_root)"). freelunch init oci (or northflank, cloud-run, scaleway) writes an example to fill in"
   log "up: targets, in order: ${targets[*]}"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
@@ -3513,10 +3745,16 @@ cmd_up() {
     return 0
   fi
   if [[ -z "$chosen" ]]; then
+    [[ -f "$(no_room_file)" ]] || date +%s > "$(no_room_file)"
     printf '%s\n' "${tried[@]}" | sed 's/^/  /' >&2
     die "up: no target has room right now (above). Nothing was deployed; the next run tries them again, and freelunch apply <stack> --wait-for-capacity waits for one"
   fi
   [[ ${#skipped[@]} -eq 0 ]] || log "up: no room at ${skipped[*]}; using $chosen"
+  if [[ -n "$fallback" && "$chosen" == "$fallback" ]]; then
+    log "up: using the paid fallback $fallback, about \$$(billing_var paid_fallback_monthly_usd) a month. It bills until you destroy it (freelunch destroy $fallback) once a free target has room"
+  else
+    rm -f "$(no_room_file)"
+  fi
 
   for t in "${targets[@]}"; do
     [[ "$t" == "$chosen" ]] || ! is_deployed "$t" || others+=("$t")
@@ -6842,6 +7080,7 @@ doctor_oci() {
     return 0
   fi
   [[ -z "$tenancy" ]] || doctor_oci_limits "$tenancy" "$tfvars" "$region"
+  [[ -z "$tenancy" ]] || doctor_oci_billing "$tenancy" "$tfvars"
 }
 
 # doctor_oci_limits <tenancy> <tfvars> <region>: what the oci stack still has to create, next
@@ -6894,6 +7133,95 @@ doctor_oci_limits() {
     check ok "A1: $total of the $free free OCPUs in use in the tenancy, and this stack adds $want"
   else
     check ok "A1: $total of the $free free OCPUs in use in the tenancy"
+  fi
+}
+
+# oci_search <tenancy> <query>: the items of an OCI Search query across every compartment of
+# the tenancy, as a JSON array, with OCI_ARGS
+oci_search() {
+  local out
+  out="$(oci search resource structured-search --query-text "$2" --all "${OCI_ARGS[@]}" 2>&1)" \
+    && jq -ce '.data.items // .data // []' <<< "$out" 2>/dev/null && return 0
+  echo "$out"
+  return 1
+}
+
+# oci_billing_state <tenancy>: "paid" when the tenancy may create paid compute (a free trial's
+# credit or Pay As You Go) and "free" when it is Always Free only. The paid E4 core limit
+# is 0 in every availability domain of a tenancy that has not got a trial or been upgraded.
+# Nothing if OCI can't say.
+oci_billing_state() {
+  local ads ad out avail used paid=0
+  ads="$(oci iam availability-domain list -c "$1" "${OCI_ARGS[@]}" 2>/dev/null | jq -er '.data[].name' 2>/dev/null)" || return 1
+  for ad in $ads; do
+    out="$(oci_limit "$1" compute standard-e4-core-count "$ad")" || return 1
+    read -r avail used <<< "$out"
+    [[ "${avail:-0}" -le 0 && "${used:-0}" -le 0 ]] || paid=1
+  done
+  if [[ $paid -eq 1 ]]; then echo paid; else echo free; fi
+}
+
+# doctor_oci_billing <tenancy> <tfvars>: whether a charge is possible at all, whether a
+# budget alert watches the tenancy, and what the whole tenancy uses of the Always Free
+# storage, IPs and load balancers, which the stack's own guardrails can't see
+doctor_oci_billing() {
+  local tenancy="$1" tfvars="$2" budgets state out used=0 want=0 gb existing key shape ocpus
+  local ips reserved loose lbs nlbs state_file free
+  # A budget alert is the net under everything else.
+  if budgets="$(oci budgets budget list -c "$tenancy" --all "${OCI_ARGS[@]}" 2>&1)" && jq -e '.data | length > 0' <<< "$budgets" >/dev/null 2>&1; then
+    check ok "budget alert: $(jq -r '[.data[] | "\(."display-name") (\(.amount)/month)"] | join(", ")' <<< "$budgets") watches the tenancy"
+  elif grep -qs '^[[:space:]]*budget_alert_emails[[:space:]]*=[[:space:]]*\[[[:space:]]*"' "$tfvars"; then
+    check ok "budget alert: budget_alert_emails is set, so apply creates a \$1 budget with an alert before the first VM"
+  else
+    check warn "no budget alert: anything billed goes unnoticed. Set budget_alert_emails = [\"you@example.com\"] in $(rel "$tfvars"); apply then creates a \$1 monthly budget with an email alert"
+  fi
+
+  # Whether a charge is possible at all.
+  if state="$(oci_billing_state "$tenancy")"; then
+    if [[ "$state" == "paid" ]]; then
+      check ok "billing: this tenancy may create paid resources (a free trial's credit or Pay As You Go), so anything outside Always Free can be charged"
+    else
+      check ok "billing: Always Free only, with no paid compute allowed, so compute can't be charged."
+    fi
+  else
+    check warn "can't tell whether the tenancy can create paid resources"
+  fi
+
+  # Storage across the tenancy: boot volumes plus block volumes, 200 GB free together.
+  state_file="$(config_dir oci)/terraform.tfstate"
+  existing=" $(jq -r '[.outputs.hosts.value[]?.name] | join(" ")' "$state_file" 2>/dev/null || true) "
+  while IFS=$'\t' read -r key gb; do
+    [[ "$existing" == *" $key "* ]] || want=$((want + ${gb:-100}))
+  done < <(tfvars_map "$tfvars" instances boot_volume_gb)
+  [[ -n "$(tfvars_map "$tfvars" instances boot_volume_gb)" || "$existing" != "  " ]] || want=100
+  if out="$({ oci_search "$tenancy" "query bootvolume resources return allAdditionalFields"; oci_search "$tenancy" "query volume resources return allAdditionalFields"; } 2>&1)" \
+     && used="$(jq -s '[.[][]? | select((."lifecycle-state" // "AVAILABLE") == "AVAILABLE") | ((."additional-details" // {}) | (.sizeInGBs // .["size-in-gbs"] // 0) | tonumber)] | add // 0' <<< "$out" 2>/dev/null)"; then
+    free="$(sed -n 's/^ *max_block_storage_gb: *\([0-9]*\).*/\1/p' "$PROVIDERS_DIR/oci/provider.yaml" | head -1)"
+    free="${free:-200}"
+    if [[ $((used + want)) -gt $free ]]; then
+      check fail "storage: the tenancy's boot and block volumes hold $used GB, and this stack adds $want GB, over the Always Free $free GB. The rest is billed. Delete a volume you don't use, or lower boot_volume_gb"
+    else
+      check ok "storage: $used of the $free free GB of boot and block volumes in use in the tenancy$([[ $want -eq 0 ]] || echo ", and this stack adds $want")"
+    fi
+  else
+    check warn "can't read the tenancy's volumes: $(oci_error "$out")"
+  fi
+
+  # Reserved public IPs and load balancers.
+  if ips="$(oci_search "$tenancy" "query publicip resources return allAdditionalFields")"; then
+    reserved="$(jq '[.[] | select((."additional-details".lifetime // "") == "RESERVED")] | length' <<< "$ips")"
+    loose="$(jq '[.[] | select((."additional-details".lifetime // "") == "RESERVED" and ((."additional-details".assignedEntityId // "") == ""))] | length' <<< "$ips")"
+    if [[ $loose -gt 0 ]]; then check warn "reserved IPs: $loose of $reserved aren't attached to anything, and an unused reserved IP is the likeliest leftover to be billed. Delete it if you don't need it"
+    else check ok "reserved IPs: $reserved in the tenancy, none unattached"; fi
+  else
+    check warn "can't read the tenancy's public IPs: $(oci_error "$ips")"
+  fi
+  if lbs="$(oci_search "$tenancy" "query loadbalancer resources")" && nlbs="$(oci_search "$tenancy" "query networkloadbalancer resources")"; then
+    lbs="$(jq length <<< "$lbs")"; nlbs="$(jq length <<< "$nlbs")"
+    if [[ $lbs -gt 1 || $nlbs -gt 1 ]]; then check warn "load balancers: $lbs load balancer(s) and $nlbs network load balancer(s) in the tenancy; Always Free covers 1 of each (10 Mbps), and the rest is billed"
+    else check ok "load balancers: $lbs load balancer(s) and $nlbs network load balancer(s) in the tenancy, within Always Free"; fi
+  else
+    check warn "can't read the tenancy's load balancers"
   fi
 }
 
@@ -7754,6 +8082,7 @@ cmd_doctor() {
   doctor_ssh
   doctor_images
   doctor_cloudflare
+  doctor_money
   local warns=""
   [[ $WARNS -eq 0 ]] || warns=", $WARNS warning(s)"
   echo
@@ -9752,10 +10081,17 @@ ci_wait() {
     [[ -f "$approval" ]] || die "ci wait: CI isn't waiting for $stack: there is no $(rel "$approval")"
     rm -f "$approval"
     if [[ "$where" == "github" ]]; then
-      make_bundle
-      upload_bundle
-      (cd "$(dirname "$PROJECT")" && gh workflow disable "$CI_WAIT_WORKFLOW") >/dev/null 2>&1 || true
-      log "$stack: CI stopped waiting: FREELUNCH_BUNDLE approves no plan of it any more, and $CI_WAIT_WORKFLOW is off"
+      # Turning the workflow off stops the waits, and leaves the secrets alone: FREELUNCH_BUNDLE
+      # holds every credential the project has, and a cancel shouldn't rewrite them. The old
+      # approval stays in it, inert, until the next ci wait replaces the bundle. Only when the
+      # workflow can't be turned off is the bundle rewritten without the approval.
+      if (cd "$(dirname "$PROJECT")" && gh workflow disable "$CI_WAIT_WORKFLOW") >/dev/null 2>&1; then
+        log "$stack: CI stopped waiting: $CI_WAIT_WORKFLOW is off. FREELUNCH_BUNDLE is untouched; its old approval does nothing while the workflow is off, and the next ci wait replaces it"
+      else
+        make_bundle
+        upload_bundle
+        log "$stack: CI stopped waiting: FREELUNCH_BUNDLE approves no plan of it any more (couldn't turn $CI_WAIT_WORKFLOW off with gh, so turn it off by hand)"
+      fi
     else
       log "$stack: put freelunch ci secrets --print into FREELUNCH_BUNDLE, and turn the pipeline schedule off"
     fi

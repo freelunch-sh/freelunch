@@ -119,3 +119,15 @@ variable "acknowledge_billable_resources" {
   type        = bool
   default     = false
 }
+
+variable "budget_alert_emails" {
+  description = "Emailed when the tenancy's spend reaches budget_amount, or is forecast to. freelunch creates a budget with these before the first VM. [] creates none, and freelunch doctor warns."
+  type        = list(string)
+  default     = []
+}
+
+variable "budget_amount" {
+  description = "Monthly budget that triggers the alert. Always Free costs nothing, so 1 means something is billed."
+  type        = number
+  default     = 1
+}

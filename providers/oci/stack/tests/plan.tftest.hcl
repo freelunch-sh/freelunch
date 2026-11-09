@@ -64,3 +64,16 @@ run "mixed_layout_reports_arch_per_host" {
     error_message = "A1 hosts are arm64 and micro hosts are amd64."
   }
 }
+
+run "budget_alert_is_created_with_an_email" {
+  command = plan
+
+  variables {
+    budget_alert_emails = ["me@example.com"]
+  }
+
+  assert {
+    condition     = output.budget_alert == true
+    error_message = "An alert email creates the budget."
+  }
+}
