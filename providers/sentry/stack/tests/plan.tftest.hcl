@@ -29,7 +29,7 @@ run "a_project_and_a_key_of_its_own" {
 }
 
 run "outputs_follow_the_service_contract" {
-  command = plan
+  command = apply
 
   assert {
     condition     = output.services[0].provider == "sentry" && output.services[0].kind == "observability" && output.services[0].host == "o4500.ingest.sentry.io" && output.services[0].port == 443

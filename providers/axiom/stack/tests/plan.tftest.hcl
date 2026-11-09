@@ -27,7 +27,7 @@ run "a_dataset_and_an_ingest_only_token" {
 }
 
 run "outputs_follow_the_service_contract" {
-  command = plan
+  command = apply
 
   assert {
     condition     = output.services[0].provider == "axiom" && output.services[0].name == "logs" && output.services[0].kind == "observability" && output.services[0].host == "api.axiom.co"
@@ -41,7 +41,7 @@ run "outputs_follow_the_service_contract" {
 }
 
 run "several_datasets_get_names_of_their_own_too" {
-  command = plan
+  command = apply
 
   variables {
     datasets = { logs = {}, traces = { retention_days = 7 } }

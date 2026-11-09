@@ -22,7 +22,7 @@ run "a_heartbeat_named_after_the_project" {
 }
 
 run "outputs_follow_the_service_contract" {
-  command = plan
+  command = apply
 
   assert {
     condition     = output.services[0].kind == "observability" && output.services[0].host == "uptime.betterstack.com"

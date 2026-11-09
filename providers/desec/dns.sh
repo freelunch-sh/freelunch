@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # deSEC hooks for freelunch's dns engine (https://desec.readthedocs.io/en/latest/dns/rrsets.html).
 # Read from the documentation, not yet run against a live account (verified: fake-api).
 # The token goes in DESEC_TOKEN; make one limited to the names freelunch keeps (see README).
@@ -39,7 +40,8 @@ dns_desec_check() {
 
 # dns_desec_list <zone>: every rrset of the zone (the answer comes in pages of 500)
 dns_desec_list() {
-  local zone="$1" path="/domains/$zone/rrsets/?cursor=" code all='[]' next
+  local zone="$1" code all='[]' next path
+  path="/domains/$zone/rrsets/?cursor="
   while [[ -n "$path" ]]; do
     code="$(desec_call GET "$path")"
     [[ "$code" == 200 ]] || { echo "deSEC answered $code for $zone: $(desec_error)" >&2; return 1; }

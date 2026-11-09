@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Duck DNS hooks for freelunch's dns engine (https://www.duckdns.org/spec.jsp).
 # Read from the spec, not yet run against a live account (verified: fake-api).
 # Duck DNS can only set a name's address and clear a name; it can't list. So freelunch sets the

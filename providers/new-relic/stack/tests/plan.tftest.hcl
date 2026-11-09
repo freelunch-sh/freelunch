@@ -23,7 +23,7 @@ run "an_ingest_licence_key_named_after_the_project" {
 }
 
 run "outputs_follow_the_service_contract" {
-  command = plan
+  command = apply
 
   assert {
     condition     = output.services[0].kind == "observability" && output.services[0].host == "otlp.nr-data.net" && output.services[0].port == 4318
@@ -37,7 +37,7 @@ run "outputs_follow_the_service_contract" {
 }
 
 run "the_eu_region_has_its_own_endpoint" {
-  command = plan
+  command = apply
 
   variables {
     region = "EU"

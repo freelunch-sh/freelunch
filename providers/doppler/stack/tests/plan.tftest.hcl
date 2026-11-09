@@ -22,7 +22,7 @@ run "a_project_and_a_read_only_token" {
 }
 
 run "outputs_follow_the_service_contract" {
-  command = plan
+  command = apply
 
   assert {
     condition     = output.services[0].kind == "secrets" && output.services[0].host == "api.doppler.com"

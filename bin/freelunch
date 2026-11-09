@@ -7369,7 +7369,8 @@ dns_providers() {
   local p
   [[ -n "$PROJECT" ]] || return 0
   for p in $(all_providers); do
-    [[ "$(engine_of "$p")" == dns && -f "$PROJECT/$p/terraform.tfvars" ]] && echo "$p"
+    # the folder first: engine_of reads the provider's yaml, and this runs for every provider
+    [[ -f "$PROJECT/$p/terraform.tfvars" && "$(engine_of "$p")" == dns ]] && echo "$p"
   done
   return 0
 }

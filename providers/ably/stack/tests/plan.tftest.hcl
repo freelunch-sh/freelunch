@@ -32,7 +32,7 @@ run "an_app_and_a_limited_key" {
 }
 
 run "outputs_follow_the_service_contract" {
-  command = plan
+  command = apply
 
   assert {
     condition     = output.services[0].kind == "messaging" && output.services[0].host == null

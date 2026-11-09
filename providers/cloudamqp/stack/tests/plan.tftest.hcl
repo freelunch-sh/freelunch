@@ -23,7 +23,7 @@ run "a_little_lemur_named_after_the_project" {
 }
 
 run "outputs_follow_the_service_contract" {
-  command = plan
+  command = apply
 
   assert {
     condition     = output.services[0].kind == "messaging" && output.services[0].host == "mock-lemur.rmq.cloudamqp.com" && output.services[0].port == 5671
