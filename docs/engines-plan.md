@@ -162,7 +162,7 @@ neighbours. None can be `verified` without a live run.
 
 - [x] DNS: deSEC and DuckDNS (small HTTP APIs, on their own `dns` engine with an ownership TXT rule, since the `api` engine models apps)
 - [ ] DNS: ClouDNS and Gcore (`tofu`)
-- [ ] Mesh: Tailscale first, then NetBird and ZeroTier (same contract)
+- [ ] Mesh: Tailscale first (done: `providers/tailscale`), then NetBird and ZeroTier (same `mesh` contract; need host join support in the bootstrap)
 - [ ] Ingress: ngrok, as another way a route can be reached
 - [ ] Deferred until the contracts above are settled: Namecheap (API needs an IP allow-list, awkward
   in CI), Firezone, Twingate, Defined Networking (team and SSO products)
@@ -180,7 +180,7 @@ neighbours. None can be `verified` without a live run.
 
 ## Later phases (from the rollout)
 
-- [ ] Phase 3: networking and DNS glue: now section 9 above
+- [ ] Phase 3: networking and DNS glue: now section 9 above (built except the 9d providers still unchecked there, and the live runs)
 - [ ] Phase 4: secrets, observability, messaging
 - [ ] Phase 5: IaC state, CI, registries
 - [ ] Phase 6: no-provider and stale-provider cases (uses the `api` and `cli` engines)
