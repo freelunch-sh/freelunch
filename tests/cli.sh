@@ -192,6 +192,11 @@ case "$1 ${2:-}" in
         printf 'Ubuntu 24.04 LTS main ttyS0\r\n\r\nmain login: \r\n' ;;
     esac
     exit 0 ;;
+  "compute instance")
+    # get: the instance was created FAKE_INSTANCE_AGE seconds ago (a minute by default)
+    e=$(( $(/bin/date +%s) - ${FAKE_INSTANCE_AGE:-60} ))
+    printf '%s.000000+00:00\n' "$(/bin/date -u -r "$e" +%Y-%m-%dT%H:%M:%S 2>/dev/null || /bin/date -u -d "@$e" +%Y-%m-%dT%H:%M:%S)"
+    exit 0 ;;
   "iam region-subscription")
     if [[ -n "${FAKE_OCI_KEY_BAD:-}" ]]; then
       printf 'ServiceError:\n{\n    "code": "NotAuthenticated",\n    "message": "The required information to complete authentication was not provided or was incorrect.",\n    "opc-request-id": "abc",\n    "status": 401\n}\n' >&2
@@ -5933,6 +5938,25 @@ test_destroy_refuses_to_remove_data_without_a_backup() {
   lacks "$out" "nothing has a backup"
   out="$(UP_CMD=destroy up_in "$p" --discard-data oci 2>&1)" || true
   fails grep -q "unknown option" <<< "$out"
+}
+
+# A VM that has restarted no longer has its host keys on the console: trust says so, and up
+# doesn't wait for keys that will not come.
+test_trust_says_a_restarted_vm_has_no_host_keys_to_read() {
+  local p="$WORK/trust-restarted" out rc=0
+  up_project "$p" oci
+  FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1
+  rm -f "$p/.freelunch/known_hosts"
+  out="$(UP_CMD=trust FAKE_CONSOLE_KEYS="" FAKE_INSTANCE_AGE=7200 up_in "$p" oci-main 2>&1)" || rc=$?
+  equals "$rc" 1
+  contains "$out" "trust: the console of oci-main no longer has its host keys: it is 2h 0m old and has restarted since its first boot"
+  rc=0
+  out="$(UP_CMD=trust FAKE_CONSOLE_KEYS="" FAKE_INSTANCE_AGE=60 up_in "$p" oci-main 2>&1)" || rc=$?
+  contains "$out" "the console of oci-main has no host keys. cloud-init prints them"
+  # up goes on at once, without the wait for a first boot
+  out="$(FAKE_UP="oci=ok" FAKE_CONSOLE_KEYS="" FAKE_INSTANCE_AGE=7200 FREELUNCH_TRUST_TIMEOUT=600 up_in "$p" 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "up: oci-main: its console no longer has the host keys (the VM has restarted since its first boot)"
+  lacks "$out" "waiting for its first boot"
 }
 
 # Cloudflare keeps refusing: up says the app is on the new host and what finishes the move.

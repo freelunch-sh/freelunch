@@ -3677,6 +3677,10 @@ up_trust() {
       unpinned "the OCI CLI isn't installed to read its console"
       return 0
     fi
+    if grep -q "has restarted since its first boot" "$TMP/trust.out"; then
+      unpinned "its console no longer has the host keys (the VM has restarted since its first boot); compare the fingerprint deploy shows with ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub on the VM"
+      return 0
+    fi
     if ! grep -q "has no host keys" "$TMP/trust.out"; then cat "$TMP/trust.out" >&2; exit 1; fi
     if [[ $SECONDS -ge $deadline ]]; then
       unpinned "its console has no host keys yet"
@@ -7277,6 +7281,17 @@ oci_console_keys() {
   tr -d '\r' <<< "$out" | sed -n '/BEGIN SSH HOST KEY KEYS/,/END SSH HOST KEY KEYS/p' | grep -oE '^(ssh|ecdsa|sk)-[a-z0-9@.-]+ [A-Za-z0-9+/]+=*' | sort -u || true
 }
 
+# oci_instance_age <instance id>: seconds since the instance was created, nothing when OCI won't say
+oci_instance_age() {
+  local tfvars session created
+  tfvars="$(config_dir oci)/terraform.tfvars"
+  session="$(oci_session_profile "$tfvars")"
+  [[ -z "$session" ]] || check_oci_session "$session"
+  oci_args "$tfvars"
+  created="$(oci compute instance get --instance-id "$1" --query 'data."time-created"' --raw-output "${OCI_ARGS[@]}" 2>/dev/null)" || return 0
+  jq -rn --arg t "$created" --argjson now "$(date +%s)" '($t | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601) as $c | $now - $c' 2>/dev/null || true
+}
+
 cmd_trust() {
   local host="${1:-}" provider id address names known keys pinned shown key fp state=()
   [[ $# -eq 1 ]] || die "trust: name one host, e.g. freelunch trust oci-main (freelunch inventory lists them)"
@@ -7304,6 +7319,12 @@ cmd_trust() {
 
   log "$host: reading its SSH host keys from the serial console"
   keys="$(oci_console_keys "$id")"
+  if [[ -z "$keys" ]]; then
+    local age; age="$(oci_instance_age "$id")"
+    if [[ "$age" =~ ^[0-9]+$ && "$age" -gt "${FREELUNCH_FIRST_BOOT_WINDOW:-1800}" ]]; then
+      die "trust: the console of $host no longer has its host keys: it is $(fmt_duration "$age") old and has restarted since its first boot, which is when cloud-init prints them. Nothing can read them from the console now. deploy will show the key it meets on first contact: compare its fingerprint with the one on the VM itself before you trust it (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub, run in the OCI console connection), then pin it with ssh-keyscan $address >> $(rel "$(state_root)/known_hosts")"
+    fi
+  fi
   [[ -n "$keys" ]] || die "trust: the console of $host has no host keys. cloud-init prints them at the end of the first boot: try again in a few minutes. After many boots they may be gone from the console; then check the key deploy shows on first contact"
 
   known="$(state_root)/known_hosts"
