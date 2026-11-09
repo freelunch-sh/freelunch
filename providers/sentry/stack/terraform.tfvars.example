@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export SENTRY_AUTH_TOKEN (or put it in .freelunch/.env): an organisation or personal
+# token that can create projects (project:write, project:admin, team:read, org:read).
+
+organization = "my-org"
+team         = "my-team"     # an existing team; the projects belong to it
+
+# One project per entry. The free plan: 5,000 errors a month, 1 user.
+projects = {
+  main = {}
+  # web = { platform = "javascript" }
+}

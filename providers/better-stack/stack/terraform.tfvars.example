@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export BETTERUPTIME_API_TOKEN (or put it in .freelunch/.env): the Uptime API token of your
+# team (Better Stack > Uptime > Settings > API tokens). Logs have their own provider (logtail), not made here.
+
+# One heartbeat per entry; the free plan has 10 monitors and heartbeats.
+heartbeats = {
+  main = { period = 3600, grace = 300 }
+}
