@@ -168,13 +168,13 @@ neighbours. None can be `verified` without a live run.
 
 ### 9e. Journeys
 
-- [ ] A journey is a path through the graph (user, hostname, frontend, backend, database). Derived
+- [x] A journey is a path through the graph (user, hostname, frontend, backend, database). Derived
   from `needs` and routes, no new file
-- [ ] `freelunch journey [name]` probes each hop in order and stops at the first that fails, saying
+- [x] `freelunch journey [name]` probes each hop in order and stops at the first that fails, saying
   which edge and why
-- [ ] `--json` output, so CI can use it
-- [ ] `ci init` offers to run it after a deploy (ask first, like the first run)
-- [ ] Tests: a passing path, a broken hop in each position, a path with no route
+- [x] `--json` output, so CI can use it
+- [x] `ci init` offers to run it after a deploy (ask first, like the first run)
+- [x] Tests: a passing path, a broken hop in each position, a path with no route
 - [ ] Live acceptance: one real path across two clouds (needs your accounts)
 
 ## Later phases (from the rollout)

@@ -3873,6 +3873,59 @@ test_edges_hybrid_frontend_backend_database() {
   equals "$(grep -o 'docker compose up .* @ [a-z]*' "$p/fake.log" | sed 's/.* @ //' | tr '\n' ' ')" "api cloudflared web "
 }
 
+# --- journeys --------------------------------------------------------------------------------
+
+# journey_in <dir> [args]: freelunch journey with the fakes
+journey_in() {
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" \
+    FREELUNCH_VERIFY_INTERVAL=0 FREELUNCH_VERIFY_TIMEOUT=0 CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN:-}" "$CLI" journey "$@" 2>/dev/null)
+}
+
+# a deployed project: web (no route) needs api (route api.example.com) needs the neon database
+journey_project() {
+  local key
+  graph_project "$1" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", port = 8080, needs = ["neon-main"] }
+  web = { host = "oci-edge-1", compose = "../compose.yaml", needs = ["api"] }'
+  give_mesh "$1" false
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$1" >/dev/null 2>&1
+}
+
+test_journey_follows_each_path() {
+  local p="$WORK/journey-all" out
+  journey_project "$p"
+  out="$(journey_in "$p")"
+  contains "$out" "api.example.com"
+  contains "$out" "ok    user -> api.example.com (https)"
+  contains "$out" "api.example.com -> tunnel-oci-main (cloudflare): not checked without CLOUDFLARE_API_TOKEN"
+  contains "$out" "tunnel-oci-main -> api (route)"
+  contains "$out" "ok    api -> neon-main (direct)"
+  # a path with no route starts at the app, and goes through the edge's medium
+  contains "$out" "$(printf 'web\n  ok    (no route) -> web (-)')"
+  contains "$out" "ok    web -> api (mesh)"
+  # one journey, as JSON
+  out="$(journey_in "$p" api.example.com --json)"
+  equals "$(jq -r '.[0] | "\(.ok) \([.hops[].to] | join(","))"' <<< "$out")" "true api.example.com,tunnel-oci-main,api,neon-main"
+  if out="$(journey_in "$p" nonesuch)"; then echo "journey should have failed"; return 1; fi
+}
+
+# A broken hop in each position stops the journey there and says which edge and why.
+test_journey_stops_at_the_first_broken_hop() {
+  local p="$WORK/journey-bad" out
+  journey_project "$p"
+  # the user's hop: the hostname gives 503
+  if out="$(FAKE_APP_CODE=503 journey_in "$p" api.example.com --json)"; then echo "journey should have failed"; return 1; fi
+  equals "$(jq -r '.[0] | "\(.ok) \(.hops | length) \(.hops[-1].from)->\(.hops[-1].to) \(.hops[-1].reason)"' <<< "$out")" "false 1 user->api.example.com nothing answers at https://api.example.com"
+  # the app: its container is stopped, so the hop after it is never asked
+  if out="$(FAKE_STOPPED=api journey_in "$p" api.example.com --json)"; then echo "journey should have failed"; return 1; fi
+  equals "$(jq -r '.[0] | "\(.hops | length) \(.hops[-1].to) \(.hops[-1].ok)"' <<< "$out")" "3 api false"
+  # the database at the end
+  if out="$(FAKE_TCP_DOWN="ep-mock.eu-central-1.aws.neon.tech" journey_in "$p" web)"; then echo "journey should have failed"; return 1; fi
+  contains "$out" "FAIL  api -> neon-main (direct): nothing answers at ep-mock.eu-central-1.aws.neon.tech:5432"
+  lacks "$out" "mock-db-pass"
+}
+
 # A provider's engine is what its provider.yaml says, or what its iac implies.
 test_engine_of_defaults_from_iac() {
   equals "$("$CLI" engine render)" tofu
@@ -4447,6 +4500,17 @@ test_ci_init_guides_the_secrets_and_the_first_run() {
   fails grep -q '^gh workflow run' "$p/fake.log"
   rm -r "$p/.github"
   FAKE_WORKFLOWS="freelunch-provision" ci_in "$p" ci init --print-secrets --no-first-run >/dev/null 2>&1
+  fails grep -q '^gh workflow run' "$p/fake.log"
+  # the journey after a deploy: only when asked, and only when GitHub has the freelunch workflow
+  rm -r "$p/.github"
+  out="$(ci_in "$p" ci init --print-secrets --no-first-run --journey 2>&1)"
+  contains "$out" "GitHub doesn't have the freelunch workflow yet"
+  fails grep -q '^gh workflow run' "$p/fake.log"
+  rm -r "$p/.github"
+  FAKE_WORKFLOWS="freelunch" ci_in "$p" ci init --print-secrets --no-first-run --journey >/dev/null 2>&1
+  grep -qx 'gh workflow run freelunch.yml --repo me/shop -f run=journey' "$p/fake.log"
+  : > "$p/fake.log"; rm -r "$p/.github"
+  FAKE_WORKFLOWS="freelunch" ci_in "$p" ci init --print-secrets --no-first-run >/dev/null 2>&1
   fails grep -q '^gh workflow run' "$p/fake.log"
 }
 

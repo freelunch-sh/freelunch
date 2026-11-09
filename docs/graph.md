@@ -1,7 +1,7 @@
 # The graph: nodes, edges, journeys
 
 Plan: section 9 of [engines-plan.md](engines-plan.md). This page grows with each step; today it
-holds the node inventory and the health probe (9a) the `needs` format (9b), and edge media and the mesh (9c).
+holds the node inventory and the health probe (9a) the `needs` format (9b), edge media and the mesh (9c), and journeys (9e).
 
 ## Nodes
 
@@ -136,3 +136,33 @@ apps = {
 `freelunch deploy` puts `api` first, with `NEON_MAIN_URL` in its environment (after checking that
 Neon answers), then `web` with `API_URL=http://<mesh address of oci-main>:8080`, or the route's
 hostname when there is no mesh. `freelunch check` then asks every node.
+
+## Journeys
+
+A journey is a path through the graph: a user, a hostname, the app it reaches, what that app needs,
+what those need. Nothing new is declared: it comes from the Cloudflare routes and the apps' `needs`.
+Each route's hostname starts one; an app that nothing reaches (no route, and no app needs it) starts
+one of its own, with no user hop.
+
+```
+freelunch journey                    # every path
+freelunch journey api.example.com    # one, by its hostname or app
+freelunch journey --json             # for CI
+```
+
+```
+api.example.com
+  ok    user -> api.example.com (https)
+  -     api.example.com -> tunnel-oci-main (cloudflare): not checked without CLOUDFLARE_API_TOKEN
+  ok    tunnel-oci-main -> api (route)
+  FAIL  api -> neon-main (direct): nothing answers at ep-1.neon.tech:5432
+```
+
+Each hop is probed with the answers of [`freelunch check`](#nodes): the hostname answers over
+HTTPS, the tunnel is connected, each app is running and healthy, each database or bucket answers.
+The medium of an edge between apps is the one `deploy` picked. A hop that can't be asked (`-`) does
+not stop the journey; the first hop that fails does, and the hops after it are not asked. The command
+exits 1 if any journey failed.
+
+`freelunch ci init` offers to run `freelunch journey` in Actions once the first deploy is there
+(`--journey` to say yes, `--no-journey` to say no); it asks first, like the first dry run.
