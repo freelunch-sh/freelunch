@@ -9253,7 +9253,7 @@ ci_offer_state_store() {
 # tools are right. It needs the workflows on the repository's default branch, so it only starts
 # when gh can see them there. Asks first; nothing runs unasked.
 ci_offer_first_run() {
-  local how="$1" base repo a
+  local how="$1" base repo a workflows
   [[ "$how" != no ]] || return 0
   if [[ "$how" == ask ]]; then
     interactive || return 0
@@ -9263,7 +9263,10 @@ ci_offer_first_run() {
   base="$(dirname "$PROJECT")"
   command -v gh >/dev/null || { log "ci init: the first run takes gh (https://cli.github.com); or Actions > freelunch-provision > Run workflow > doctor"; return 0; }
   repo="$(cd "$base" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" || { log "ci init: gh can't tell which repository this is, so no first run"; return 0; }
-  if ! (cd "$base" && gh workflow list --repo "$repo" --json name -q '.[].name' 2>/dev/null) | grep -qx freelunch-provision; then
+  # Listed first, then matched: grep -q quits at the first match, and under pipefail the lister
+  # that gets SIGPIPE for its later lines would turn a match into a failure.
+  workflows="$(cd "$base" && gh workflow list --repo "$repo" --json name -q '.[].name' 2>/dev/null || true)"
+  if ! grep -qx freelunch-provision <<< "$workflows"; then
     log "ci init: GitHub doesn't have the workflows yet: commit and push them, then freelunch ci init --first-run (or Actions > freelunch-provision > Run workflow > doctor)"
     return 0
   fi
@@ -9275,7 +9278,7 @@ ci_offer_first_run() {
 # ci_offer_journey <yes|no|ask>: run freelunch journey in Actions, after a deploy has put the
 # apps there, so the paths through the graph are seen working. Asks first; nothing runs unasked.
 ci_offer_journey() {
-  local how="$1" base repo a
+  local how="$1" base repo a workflows
   [[ "$how" != no ]] || return 0
   if [[ "$how" == ask ]]; then
     interactive || return 0
@@ -9285,7 +9288,10 @@ ci_offer_journey() {
   base="$(dirname "$PROJECT")"
   command -v gh >/dev/null || { log "ci init: the journey takes gh (https://cli.github.com); or Actions > freelunch > Run workflow > journey"; return 0; }
   repo="$(cd "$base" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" || { log "ci init: gh can't tell which repository this is, so no journey"; return 0; }
-  if ! (cd "$base" && gh workflow list --repo "$repo" --json name -q '.[].name' 2>/dev/null) | grep -qx freelunch; then
+  # Listed first, then matched: grep -q quits at the first match, and under pipefail the lister
+  # that gets SIGPIPE for its later lines would turn a match into a failure.
+  workflows="$(cd "$base" && gh workflow list --repo "$repo" --json name -q '.[].name' 2>/dev/null || true)"
+  if ! grep -qx freelunch <<< "$workflows"; then
     log "ci init: GitHub doesn't have the freelunch workflow yet: commit and push it and let it deploy, then freelunch ci init --journey (or Actions > freelunch > Run workflow > journey)"
     return 0
   fi
