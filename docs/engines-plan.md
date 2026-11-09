@@ -190,9 +190,9 @@ an app's `needs` names one and gets the variables the service names
 - [x] `freelunch check` probes a service where it says it answers; the deploy gate holds an app back
 - [x] Tests: `deploy/` (tofu), and an app that needs a service through the CLI, with the secret out of the dry run
 - [x] Axiom (observability), Healthchecks.io (observability), CloudAMQP (messaging), Doppler (secrets)
-- [x] Sentry, Better Stack (observability), Ably (messaging): written against the providers' schemas, mock-tested
+- [x] Sentry, Better Stack, New Relic (observability), Ably (messaging): written against the providers' schemas, mock-tested
 - [ ] The other secrets providers: Infisical (its machine-identity role shape and auth variables are not clear from the provider's schema), Akeyless, Bitwarden Secrets, Phase
-- [ ] The other observability providers: Grafana Cloud, Datadog, Honeycomb (its API-key resource needs a management key, and the free plan's access to one is not clear), New Relic, Checkly, PagerDuty, Site24x7, Netdata
+- [ ] The other observability providers: Grafana Cloud, Datadog, Honeycomb (its API-key resource needs a management key, and the free plan's access to one is not clear), Checkly, PagerDuty (its provider docs could not be read: token variable and integration key attribute unconfirmed), Site24x7, Netdata
 - [ ] The other messaging providers: Synadia, Confluent (trial credit only), Redpanda (trial credit only)
 - [x] A service from an `api` or `cli` engine, through its record (`service:` in `cli.yaml`, `outputs:` in `api.yaml`; `deploy` and `check` read it)
 - [ ] Live-account run for each
