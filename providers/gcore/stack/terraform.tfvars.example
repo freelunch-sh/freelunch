@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export GCORE_PERMANENT_TOKEN (or put it in .freelunch/.env). Make one in
+# the Gcore portal under Profile > API tokens, with access to DNS only.
+
+zone = "example.com"
+
+# create_zone = false     # the zone already exists at Gcore
+
+records = {
+  api = { host = "oci-main" }
+  # www = { type = "CNAME", value = "api.example.com." }
+}

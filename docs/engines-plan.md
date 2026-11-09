@@ -161,7 +161,7 @@ Each is a `tofu` stack or an `api`/`cli` definition, with a fake and the same te
 neighbours. None can be `verified` without a live run.
 
 - [x] DNS: deSEC and DuckDNS (small HTTP APIs, on their own `dns` engine with an ownership TXT rule, since the `api` engine models apps)
-- [ ] DNS: ClouDNS and Gcore (`tofu`)
+- [x] DNS: ClouDNS and Gcore (`tofu`; written against the providers' own schemas, mock-tested)
 - [ ] Mesh: Tailscale first (done: `providers/tailscale`), then NetBird and ZeroTier (same `mesh` contract; need host join support in the bootstrap)
 - [ ] Ingress: ngrok, as another way a route can be reached
 - [ ] Deferred until the contracts above are settled: Namecheap (API needs an IP allow-list, awkward

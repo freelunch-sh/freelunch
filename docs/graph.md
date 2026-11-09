@@ -189,5 +189,5 @@ or deleted; a name marked by another project is refused. `destroy` removes only 
 our TXT. A provider that can't list a zone (Duck DNS) is update-only: it sets and clears exactly the
 names you list, and says so.
 
-[deSEC](../providers/desec/README.md) is the first; [Duck DNS](../providers/duckdns/README.md)
+[ClouDNS](../providers/cloudns/README.md) and [Gcore](../providers/gcore/README.md) are plain `tofu` stacks (the state is the ownership); [deSEC](../providers/desec/README.md) is the first `dns` engine provider; [Duck DNS](../providers/duckdns/README.md)
 the update-only one. Nothing here has run against a live account.
