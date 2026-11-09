@@ -64,6 +64,13 @@ variable "tailscale_auth_key" {
   sensitive   = true
 }
 
+variable "netbird_setup_key" {
+  description = "Optional NetBird setup key; hosts join your NetBird network on first boot."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
 variable "acknowledge_public_ipv4_charge" {
   description = "Accept the Standard public IPv4 charge (about $3.65/month per address), which the free tier does not cover."
   type        = bool

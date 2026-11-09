@@ -53,6 +53,12 @@ write_files:
     encoding: b64
     content: ${base64encode(tailscale_apt_key)}
 %{ endif ~}
+%{ if netbird_setup_key != null ~}
+  - path: /usr/share/keyrings/netbird-archive-keyring.asc
+    permissions: "0644"
+    encoding: b64
+    content: ${base64encode(netbird_apt_key)}
+%{ endif ~}
 %{ for f in app_files ~}
   - path: ${f.path}
     encoding: b64
@@ -72,6 +78,12 @@ runcmd:
   - ${jsonencode("echo \"deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.asc] https://pkgs.tailscale.com/stable/ubuntu $(. /etc/os-release && echo \"$VERSION_CODENAME\") main\" > /etc/apt/sources.list.d/tailscale.list")}
   - ${jsonencode("for i in 1 2 3 4 5; do apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q tailscale && break; sleep 30; done")}
   - ${jsonencode("tailscale up --auth-key=${tailscale_auth_key}${tailscale_hostname != null ? " --hostname=${tailscale_hostname}" : ""}")}
+%{ endif ~}
+%{ if netbird_setup_key != null ~}
+  # NetBird from its signed apt repository (the package starts its service). Retried like Tailscale's.
+  - ${jsonencode("echo 'deb [signed-by=/usr/share/keyrings/netbird-archive-keyring.asc] https://pkgs.netbird.io/debian stable main' > /etc/apt/sources.list.d/netbird.list")}
+  - ${jsonencode("for i in 1 2 3 4 5; do apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q netbird && break; sleep 30; done")}
+  - ${jsonencode("netbird up --setup-key ${netbird_setup_key}${netbird_hostname != null ? " --hostname ${netbird_hostname}" : ""}")}
 %{ endif ~}
 %{ for name in app_names ~}
   - ${jsonencode("cd /opt/freelunch/apps/${name} && docker compose up -d")}

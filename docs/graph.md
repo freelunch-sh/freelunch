@@ -120,7 +120,7 @@ for SSH when the stack says `ssh = true` (an address in `apps.tfvars` still wins
 
 [Tailscale](../providers/tailscale/README.md) is the first: it makes the join key hosts use on first
 boot (the `tailscale_auth_key` of the host stacks) and looks the hosts up once they have joined.
-NetBird and ZeroTier follow in 9d with the same output.
+[NetBird](../providers/netbird/README.md) has the same output; ZeroTier is not built (see the plan).
 
 ## A hybrid example
 

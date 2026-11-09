@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export NB_PAT (or put it in .freelunch/.env). Make a personal access token in
+# the NetBird dashboard under Team > Service Users (or your user's Personal Access Tokens).
+# Self-hosted: also NB_MANAGEMENT_URL.
+
+# name_prefix = "freelunch"   # the project's name_prefix: hosts register as <prefix>-<provider>-<name>
+# auto_groups = []            # group IDs the hosts join (the default policy lets the All group talk)
+# ssh = true                  # deploy over NetBird (this machine and CI must be on it)

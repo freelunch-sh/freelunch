@@ -17,6 +17,8 @@ module "bootstrap" {
   swap_size_gb           = each.value.swap_size_gb
   tailscale_auth_key     = var.tailscale_auth_key
   tailscale_hostname     = "${var.name_prefix}-gcp-${each.key}"
+  netbird_setup_key      = var.netbird_setup_key
+  netbird_hostname       = "${var.name_prefix}-gcp-${each.key}"
   max_encoded_size_bytes = 349528 # base64 size of GCP's 256 KB limit per metadata value
 }
 

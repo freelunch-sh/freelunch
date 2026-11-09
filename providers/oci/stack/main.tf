@@ -15,6 +15,7 @@ module "docker_host" {
   availability_domain_offset = var.availability_domain_offset
   capacity_fallbacks         = var.capacity_fallbacks
   tailscale_auth_key         = var.tailscale_auth_key
+  netbird_setup_key          = var.netbird_setup_key
 
   reserved_block_storage_gb      = var.reserved_block_storage_gb
   acknowledge_billable_resources = var.acknowledge_billable_resources

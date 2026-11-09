@@ -168,3 +168,35 @@ run "invalid_app_name_is_rejected" {
 
   expect_failures = [var.apps]
 }
+
+run "netbird_joins_from_its_signed_repository" {
+  command = plan
+
+  variables {
+    netbird_setup_key = "AAAAAAAA-0000-1111-2222-333333333333"
+    netbird_hostname  = "host-1"
+  }
+
+  assert {
+    condition     = contains(yamldecode(output.user_data).runcmd, "netbird up --setup-key AAAAAAAA-0000-1111-2222-333333333333 --hostname host-1")
+    error_message = "The host joins NetBird with its setup key and name."
+  }
+
+  assert {
+    condition = (
+      startswith(base64decode(one([for f in yamldecode(output.user_data).write_files : f.content if f.path == "/usr/share/keyrings/netbird-archive-keyring.asc"])), "-----BEGIN PGP PUBLIC KEY BLOCK-----") &&
+      anytrue([for c in yamldecode(output.user_data).runcmd : strcontains(c, "deb [signed-by=/usr/share/keyrings/netbird-archive-keyring.asc] https://pkgs.netbird.io/debian stable main")]) &&
+      anytrue([for c in yamldecode(output.user_data).runcmd : strcontains(c, "apt-get install -y -q netbird")])
+    )
+    error_message = "NetBird comes from its apt repository, signed with the pinned key."
+  }
+}
+
+run "netbird_is_off_by_default" {
+  command = plan
+
+  assert {
+    condition     = !anytrue([for c in yamldecode(output.user_data).runcmd : strcontains(c, "netbird")]) && !contains([for f in yamldecode(output.user_data).write_files : f.path], "/usr/share/keyrings/netbird-archive-keyring.asc")
+    error_message = "Without a setup key nothing of NetBird is installed."
+  }
+}
