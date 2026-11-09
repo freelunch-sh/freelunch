@@ -196,11 +196,27 @@ an app's `needs` names one and gets the variables the service names
 - [ ] A service from an `api` or `cli` engine, through its record
 - [ ] Live-account run for each
 
+## 11. CI systems, registries and IaC platforms (was phase 5)
+
+Two contracts, written in [ci.md](ci.md) and [adding-a-provider.md](adding-a-provider.md): a **CI provider**
+(`engine: ci`) ships a `pipeline.tpl` and names its `ci_file`, and `freelunch ci init <provider>` writes
+it; a **registry** (`engine: registry`, or any provider with a `registry:` host) is somewhere
+`freelunch init --image-workflow --registry <provider>` can push the project's image.
+
+- [x] The `ci` engine: `pipeline.tpl` with `@IMAGE@`, `ci_file`/`ci_secret`/`ci_run`; `ci init` writes it, keeps an existing file, says where the secret goes
+- [x] CircleCI, Bitbucket Pipelines, Buildkite, Azure DevOps, Codeberg (Forgejo Actions): valid YAML, tested; none has run on a real account, and the vendor-specific lines (Buildkite's docker plugin version, Codeberg's runner label and checkout action, CircleCI's `trigger_source`) are from memory of their docs
+- [x] The `registry` engine and `--registry`: Docker Hub, Codeberg (needs `--registry-image`); GHCR stays the default
+- [x] Catalog checks for both engines (a `ci` provider has a template, a `registry` one a host)
+- [ ] GitLab's own registry and pipeline as providers (its pipeline and state kind exist in the CLI; the provider.yaml is still `planned`)
+- [ ] GitHub as a provider (the workflows exist in the CLI; the provider.yaml is still `planned`)
+- [ ] HCP Terraform, Spacelift, Scalr: **not built on purpose.** They run the plans themselves, on their runners, which is the opposite of freelunch running them where you are with your credentials and its capacity wait; and as a state backend they would replace the store freelunch already offers (git, OCI, R2, B2, GitLab). A project that wants one can use its own backend config in a stack
+- [ ] Live-account run for each pipeline
+
 ## Later phases (from the rollout)
 
 - [ ] Phase 3: networking and DNS glue: now section 9 above (built except the 9d providers still unchecked there, and the live runs)
 - [ ] Phase 4: secrets, observability, messaging: now section 10 above (contract and four providers built)
-- [ ] Phase 5: IaC state, CI, registries
+- [ ] Phase 5: IaC state, CI, registries: now section 11 above (CI systems and Docker Hub built; the IaC platforms left out on purpose)
 - [ ] Phase 6: no-provider and stale-provider cases (uses the `api` and `cli` engines)
 - [ ] SingleStore: unblocked only if a provider can create a free workspace
 - [ ] Live-account run for each `fake-api` provider

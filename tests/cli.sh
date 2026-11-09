@@ -4085,6 +4085,74 @@ test_a_service_in_needs_reaches_the_app() {
   contains "$out" "axiom-logs"
 }
 
+# --- CI providers (the ci engine) --------------------------------------------------------------
+
+# ci init <provider> writes the provider's pipeline from its template: valid YAML, the runner image,
+# the bundle restored then the command run, no secret in the file, and where to put the secret said.
+test_ci_init_writes_a_pipeline_for_each_ci_provider() {
+  local p="$WORK/ci-prov" q c file out
+  new_project "$p"
+  for c in circleci:.circleci/config.yml bitbucket:bitbucket-pipelines.yml buildkite:.buildkite/pipeline.yml azure-devops:azure-pipelines.yml codeberg:.forgejo/workflows/freelunch.yml; do
+    q="$p-${c%%:*}"; file="${c#*:}"
+    new_project "$q"
+    out="$(ci_in "$q" ci init "${c%%:*}" --no-first-run 2>&1)"
+    exists "$q/$file"
+    contains "$(cat "$q/$file")" "ghcr.io/freelunch-sh/freelunch:1"
+    contains "$(cat "$q/$file")" "/opt/freelunch/bin/freelunch ci restore"
+    lacks "$(cat "$q/$file")" "@IMAGE@"
+    contains "$out" "FREELUNCH_BUNDLE"
+    contains "$out" "commit and push the pipeline, then run it:"
+    if python3 -c 'import yaml' 2>/dev/null; then python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" "$q/$file"; fi
+    # nothing of GitHub's or GitLab's is written, and an existing pipeline is kept
+    [[ ! -d "$q/.github" && ! -f "$q/.gitlab-ci.yml" ]] || { echo "${c%%:*}: wrote another CI's files"; return 1; }
+    printf '# mine\n' > "$q/$file"
+    ci_in "$q" ci init "${c%%:*}" --no-first-run >/dev/null 2>&1
+    equals "$(cat "$q/$file")" "# mine"
+  done
+  # a CI the project doesn't know is named, with the ones there are
+  if out="$(ci_in "$p" ci init nonesuch 2>&1)"; then echo "ci init should have failed"; return 1; fi
+  contains "$out" "github, gitlab or a CI provider with a pipeline (azure-devops bitbucket buildkite circleci codeberg"
+  # a pin shows in the image
+  mkdir -p "$p/.freelunch" && echo v1.2.3 > "$p/.freelunch/version"
+  rm -f "$p/.circleci/config.yml"
+  ci_in "$p" ci init circleci --no-first-run >/dev/null 2>&1
+  contains "$(cat "$p/.circleci/config.yml")" "ghcr.io/freelunch-sh/freelunch:1.2.3"
+}
+
+# The image workflow pushes to GitHub's registry by default, or to another registry's provider.
+test_image_workflow_pushes_to_the_registry_asked_for() {
+  local p="$WORK/img-reg" out wf
+  mkdir -p "$p"
+  (cd "$p" && "$CLI" init --image-workflow oci cloudflare) >/dev/null 2>&1
+  wf="$p/.github/workflows/image.yml"
+  contains "$(cat "$wf")" "registry: ghcr.io"
+  contains "$(cat "$wf")" "packages: write"
+  # Docker Hub: its secrets, and the image under the user
+  rm -r "$p/.github"
+  out="$(cd "$p" && "$CLI" init --image-workflow --registry docker-hub 2>&1)"
+  contains "$(cat "$wf")" "registry: docker.io"
+  contains "$(cat "$wf")" 'username: ${{ secrets.DOCKERHUB_USERNAME }}'
+  contains "$(cat "$wf")" 'password: ${{ secrets.DOCKERHUB_TOKEN }}'
+  contains "$(cat "$wf")" 'images: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}'
+  lacks "$(cat "$wf")" "packages: write"
+  contains "$out" 'password_env = "DOCKERHUB_TOKEN"'
+  if command -v actionlint >/dev/null; then actionlint "$wf"; fi
+  # an explicit repository
+  rm -r "$p/.github"
+  (cd "$p" && "$CLI" init --image-workflow --registry docker-hub --registry-image docker.io/acme/shop) >/dev/null 2>&1
+  contains "$(cat "$wf")" "images: docker.io/acme/shop"
+  # Codeberg's has no default repository
+  rm -r "$p/.github"
+  if out="$(cd "$p" && "$CLI" init --image-workflow --registry codeberg 2>&1)"; then echo "init should have failed"; return 1; fi
+  contains "$out" "codeberg needs --registry-image <codeberg.org/owner/name>"
+  (cd "$p" && "$CLI" init --image-workflow --registry codeberg --registry-image codeberg.org/acme/shop) >/dev/null 2>&1
+  contains "$(cat "$wf")" "registry: codeberg.org"
+  # a provider with no registry
+  rm -r "$p/.github"
+  if out="$(cd "$p" && "$CLI" init --image-workflow --registry neon 2>&1)"; then echo "init should have failed"; return 1; fi
+  contains "$out" "neon has no container registry freelunch can push to (--registry takes: codeberg docker-hub"
+}
+
 # A provider's engine is what its provider.yaml says, or what its iac implies.
 test_engine_of_defaults_from_iac() {
   equals "$("$CLI" engine render)" tofu

@@ -55,12 +55,12 @@ usage() {
 Usage: freelunch <command> [args] [-- extra tofu/terraform args]
 
 Project:
-  init [--name <name>] [--image-workflow] [stack...]
+  init [--name <name>] [--image-workflow [--registry <p> [--registry-image <ref>]]] [stack...]
                           Create .freelunch/ in the current directory (default stacks: oci
                           cloudflare). Resources are named after the project: --name, the
                           name its other stacks have, or the folder's name. --image-workflow
                           adds a GitHub Actions workflow that builds the image for the hosts
-                          and pushes it to ghcr.io
+                          and pushes it to ghcr.io, or to --registry (docker-hub, codeberg)
   up [--dry-run] [--move] Deploy wherever there is room: take the first target (targets in
                           apps.tfvars, or every configured host and platform stack) that runs
                           the project or can make it, skipping one that is out of capacity or
@@ -105,7 +105,7 @@ Project:
                           in. The copies are encrypted with FREELUNCH_STATE_PASSPHRASE
 
 CI:
-  ci init [github|gitlab] Write the CI workflows: one that waits for capacity on a schedule, and
+  ci init [github|gitlab|<ci>] Write the CI workflows: one that waits for capacity on a schedule, and
                           one that runs deploy after a new image, or any command you start
                           Then the secrets they pass on: --set-secrets runs gh secret set for each,
                           --print-secrets only prints what to run; without either it asks (and
@@ -2128,6 +2128,17 @@ ready_stacks() {
   return 0
 }
 
+# The container registry the image workflow pushes to: a provider with a registry: in its
+# provider.yaml (docker-hub, codeberg...), and the repository to push to when it can't be worked out
+IMAGE_REGISTRY="" IMAGE_REGISTRY_IMAGE=""
+
+# registry_providers: the providers with a container registry
+registry_providers() {
+  local p
+  for p in $(all_providers); do [[ -z "$(meta "$p" registry)" ]] || echo "$p"; done
+  return 0
+}
+
 # image_workflow <project folder> <stacks...>: a GitHub Actions workflow that builds the
 # project's image for the hosts of those stacks and pushes it to GitHub's registry. An
 # Oracle A1 VM is Arm; the default hosts of the other clouds are x86.
@@ -2141,9 +2152,28 @@ image_workflow() {
   done
   if [[ $arm -eq $x86 ]]; then platforms="linux/amd64,linux/arm64"; elif [[ $arm -eq 1 ]]; then platforms="linux/arm64"; else platforms="linux/amd64"; fi
   mkdir -p "$base/.github/workflows"
+  local reg_host=ghcr.io reg_user reg_pass reg_image reg_perm="  packages: write" reg_name="GitHub's container registry" reg_hint
+  # shellcheck disable=SC2016 # GitHub expressions, not ours
+  reg_user='${{ github.actor }}'; reg_pass='${{ secrets.GITHUB_TOKEN }}'; reg_image='ghcr.io/${{ github.repository }}'
+  reg_hint="a package of a private repository is private: give deploy a read:packages token under registries in apps.tfvars"
+  if [[ -n "$IMAGE_REGISTRY" ]]; then
+    reg_host="$(meta "$IMAGE_REGISTRY" registry)"; reg_perm=""; reg_name="$(meta "$IMAGE_REGISTRY" display_name)'s registry ($reg_host)"
+    # shellcheck disable=SC2016 # GitHub expressions, not ours
+    reg_user='${{ secrets.'"$(meta "$IMAGE_REGISTRY" registry_user)"' }}'
+    # shellcheck disable=SC2016 # GitHub expressions, not ours
+    reg_pass='${{ secrets.'"$(meta "$IMAGE_REGISTRY" registry_token)"' }}'
+    if [[ -n "$IMAGE_REGISTRY_IMAGE" ]]; then reg_image="$IMAGE_REGISTRY_IMAGE"
+    elif [[ -n "$(meta "$IMAGE_REGISTRY" registry_image)" ]]; then
+      local open='${{' close='}}'
+      reg_image="$(meta "$IMAGE_REGISTRY" registry_image)"
+      reg_image="${reg_image//@USER@/$open secrets.$(meta "$IMAGE_REGISTRY" registry_user) $close}"
+      reg_image="${reg_image//@REPO@/$open github.event.repository.name $close}"
+    else die "init: $IMAGE_REGISTRY needs --registry-image <$reg_host/owner/name>, the repository the image goes to"; fi
+    reg_hint="give deploy a read token under registries in apps.tfvars: \"$reg_host\" = { username = \"<you>\", password_env = \"$(meta "$IMAGE_REGISTRY" registry_token)\" }, and put the secrets $(meta "$IMAGE_REGISTRY" registry_user) and $(meta "$IMAGE_REGISTRY" registry_token) in this repository's Actions secrets"
+  fi
   write_new "$base/.github/workflows/image.yml" <<EOF
 # Written by freelunch init --image-workflow. Builds the image from the Dockerfile and
-# pushes it to GitHub's container registry as ghcr.io/<owner>/<repo>: :main and
+# pushes it to $reg_name as ${reg_image}: :main and
 # :sha-<commit> for each push to main, :<version> for tags like v1.2.3. Use one of them
 # as the image in your Compose file.
 #
@@ -2160,8 +2190,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  packages: write
+  contents: read${reg_perm:+
+$reg_perm}
 
 jobs:
   image:
@@ -2172,13 +2202,13 @@ jobs:
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
-          registry: ghcr.io
-          username: \${{ github.actor }}
-          password: \${{ secrets.GITHUB_TOKEN }}
+          registry: $reg_host
+          username: $reg_user
+          password: $reg_pass
       - id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/\${{ github.repository }}
+          images: $reg_image
           tags: |
             type=ref,event=branch
             type=sha
@@ -2194,7 +2224,7 @@ jobs:
           cache-to: type=gha,mode=max
 EOF
   [[ -f "$base/Dockerfile" ]] || log "there is no Dockerfile yet; the image workflow builds ./Dockerfile"
-  log "the image workflow builds for $platforms. A package of a private repository is private: give deploy a read:packages token under registries in apps.tfvars"
+  log "the image workflow builds for $platforms and pushes to $reg_name; $reg_hint"
 }
 
 # project_prefix <.freelunch folder>: the name an earlier init gave the project's stacks, or
@@ -2271,6 +2301,8 @@ cmd_init() {
       --name)   [[ $# -gt 1 ]] || die "init: --name takes a name"; name="$2"; shift ;;
       --name=*) name="${1#--name=}" ;;
       --image-workflow) workflow=1 ;;
+      --registry)       [[ $# -gt 1 ]] || die "init: --registry takes a provider (docker-hub, codeberg...)"; IMAGE_REGISTRY="$2"; shift ;;
+      --registry-image) [[ $# -gt 1 ]] || die "init: --registry-image takes the image's repository (docker.io/me/shop)"; IMAGE_REGISTRY_IMAGE="$2"; shift ;;
       -*)       die "init: unknown option $1" ;;
       *)        stacks+=("$1") ;;
     esac
@@ -2418,6 +2450,7 @@ EOF
   } | write_new "$cfg/.env.example"
 
   log "project name: $name (name_prefix in each stack's tfvars)"
+  [[ -z "$IMAGE_REGISTRY" ]] || [[ -n "$(meta "$IMAGE_REGISTRY" registry)" ]] || die "init: $IMAGE_REGISTRY has no container registry freelunch can push to (--registry takes: $(registry_providers | tr '\n' ' '))"
   [[ $workflow -eq 0 ]] || image_workflow "$base" "${stacks[@]}"
   # apps.tfvars may be one init kept, whose apps are somewhere else.
   local entry path full
@@ -8594,6 +8627,30 @@ EOF
   fi
 }
 
+# ci_providers: the CI providers freelunch can write a pipeline for
+ci_providers() {
+  local p
+  for p in $(all_providers); do
+    [[ -f "$PROVIDERS_DIR/$p/pipeline.tpl" && "$(engine_of "$p")" == ci ]] && echo "$p"
+  done
+  return 0
+}
+
+# ci_provider_pipeline <project root> <provider>: the pipeline of a CI provider (engine: ci) from its
+# pipeline.tpl, in the file its provider.yaml names. It runs the runner image, restores the bundle
+# and runs FREELUNCH_RUN, the way the GitLab one does; secrets stay in the CI's own settings.
+ci_provider_pipeline() {
+  local base="$1" p="$2" file tag
+  file="$(meta "$p" ci_file)"
+  [[ -n "$file" ]] || die "ci init: $p's provider.yaml has no ci_file"
+  tag="$(pinned_version)"
+  [[ -n "$tag" ]] || tag="$(release_version)"
+  [[ "$tag" == v* ]] || tag=""
+  tag="${tag#v}"
+  mkdir -p "$base/$(dirname "$file")"
+  sed "s|@IMAGE@|ghcr.io/freelunch-sh/freelunch:${tag:-1}|" "$PROVIDERS_DIR/$p/pipeline.tpl" | write_new "$base/$file"
+}
+
 # gitlab_pipeline <project root>: a pipeline that runs freelunch in the runner image
 gitlab_pipeline() {
   local base="$1" file tag state_vars=""
@@ -8749,7 +8806,8 @@ ci_init() {
   case "$where" in
     github) if [[ $pipeline -eq 1 ]]; then [[ $CI_BUNDLE_MODE -eq 0 ]] || die "ci init: --pipeline hands secrets over one by one, not as a bundle"; pipeline_workflow "$base"; else [[ ",$jobs," != *,cd,* ]] || github_workflows "$base"; job_workflows "$base" "$jobs"; fi ;;
     gitlab) CI_BUNDLE_MODE=1; gitlab_pipeline "$base" ;;
-    *)      die "ci init: github or gitlab (other CI systems: docs/ci.md#other-ci-systems)" ;;
+    *)      if [[ -f "$PROVIDERS_DIR/$where/pipeline.tpl" && "$(engine_of "$where")" == ci ]]; then CI_BUNDLE_MODE=1; ci_provider_pipeline "$base" "$where"
+            else die "ci init: github, gitlab or a CI provider with a pipeline ($(ci_providers | tr '\n' ' ')); other CI systems: docs/ci.md#other-ci-systems"; fi ;;
   esac
   printf '\nNext steps:\n' >&2
   local i=1
@@ -8763,6 +8821,9 @@ ci_init() {
   elif [[ "$where" == "github" ]]; then
     echo "  $i. freelunch ci secrets: what CI needs and git doesn't have, in the secret FREELUNCH_BUNDLE" >&2
     echo "  $((i + 1)). commit and push the workflows, then freelunch ci wait <stack> --plan <file> to wait for capacity there" >&2
+  elif [[ -n "$(meta "$where" ci_secret)" ]]; then
+    echo "  $i. freelunch ci secrets --print, into the CI's secret: $(meta "$where" ci_secret)" >&2
+    echo "  $((i + 1)). commit and push the pipeline, then run it: $(meta "$where" ci_run)" >&2
   else
     echo "  $i. freelunch ci secrets --print, into the CI/CD variable FREELUNCH_BUNDLE" >&2
     echo "  $((i + 1)). commit and push the pipeline" >&2

@@ -34,6 +34,8 @@ Every engine implements these verbs: `check`, `apply`, `outputs`, `deploy`, `sta
 | `api` | an HTTP or GraphQL API with create, list, delete | Deno Deploy, Phase 6 |
 | `cli` | the vendor CLI is the supported path | Turso, wrangler |
 | `guided` | no usable API: checks the token, prints the manual steps | Back4App, Leapcell |
+| `ci` | a CI system: `ci init` writes its pipeline from a template ([how](ci.md#other-ci-systems)) | CircleCI, Bitbucket, Buildkite, Azure DevOps, Codeberg |
+| `registry` | a container registry the image workflow pushes to ([how](ci.md#registries)) | Docker Hub |
 | `dns` | keeps DNS records in a zone, marking each as the project's own with a TXT record ([how](graph.md#dns-records)) | deSEC, Duck DNS |
 
 `engine:` in `provider.yaml` defaults from `iac` (official, partner, community means `tofu`; stale,

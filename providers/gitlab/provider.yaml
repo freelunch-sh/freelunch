@@ -10,6 +10,9 @@ free_tier_type: always-free
 free_tier: "Unlimited repos with up to 5 collaborators; CI/CD minutes, Pages, Container Registry"
 card_required: "no"
 url: "https://about.gitlab.com/pricing/"
+registry: "registry.gitlab.com"
+registry_user: "GITLAB_USERNAME"
+registry_token: "GITLAB_TOKEN"
 last_verified: "2026-10-18"
 notes: null
 sources:

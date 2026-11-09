@@ -2,16 +2,23 @@
 name: codeberg
 display_name: "Codeberg"
 category: iac-ci
-status: planned
+status: ready
 layer: service
+engine: ci
 terraform_provider: "svalabs/forgejo"
 iac: community
 free_tier_type: always-free
 free_tier: "Free Forgejo hosting for free/libre-licensed projects: Git repos, Forgejo Actions runners, package and container registry"
 card_required: "no"
 url: "https://docs.codeberg.org/getting-started/faq/"
+registry: "codeberg.org"
+registry_user: "CODEBERG_USERNAME"
+registry_token: "CODEBERG_TOKEN"
+ci_file: ".forgejo/workflows/freelunch.yml"
+ci_secret: "Repository Settings > Actions > Secrets: FREELUNCH_BUNDLE"
+ci_run: "Actions > freelunch > Run workflow"
 last_verified: "2026-10-19"
-notes: "Only for projects under a free/libre licence; private repos are limited to what FLOSS projects need. Run by Codeberg e.V., a non-profit funded by donations."
+notes: "Only for projects under a free/libre licence; private repos are limited to what FLOSS projects need. Run by Codeberg e.V., a non-profit funded by donations. The pipeline is written from a template (freelunch ci init, docs/ci.md#other-ci-systems) and has not run on a real account."
 sources:
   - "docs.codeberg.org/getting-started/faq (2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"
