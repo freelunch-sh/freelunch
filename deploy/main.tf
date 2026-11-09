@@ -25,6 +25,15 @@ data "terraform_remote_state" "storage" {
   config  = { path = each.value }
 }
 
+# Stacks that make databases output them as databases (docs/architecture.md#database-contract),
+# and their connection strings as database_credentials.
+data "terraform_remote_state" "databases" {
+  for_each = toset([for p in var.database_state_paths : p if fileexists(p)])
+
+  backend = "local"
+  config  = { path = each.value }
+}
+
 locals {
   inventory = { for h in try(data.terraform_remote_state.inventory[0].outputs.hosts, []) : "${h.provider}-${h.name}" => h }
   platforms = { for p in try(data.terraform_remote_state.inventory[0].outputs.platforms, []) : "${p.provider}-${p.name}" => p }
@@ -44,6 +53,7 @@ locals {
       compose  = abspath(startswith(pathexpand(a.compose), "/") ? pathexpand(a.compose) : "${var.config_dir}/${a.compose}")
       env_file = a.env_file == null ? null : abspath(startswith(pathexpand(a.env_file), "/") ? pathexpand(a.env_file) : "${var.config_dir}/${a.env_file}")
       bucket   = a.bucket
+      database = a.database
       plan     = a.plan
     }
   }
@@ -54,16 +64,40 @@ locals {
     for name, a in var.apps : "${name} (bucket ${a.bucket})" if a.bucket != null && !(contains(keys(local.buckets), coalesce(a.bucket, "-")) && contains(keys(local.bucket_keys), coalesce(a.bucket, "-")))
   ])
 
+  databases = merge(concat([{}],
+    [for s in data.terraform_remote_state.databases : { for d in try(s.outputs.databases, []) : "${d.provider}-${d.name}" => d }],
+    [{ for d in var.extra_databases : "${d.provider}-${d.name}" => d }]
+  )...)
+  database_credentials = merge(concat([{}],
+    [for s in data.terraform_remote_state.databases : try(s.outputs.database_credentials, {})],
+    [nonsensitive(var.extra_database_credentials)]
+  )...)
+  unknown_databases = sort([
+    for name, a in var.apps : "${name} (database ${a.database})" if a.database != null && !(contains(keys(local.databases), coalesce(a.database, "-")) && contains(keys(local.database_credentials), coalesce(a.database, "-")))
+  ])
+
   # The S3 settings most SDKs and tools read on their own: the AWS SDKs, boto3, rclone with
   # env_auth, the aws CLI. S3_BUCKET is the one name they don't share.
-  app_env = {
-    for name, a in var.apps : name => {
+  # A database's connection string is DATABASE_URL, the name most frameworks and ORMs read.
+  # try() gives {} for an app without a bucket or a database (or one no stack made, which the
+  # outputs' preconditions stop with a message).
+  bucket_env = {
+    for name, a in var.apps : name => try({
       AWS_ACCESS_KEY_ID     = local.bucket_keys[a.bucket].access_key_id
       AWS_SECRET_ACCESS_KEY = local.bucket_keys[a.bucket].secret_access_key
       AWS_REGION            = local.buckets[a.bucket].region
       AWS_ENDPOINT_URL_S3   = local.buckets[a.bucket].endpoint
       S3_BUCKET             = local.buckets[a.bucket].bucket
-    } if a.bucket != null && !contains(local.unknown_buckets, "${name} (bucket ${a.bucket})")
+    }, {}) if a.bucket != null && !contains(local.unknown_buckets, "${name} (bucket ${a.bucket})")
+  }
+  database_env = {
+    for name, a in var.apps : name => try({
+      DATABASE_URL = local.database_credentials[a.database].url
+    }, {}) if a.database != null && !contains(local.unknown_databases, "${name} (database ${a.database})")
+  }
+  app_env = {
+    for name, a in var.apps : name => merge(try(local.bucket_env[name], {}), try(local.database_env[name], {}))
+    if contains(keys(local.bucket_env), name) || contains(keys(local.database_env), name)
   }
 
   app_hosts = distinct(values(local.app_host))
@@ -86,7 +120,7 @@ locals {
       address  = contains(keys(local.platforms), h) ? null : try(coalesce(try(var.hosts[h].address, null), try(local.inventory[h].public_ip, null), try(local.inventory[h].private_ip, null)), null)
       user     = contains(keys(local.platforms), h) ? null : try(coalesce(try(var.hosts[h].user, null), try(local.inventory[h].ssh_user, null)), "ubuntu")
       arch     = try(local.inventory[h].arch, local.platforms[h].arch, null)
-      apps     = { for name, a in local.apps : name => { compose = a.compose, env_file = a.env_file, bucket = a.bucket } if a.host == h }
+      apps     = { for name, a in local.apps : name => { compose = a.compose, env_file = a.env_file, bucket = a.bucket, database = a.database } if a.host == h }
       tunnel   = contains(keys(local.tunnels), h)
       urls     = sort([for hostname, r in local.routes : "https://${hostname}" if r.host == h])
     }

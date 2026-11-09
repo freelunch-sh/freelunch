@@ -6,13 +6,15 @@ variable "apps" {
     the target freelunch up chose. compose and env_file are paths, relative to
     config_dir unless absolute. bucket is <provider>-<name> of a bucket a storage stack
     makes (backblaze-b2-results, cloudflare-results); its S3 settings and keys go into the
-    app's environment.
+    app's environment. database is <provider>-<name> of a managed database (neon-main,
+    supabase-app); its connection string goes into the app's environment as DATABASE_URL.
   EOT
   type = map(object({
     host     = optional(string)
     compose  = string
     env_file = optional(string)
     bucket   = optional(string)
+    database = optional(string)
     # Compute plan of the app on a container platform; without it the stack's plan.
     plan = optional(string)
   }))
@@ -72,6 +74,38 @@ variable "storage_state_paths" {
   description = "State files of the stacks that make buckets (outputs buckets and bucket_keys)."
   type        = list(string)
   default     = []
+}
+
+variable "database_state_paths" {
+  description = "State files of the stacks that make databases (outputs databases and database_credentials)."
+  type        = list(string)
+  default     = []
+}
+
+# Databases an engine without a state file made (an api or cli provider): freelunch reads them
+# from the provider's record in the state store and hands them over in a var file, so the
+# credentials are never on a command line.
+variable "extra_databases" {
+  description = "Databases from engine records, in the shape of the databases output."
+  type = list(object({
+    provider = string
+    name     = string
+    engine   = optional(string)
+    host     = optional(string)
+    port     = optional(number)
+    database = optional(string)
+    user     = optional(string)
+    region   = optional(string)
+    behavior = optional(string)
+  }))
+  default = []
+}
+
+variable "extra_database_credentials" {
+  description = "Credentials of those databases, keyed <provider>-<name>, each with a url."
+  type        = map(object({ url = string, password = optional(string) }))
+  default     = {}
+  sensitive   = true
 }
 
 variable "tunnel_state_path" {

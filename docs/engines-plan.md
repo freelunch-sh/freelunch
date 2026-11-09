@@ -86,11 +86,11 @@ Tick a box when the step is built, tested and committed. Design: [engines.md](en
 
 ## 8. Database credentials into deploy
 
-- [ ] Read `databases` and `database_credentials` outputs from any engine
-- [ ] App config names which database it uses
-- [ ] Deploy puts the URL into the app's environment on every platform and host
-- [ ] Secrets stay out of dry-run and logs
-- [ ] Tests per platform path
+- [x] Read `databases` and `database_credentials` outputs from any engine (a stack's state, or the `outputs` of an engine's record; no api or cli provider writes databases yet, so that half is tested with a hand-made record)
+- [x] App config names which database it uses
+- [x] Deploy puts the URL into the app's environment on every platform and host
+- [x] Secrets stay out of dry-run and logs
+- [x] Tests per platform path
 
 ## Later phases (from the rollout)
 

@@ -2600,7 +2600,43 @@ storage_states() {
   done | jq -Rsc 'split("\n") | map(select(length > 0))'
 }
 
-# deploy_plan: resolve apps.tfvars, the inventory, the tunnels and the buckets with deploy/
+# apps_use_database <apps file>: whether any app in it names a database
+apps_use_database() { [[ -f "$1" ]] && tfvars_map "$1" apps database | cut -f2 | grep -q .; }
+
+# database_states <apps file>: the state files of deployed stacks that make databases, as a JSON
+# list; empty unless an app names a database
+database_states() {
+  local p state
+  apps_use_database "$1" || { echo '[]'; return 0; }
+  for p in $(all_providers); do
+    if [[ ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
+    state="$(config_dir "$p")/terraform.tfstate"
+    if jq -e '.outputs.databases' "$state" >/dev/null 2>&1; then echo "$state"; fi
+  done | jq -Rsc 'split("\n") | map(select(length > 0))'
+}
+
+# database_records <apps file> <var file>: databases that engines without a state file (api, cli)
+# made, from the outputs of their records in the state store, as a var file for deploy/ (so
+# the credentials are never on a command line). A record holds them as
+# "outputs": { "databases": [...], "database_credentials": { "<provider>-<name>": { "url": ... } } }.
+# Writes nothing, and returns 1, when there are none.
+database_records() {
+  local p rec out='{"extra_databases":[],"extra_database_credentials":{}}' found=0
+  apps_use_database "$1" || return 1
+  [[ -n "$(state_config)" && $STATE_ON -eq 1 ]] || return 1
+  for p in $(cd "$PROVIDERS_DIR" && ls -d -- */ 2>/dev/null | sed 's|/$||' | grep -v '^_'); do
+    [[ -d "$PROJECT/$p" ]] || continue
+    [[ -f "$PROVIDERS_DIR/$p/api.yaml" || -f "$PROVIDERS_DIR/$p/cli.yaml" || -f "$PROVIDERS_DIR/$p/guided.yaml" ]] || continue
+    rec="$(record_pull "$p")"
+    [[ -n "$rec" ]] && jq -e '.outputs.databases' <<< "$rec" >/dev/null 2>&1 || continue
+    out="$(jq -c --argjson r "$rec" '.extra_databases += ($r.outputs.databases // []) | .extra_database_credentials += ($r.outputs.database_credentials // {})' <<< "$out")"
+    found=1
+  done
+  [[ $found -eq 1 ]] || return 1
+  (umask 077; printf '%s\n' "$out" > "$2")
+}
+
+# deploy_plan: resolve apps.tfvars, the inventory, the tunnels, the buckets and the databases with deploy/
 # into $TMP/targets.json, platforms.json, registries.json, tunnel_tokens.json and
 # app_env.json.
 deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
@@ -2609,6 +2645,8 @@ deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
   if [[ -f "$apps_file" ]]; then args+=(-var-file="$apps_file"); fi
   if [[ -n "$tunnel_state" ]]; then args+=(-var "tunnel_state_path=$tunnel_state"); fi
   args+=(-var "storage_state_paths=$(storage_states)")
+  args+=(-var "database_state_paths=$(database_states "$apps_file")")
+  if database_records "$apps_file" "$TMP/databases.tfvars.json"; then args+=(-var-file="$TMP/databases.tfvars.json"); fi
   default="$(default_host)"
   if [[ -n "$default" ]]; then args+=(-var "default_host=$default"); fi
   check_checkout_tfvars "$ROOT/deploy"
@@ -2617,12 +2655,16 @@ deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
   for o in targets platforms registries tunnel_tokens app_env; do
     TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" output -state="$TMP/deploy.tfstate" -json "$o" > "$TMP/$o.json" || return 1
   done
+  # in GitHub Actions, keep what a bucket or a database hands an app out of the job's log
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    jq -r '.[] | .[] | strings | select(length >= 8)' "$TMP/app_env.json" | while IFS= read -r value; do echo "::add-mask::$value"; done
+  fi
 }
 
 # remote_script <host> <redact>: the script deploy pipes to `sudo bash -s` on a host.
 # Files travel as base64 heredocs; with redact=1 (dry run) contents and secrets are left out.
 remote_script() {
-  local host="$1" redact="$2" name compose env_file server username var token
+  local host="$1" redact="$2" name compose env_file server username var token what
   local targets="$TMP/targets.json"
 
   cat <<EOF
@@ -2680,23 +2722,27 @@ EOF
   done < <(jq -r 'to_entries[] | [.key, .value.username, .value.password_env] | @tsv' "$TMP/registries.json")
 
   # Fields split at \x1f, which unlike a tab keeps an empty env_file in its place.
-  while IFS=$'\x1f' read -r name compose env_file bucket; do
+  while IFS=$'\x1f' read -r name compose env_file bucket database; do
     [[ -n "$name" ]] || continue
     echo "put \"\$apps/$name/compose.yaml\" 0640 <<'FREELUNCH_EOF'"
     if [[ "$redact" == 1 ]]; then echo "<$compose>"; else b64 < "$compose"; fi
     echo "FREELUNCH_EOF"
-    # The bucket's settings come first, so the env_file can override them.
-    if [[ -n "$env_file$bucket" ]]; then
+    # The bucket's settings and the database's URL come first, so the env_file can override them.
+    if [[ -n "$env_file$bucket$database" ]]; then
       echo "put \"\$apps/$name/.env\" 0600 <<'FREELUNCH_EOF'"
       if [[ "$redact" == 1 ]]; then
-        echo "<${bucket:+the S3 settings of $bucket}${bucket:+${env_file:+, then }}${env_file}, redacted>"
+        what=""
+        [[ -z "$bucket" ]] || what="the S3 settings of $bucket"
+        [[ -z "$database" ]] || what="${what:+$what, }DATABASE_URL of $database"
+        [[ -z "$env_file" ]] || what="${what:+$what, then }$env_file"
+        echo "<$what, redacted>"
       else
         { bucket_env "$name"; [[ -z "$env_file" ]] || cat "$env_file"; } | b64
       fi
       echo "FREELUNCH_EOF"
     fi
     echo "up $name"
-  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // "")] | join("\u001f")' "$targets")
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // ""), (.value.database // "")] | join("\u001f")' "$targets")
 
   if [[ "$(jq -r --arg h "$host" '.[$h].tunnel' "$targets")" == "true" ]]; then
     echo "put \"\$apps/cloudflared/compose.yaml\" 0640 <<'FREELUNCH_EOF'"
@@ -4903,7 +4949,7 @@ northflank_deploy() {
   fi
 
   # Fields split at \x1f, which unlike a tab keeps an empty env_file in its place.
-  while IFS=$'\x1f' read -r name compose env_file bucket; do
+  while IFS=$'\x1f' read -r name compose env_file bucket database; do
     [[ -n "$name" ]] || continue
     jq --arg h "$host" --arg n "$name" '.[$h].services[$n]' "$TMP/platforms.json" > "$TMP/spec.json"
     image="$(jq -r '.image' "$TMP/spec.json")"
@@ -4951,13 +4997,13 @@ northflank_deploy() {
       fi
       code="$(nf PUT "/projects/$project/services/deployment" "$TMP/service.json")"
       nf_ok "$code" || die "northflank: can't update the service $name ($code): $(nf_error)"
-      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}"
+      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}${database:+, with the database $database}"
       service="$(jq -r --arg n "$name" '.data.id // $n' "$TMP/nf.json")"
       services+=("$service")
       northflank_attach "$project" "$service" ${volumes[@]+"${volumes[@]}"}
     fi
     rm -f "$TMP/service.json"
-  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // "")] | join("\u001f")' "$TMP/targets.json")
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // ""), (.value.database // "")] | join("\u001f")' "$TMP/targets.json")
 
   if [[ "$(jq -r --arg h "$host" '.[$h].tunnel' "$TMP/targets.json")" == "true" ]]; then
     ( umask 077; jq -r --arg h "$host" '.[$h]' "$TMP/tunnel_tokens.json" > "$TMP/tunnel.token" )
@@ -5289,7 +5335,7 @@ cloud_run_deploy() {
   fi
   svc="$CR_API/projects/$project/locations/$region/services"
   # Fields split at \x1f, which unlike a tab keeps an empty env_file in its place.
-  while IFS=$'\x1f' read -r name compose env_file bucket; do
+  while IFS=$'\x1f' read -r name compose env_file bucket database; do
     [[ -n "$name" ]] || continue
     jq --arg h "$host" --arg n "$name" '.[$h].services[$n]' "$TMP/platforms.json" > "$TMP/spec.json"
     image="$(jq -r '.image' "$TMP/spec.json")"
@@ -5313,12 +5359,12 @@ cloud_run_deploy() {
         code="$(cr PATCH "$svc/$name" "$TMP/service.json")"
       fi
       cr_ok "$code" || die "cloud-run: can't deploy the service $name ($code): $(cr_error)"
-      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}"
+      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}${database:+, with the database $database}"
       services+=("$name")
       cr_operation "deploying $name"
     fi
     rm -f "$TMP/service.json"
-  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // "")] | join("\u001f")' "$TMP/targets.json")
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // ""), (.value.database // "")] | join("\u001f")' "$TMP/targets.json")
   [[ "$dry_run" == 0 ]] || return 0
 
   for name in ${services[@]+"${services[@]}"}; do
@@ -5596,7 +5642,7 @@ scaleway_deploy() {
     [[ -n "$ns" && "$ns" != foreign ]] || die "scaleway: there is no namespace $namespace yet: freelunch apply scaleway makes it"
   fi
   local ids=() names=()
-  while IFS=$'\x1f' read -r name compose env_file bucket; do
+  while IFS=$'\x1f' read -r name compose env_file bucket database; do
     [[ -n "$name" ]] || continue
     jq --arg h "$host" --arg n "$name" '.[$h].services[$n]' "$TMP/platforms.json" > "$TMP/spec.json"
     image="$(jq -r '.image' "$TMP/spec.json")"
@@ -5623,11 +5669,11 @@ scaleway_deploy() {
       fi
       sw_ok "$code" || die "scaleway: can't deploy the container $name ($code): $(sw_error)"
       id="$(jq -r '.id' "$TMP/sw.json")"
-      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}"
+      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}${database:+, with the database $database}"
       ids+=("$id"); names+=("$name")
     fi
     rm -f "$TMP/service.json"
-  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // "")] | join("\u001f")' "$TMP/targets.json")
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // ""), (.value.database // "")] | join("\u001f")' "$TMP/targets.json")
   [[ "$dry_run" == 0 ]] || return 0
 
   local i
@@ -5891,7 +5937,7 @@ render_deploy() {
     render_has_owner "$owner" || die "render: RENDER_API_KEY can't see the workspace $owner"
   fi
   local sids=() dids=() names=()
-  while IFS=$'\x1f' read -r name compose env_file bucket; do
+  while IFS=$'\x1f' read -r name compose env_file bucket database; do
     [[ -n "$name" ]] || continue
     jq --arg h "$host" --arg n "$name" '.[$h].services[$n]' "$TMP/platforms.json" > "$TMP/spec.json"
     image="$(jq -r '.image' "$TMP/spec.json")"
@@ -5940,11 +5986,11 @@ render_deploy() {
         sids+=("$sid"); dids+=("$(jq -r '.id' "$TMP/rd.json")")
         rm -f "$TMP"/service.patch "$TMP"/service.env "$TMP"/service.deploy
       fi
-      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}"
+      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}${database:+, with the database $database}"
       names+=("$name")
     fi
     rm -f "$TMP/service.json"
-  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // "")] | join("\u001f")' "$TMP/targets.json")
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // ""), (.value.database // "")] | join("\u001f")' "$TMP/targets.json")
   [[ "$dry_run" == 0 ]] || return 0
 
   local i url

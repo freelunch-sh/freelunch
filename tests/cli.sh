@@ -3560,6 +3560,121 @@ test_guided_providers_print_their_steps() {
   [[ $n -ge 3 ]]
 }
 
+# --- databases in an app's environment -------------------------------------------------------
+
+# give_database <project>: a deployed database stack (the neon fixture) and the api app using it
+give_database() {
+  mkdir -p "$1/.freelunch/neon"
+  cp "$ROOT/deploy/tests/fixtures/database.tfstate" "$1/.freelunch/neon/terraform.tfstate"
+  sed -i.bak 's|env_file = "api.env" }|env_file = "api.env", database = "neon-main" }|' "$1/.freelunch/apps.tfvars"
+}
+
+DB_URL='postgres://owner:mock-db-pass@ep-mock.eu-central-1.aws.neon.tech/neondb?sslmode=require'
+
+# database = "neon-main" in apps.tfvars puts DATABASE_URL in the app's environment, the way a
+# bucket's settings get there: on a VM in its .env under the env_file's values, and on Northflank
+# in the service's environment. The dry run and the logs never show it.
+test_deploy_gives_an_app_its_database() {
+  local p="$WORK/db-vm" n="$WORK/db-nf" out
+  new_project "$p"
+  give_database "$p"
+  GHCR_TOKEN=ghp_test-token deploy_in "$p" >/dev/null 2>&1
+  equals "$(cat "$p/host/apps/api/.env")" "$(printf 'DATABASE_URL=%s\nAPI_SECRET=s3cret-value' "$DB_URL")"
+  out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" --dry-run 2>&1)"
+  contains "$out" "<DATABASE_URL of neon-main, then $p/.freelunch/api.env, redacted>"
+  lacks "$out" "mock-db-pass"
+  # with a bucket as well, and without an env_file
+  mkdir -p "$p/.freelunch/backblaze-b2"
+  cp "$ROOT/deploy/tests/fixtures/storage.tfstate" "$p/.freelunch/backblaze-b2/terraform.tfstate"
+  sed -i.bak 's|env_file = "api.env", database|env_file = "api.env", bucket = "backblaze-b2-results", database|' "$p/.freelunch/apps.tfvars"
+  out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" --dry-run 2>&1)"
+  contains "$out" "<the S3 settings of backblaze-b2-results, DATABASE_URL of neon-main, then $p/.freelunch/api.env, redacted>"
+  sed -i.bak 's|env_file = "api.env", ||' "$p/.freelunch/apps.tfvars"
+  GHCR_TOKEN=ghp_test-token deploy_in "$p" >/dev/null 2>&1
+  contains "$(cat "$p/host/apps/api/.env")" "DATABASE_URL=$DB_URL"
+  contains "$(cat "$p/host/apps/api/.env")" "S3_BUCKET=freelunch-results"
+  # a database no stack made stops the deploy, and says which exist
+  sed -i.bak 's|neon-main|supabase-app|' "$p/.freelunch/apps.tfvars"
+  if out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "Apps use databases that no stack has made: api (database supabase-app)"
+  # on Northflank it is the service's environment, under the env_file's values
+  nf_project "$n"
+  give_database "$n"
+  printf 'DATABASE_URL=my-own\n' >> "$n/.freelunch/api.env"
+  out="$(GHCR_TOKEN=x nf_in "$n" deploy 2>&1)"
+  contains "$out" ", with the database neon-main"
+  equals "$(sent "$n" api | jq -r .runtimeEnvironment.DATABASE_URL)" "my-own"
+  sed -i.bak '/DATABASE_URL=my-own/d' "$n/.freelunch/api.env"
+  GHCR_TOKEN=x nf_in "$n" deploy >/dev/null 2>&1
+  equals "$(sent "$n" api | jq -r .runtimeEnvironment.DATABASE_URL)" "$DB_URL"
+  lacks "$(cat "$n/fake.log")" "mock-db-pass"
+}
+
+test_cloud_run_gives_an_app_its_database() {
+  local p="$WORK/db-cr" out
+  cr_project "$p"
+  FREELUNCH_AUTO_APPROVE=1 cr_in "$p" apply cloud-run >/dev/null 2>&1
+  give_database "$p"
+  out="$(cr_in "$p" deploy 2>&1)"
+  contains "$out" ", with the database neon-main"
+  equals "$(jq -r '.template.containers[0].env[] | select(.name == "DATABASE_URL") | .value' "$p/cr/sent-api.json")" "$DB_URL"
+  lacks "$(cat "$p/fake.log")" "mock-db-pass"
+  lacks "$out" "mock-db-pass"
+}
+
+test_scaleway_gives_an_app_its_database() {
+  local p="$WORK/db-sw" out
+  mkdir -p "$p/sw"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["8080:8080"]\n' > "$p/compose.yaml"
+  (cd "$p" && "$CLI" init --name sunbird scaleway) >/dev/null 2>&1
+  printf 'project_id = "11111111-2222-3333-4444-555555555555"\nname_prefix = "sunbird"\n' > "$p/.freelunch/scaleway/terraform.tfvars"
+  printf 'API_SECRET=s3cret-value\n' > "$p/.freelunch/api.env"
+  printf 'apps = {\n  api = { host = "scaleway-main", compose = "../compose.yaml", env_file = "api.env" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  FREELUNCH_AUTO_APPROVE=1 sw_in "$p" apply scaleway >/dev/null 2>&1
+  give_database "$p"
+  out="$(sw_in "$p" deploy 2>&1)"
+  equals "$(jq -r .secret_environment_variables.DATABASE_URL "$p/sw/sent-api.json")" "$DB_URL"
+  lacks "$(cat "$p/fake.log")" "mock-db-pass"
+  lacks "$out" "mock-db-pass"
+}
+
+test_render_gives_an_app_its_database() {
+  local p="$WORK/db-rd" out
+  mkdir -p "$p/rd"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["8080:8080"]\n' > "$p/compose.yaml"
+  (cd "$p" && "$CLI" init --name sunbird render) >/dev/null 2>&1
+  printf 'owner_id = "usr-abc123def456"\nname_prefix = "sunbird"\n' > "$p/.freelunch/render/terraform.tfvars"
+  printf 'API_SECRET=s3cret-value\n' > "$p/.freelunch/api.env"
+  printf 'apps = {\n  api = { host = "render-main", compose = "../compose.yaml", env_file = "api.env" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  FREELUNCH_AUTO_APPROVE=1 rd_in "$p" apply render >/dev/null 2>&1
+  give_database "$p"
+  out="$(rd_in "$p" deploy 2>&1)"
+  equals "$(jq -r '.envVars[] | select(.key == "DATABASE_URL") | .value' "$p/rd/sent-sunbird-api.json")" "$DB_URL"
+  lacks "$(cat "$p/fake.log")" "mock-db-pass"
+  lacks "$out" "mock-db-pass"
+}
+
+# A database an engine without a state file made (an api or cli provider) is in the outputs of
+# that provider's record in the state store, and reaches the app the same way.
+test_deploy_reads_a_database_from_an_engine_record() {
+  local p="$WORK/db-rec" out
+  new_project "$p"
+  state_store "$p"
+  mkdir -p "$p/.freelunch/deno-deploy"
+  sed -i.bak 's|env_file = "api.env" }|env_file = "api.env", database = "turso-app" }|' "$p/.freelunch/apps.tfvars"
+  # no record yet: stopped, saying what is known
+  if out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "Apps use databases that no stack has made: api (database turso-app)"
+  jq -n '{engine: "api", resources: [], outputs: {
+      databases: [{provider: "turso", name: "app", engine: "libsql"}],
+      database_credentials: {"turso-app": {url: "libsql://app-me.turso.io?authToken=mock-token"}}}}' > "$p/rec.json"
+  in_dir "$p" "$CLI" state record push deno-deploy "$p/rec.json" >/dev/null 2>&1
+  GHCR_TOKEN=ghp_test-token deploy_in "$p" >/dev/null 2>&1
+  contains "$(cat "$p/host/apps/api/.env")" "DATABASE_URL=libsql://app-me.turso.io?authToken=mock-token"
+  out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" --dry-run 2>&1)"
+  lacks "$out" "mock-token"
+}
+
 # A provider's engine is what its provider.yaml says, or what its iac implies.
 test_engine_of_defaults_from_iac() {
   equals "$("$CLI" engine render)" tofu

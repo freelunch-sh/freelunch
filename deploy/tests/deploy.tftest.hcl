@@ -648,3 +648,64 @@ run "a_memory_limit_no_plan_holds_is_refused" {
 
   expect_failures = [output.platforms]
 }
+
+run "a_database_puts_its_url_in_the_apps_environment" {
+  command = plan
+
+  variables {
+    database_state_paths = ["tests/fixtures/database.tfstate"]
+    storage_state_paths  = ["tests/fixtures/storage.tfstate"]
+    apps = {
+      api = { host = "oci-main", compose = "compose.yaml", database = "neon-main" }
+      web = { host = "oci-main", compose = "compose.yaml" }
+      both = { host = "oci-main", compose = "compose.yaml", database = "neon-main", bucket = "backblaze-b2-results" }
+    }
+  }
+
+  assert {
+    condition = nonsensitive(output.app_env.api) == {
+      DATABASE_URL = "postgres://owner:mock-db-pass@ep-mock.eu-central-1.aws.neon.tech/neondb?sslmode=require"
+    } && !contains(keys(output.app_env), "web")
+    error_message = "An app with a database gets DATABASE_URL; one without gets nothing."
+  }
+
+  assert {
+    condition     = nonsensitive(output.app_env.both.DATABASE_URL) == "postgres://owner:mock-db-pass@ep-mock.eu-central-1.aws.neon.tech/neondb?sslmode=require" && nonsensitive(output.app_env.both.S3_BUCKET) == "freelunch-results"
+    error_message = "An app can have a bucket and a database."
+  }
+
+  assert {
+    condition     = output.targets["oci-main"].apps.api.database == "neon-main" && output.targets["oci-main"].apps.web.database == null
+    error_message = "The deploy plan says which app has a database."
+  }
+}
+
+run "a_database_can_come_from_an_engine_record" {
+  command = plan
+
+  variables {
+    extra_databases = [{ provider = "turso", name = "app", engine = "libsql" }]
+    extra_database_credentials = {
+      "turso-app" = { url = "libsql://app-me.turso.io?authToken=mock-token" }
+    }
+    apps = {
+      api = { host = "oci-main", compose = "compose.yaml", database = "turso-app" }
+    }
+  }
+
+  assert {
+    condition     = nonsensitive(output.app_env.api.DATABASE_URL) == "libsql://app-me.turso.io?authToken=mock-token"
+    error_message = "A database an engine's record holds reaches the app the same way a stack's does."
+  }
+}
+
+run "apps_need_a_database_a_stack_made" {
+  command = plan
+
+  variables {
+    database_state_paths = ["tests/fixtures/database.tfstate"]
+    apps                 = { api = { host = "oci-main", compose = "compose.yaml", database = "supabase-app" } }
+  }
+
+  expect_failures = [output.targets]
+}

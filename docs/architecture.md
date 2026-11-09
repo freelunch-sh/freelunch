@@ -160,8 +160,15 @@ A stack that makes databases (`neon`, `supabase` and the other managed databases
 
 and `database_credentials`, a sensitive map from `<provider>-<name>` to `{ password, url }`,
 where `url` is the full connection string. Read them with `freelunch output <provider> -json
-database_credentials`. Putting a database into an app's environment on `deploy`
-(`database = "neon-main"` in `apps.tfvars`, the way buckets work) is not built yet.
+database_credentials`. An app names a database in `apps.tfvars` (`database = "neon-main"`, the
+way buckets work) and `deploy` puts `DATABASE_URL`, the connection string, in its environment on
+every host and platform; the URL is kept out of the dry run and the logs.
+
+An engine that has no state file (`api`, `cli`) gives the same contract through its
+[record](#engine-records): the record may hold `"outputs": { "databases": [...],
+"database_credentials": { "<provider>-<name>": { "url": "..." } } }`, with the same shape as the
+stack outputs, and `deploy` reads it from the state store. The record is encrypted like state, so
+the credentials are no more exposed there than a stack's are.
 
 ## Projects
 
