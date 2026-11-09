@@ -1357,13 +1357,14 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
   if [[ -n "$WAIT_SESSION" ]]; then
     log "$p: the session of profile $profile ends at $(fmt_time "$WAIT_SESSION"), in $(fmt_duration $((WAIT_SESSION - $(date +%s)))), and the wait with it. An API key doesn't expire (oci setup bootstrap)"
   fi
-  wait_state waiting "starting"
   # Ctrl-C is you stopping it. A TERM or HUP is something else ending it (a kill, a shutdown, the
   # terminal closing), so it says which, and tells you like any other end. Only a KILL gets
   # no word, and status then says what a wait that vanished means.
   trap 'WAIT_INTERRUPTED=1; [[ -z "$SLEEP_PID" ]] || kill "$SLEEP_PID" 2>/dev/null; die "$p: stopped waiting for capacity (interrupted with Ctrl-C) after $(attempts "$WAIT_TRIES")"' INT
   trap '[[ -z "$SLEEP_PID" ]] || kill "$SLEEP_PID" 2>/dev/null; die "$p: stopped waiting for capacity: got SIGTERM (a kill, a shutdown or a restart) after $(attempts "$WAIT_TRIES")"' TERM
   trap '[[ -z "$SLEEP_PID" ]] || kill "$SLEEP_PID" 2>/dev/null; die "$p: stopped waiting for capacity: got SIGHUP (the terminal or the SSH session closed) after $(attempts "$WAIT_TRIES"). Run it with nohup, in tmux, or hand it to CI (freelunch ci wait)"' HUP
+  # Only now is the state file there to be seen, so whoever finds it can signal the wait and get an answer.
+  wait_state waiting "starting"
   prepare_stack apply "$p"
   while IFS= read -r a; do
     args+=("$a")
