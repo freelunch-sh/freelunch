@@ -202,7 +202,7 @@ Rules for a service stack:
   service with none is only known to exist.
 - It makes only what the free tier covers, and refuses more (a validation), as the other stacks do.
 
-An engine without a state file (`api`, `cli`) does not give services yet.
+An engine without a state file (`api`, `cli`) gives services through its [record](#engine-records): `outputs.services` and `outputs.service_credentials`, in the same shape.
 
 ## Projects
 

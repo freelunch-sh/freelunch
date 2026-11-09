@@ -2675,21 +2675,26 @@ service_states() {
   done | jq -Rsc 'split("\n") | map(select(length > 0))'
 }
 
-# database_records <apps file> <var file>: databases that engines without a state file (api, cli)
-# made, from the outputs of their records in the state store, as a var file for deploy/ (so
-# the credentials are never on a command line). A record holds them as
-# "outputs": { "databases": [...], "database_credentials": { "<provider>-<name>": { "url": ... } } }.
-# Writes nothing, and returns 1, when there are none.
+# database_records <apps file> <var file>: what engines without a state file (api, cli) made, from the
+# outputs of their records in the state store, as a var file for deploy/ (so the credentials are
+# never on a command line): databases, services and buckets, each with the credentials of its
+# contract. A record holds them as "outputs": { "databases": [...], "database_credentials": {...},
+# "services": [...], "service_credentials": {...}, "buckets": [...], "bucket_keys": {...} }.
+# Writes nothing, and returns 1, when there are none. (The name is from when it was only databases.)
 database_records() {
-  local p rec out='{"extra_databases":[],"extra_database_credentials":{}}' found=0
+  local p rec out found=0
+  out='{"extra_databases":[],"extra_database_credentials":{},"extra_services":[],"extra_service_credentials":{},"extra_buckets":[],"extra_bucket_keys":{}}'
   apps_use_database "$1" || return 1
   [[ -n "$(state_config)" && $STATE_ON -eq 1 ]] || return 1
   for p in $(cd "$PROVIDERS_DIR" && ls -d -- */ 2>/dev/null | sed 's|/$||' | grep -v '^_'); do
     [[ -d "$PROJECT/$p" ]] || continue
     [[ -f "$PROVIDERS_DIR/$p/api.yaml" || -f "$PROVIDERS_DIR/$p/cli.yaml" || -f "$PROVIDERS_DIR/$p/guided.yaml" ]] || continue
     rec="$(record_pull "$p")"
-    [[ -n "$rec" ]] && jq -e '.outputs.databases' <<< "$rec" >/dev/null 2>&1 || continue
-    out="$(jq -c --argjson r "$rec" '.extra_databases += ($r.outputs.databases // []) | .extra_database_credentials += ($r.outputs.database_credentials // {})' <<< "$out")"
+    [[ -n "$rec" ]] && jq -e '.outputs | (.databases // .services // .buckets) != null' <<< "$rec" >/dev/null 2>&1 || continue
+    out="$(jq -c --argjson r "$rec" '
+      .extra_databases += ($r.outputs.databases // []) | .extra_database_credentials += ($r.outputs.database_credentials // {})
+      | .extra_services += ($r.outputs.services // []) | .extra_service_credentials += ($r.outputs.service_credentials // {})
+      | .extra_buckets += ($r.outputs.buckets // []) | .extra_bucket_keys += ($r.outputs.bucket_keys // {})' <<< "$out")"
     found=1
   done
   [[ $found -eq 1 ]] || return 1
@@ -2847,7 +2852,7 @@ graph_edges() {
 graph_gate() {
   local rows host app n bad=""
   [[ "${FREELUNCH_CHECK_NEEDS:-1}" == "1" ]] || return 0
-  rows="$(probe_stack_nodes | jq -sc '.')"
+  rows="$( { probe_stack_nodes; probe_record_nodes; } | jq -sc '.')"
   for host in "$@"; do
     for app in $(jq -r --arg h "$host" '.[$h].apps | keys[]' "$TMP/targets.json"); do
       for n in $(jq -r --arg a "$app" '.[$a].needs[]' "$TMP/graph.json"); do
@@ -4096,6 +4101,26 @@ api_wait() {
   done
 }
 
+# api_outputs <provider> <app> <name>: for a provider whose resources are databases, services or
+# buckets (outputs: in api.yaml), turn the answer to the create call into the contract's entry and
+# credentials with the two jq programs the file gives, and keep them in the provider's record.
+# Their input is $item (the create answer), $app, $name and $prefix. Nothing secret is printed.
+api_outputs() {
+  local p="$1" app="$2" name="$3" kind entry cred pre
+  api_has "$p" .outputs.kind || return 0
+  kind="$(api_cfg "$p" .outputs.kind)"
+  [[ "$kind" =~ ^(database|service|bucket)$ ]] || die "api: providers/$p/api.yaml: outputs.kind is database, service or bucket"
+  [[ -n "$(state_config)" ]] || die "api: $p makes ${kind}s, and what an app needs of one is kept in the provider's record in the state store, which this project doesn't have yet (freelunch state init)"
+  pre="$(jq -r .prefix "$TMP/api/$p.vars")"
+  [[ -s "$TMP/api/$p.out" ]] || echo '{}' > "$TMP/api/$p.out"
+  entry="$(jq -nc --argjson item "$(cat "$TMP/api/$p.out")" --arg app "$app" --arg name "$name" --arg prefix "$pre" "($(api_cfg "$p" .outputs.entry)) + {provider: \"$p\", name: \$app}" 2>"$TMP/api/$p.out.err")" \
+    || die "api: the outputs.entry in providers/$p/api.yaml doesn't render: $(head -c 300 "$TMP/api/$p.out.err")"
+  cred="$(jq -nc --argjson item "$(cat "$TMP/api/$p.out")" --arg app "$app" --arg name "$name" --arg prefix "$pre" "$(api_cfg "$p" .outputs.credentials)" 2>"$TMP/api/$p.out.err")" \
+    || die "api: the outputs.credentials in providers/$p/api.yaml don't render: $(head -c 300 "$TMP/api/$p.out.err")"
+  record_outputs "$p" set "$kind" "$app" "$entry" "$cred"
+  log "$p: $name: what an app needs of it is in the record: an app says $([[ $kind == database ]] && echo database || echo needs) = \"$p-$app\""
+}
+
 # api_deploy <provider> <app> <image> <port> <env file> <dry run 0|1> [source folder]: find
 # <prefix>-<app>; create it when it isn't there, update it when freelunch made it, stop when
 # somebody else did. A provider that deploys source, not an image, gets the folder in the vars
@@ -4151,6 +4176,7 @@ api_deploy() {
     fi
     api_record "$p" add "$id" "$name"
     log "$p: $name: made"
+    api_outputs "$p" "$app" "$name"
   fi
   if api_step "$p" deploy "$vars"; then :
   elif api_has "$p" .deploy.request; then
@@ -4207,6 +4233,7 @@ api_delete_one() {
   fi
   log "$p: deleted $name"
   api_record "$p" remove "$id"
+  ! api_has "$p" .outputs.kind || record_outputs "$p" remove all "${name#"$(jq -r .prefix "$TMP/api/$p.vars")"-}"
 }
 
 # api_status <provider>: what is there
@@ -4373,23 +4400,39 @@ cli_recorded() {
   [[ -n "$rec" ]] && jq -e --arg n "$2" 'any(.resources[]?; .name == $n)' <<< "$rec" >/dev/null
 }
 
-# record_outputs <provider> set|remove <name> [database json] [credentials json]: a database the
-# engine made is in its record's outputs, in the shape of the database contract (databases and
-# database_credentials), which deploy reads like a stack's output. The record is encrypted like state.
+# record_outputs <provider> set|remove <database|service|bucket|all> <app> [entry json] [credentials json]:
+# what an engine without a state file made, in the provider's record, in the shape of the contracts
+# (databases and database_credentials, services and service_credentials, buckets and bucket_keys), which
+# deploy reads like a stack's outputs. The record is encrypted like state.
 record_outputs() {
-  local p="$1" op="$2" name="$3" db="${4:-null}" cred="${5:-null}" cur rc=0
+  local p="$1" op="$2" kind="$3" name="$4" entry="${5:-null}" cred="${6:-null}" cur rc=0 list creds
   [[ -n "$(state_config)" ]] || return 0
   cur="$(record_pull "$p")"
-  [[ -n "$cur" ]] || cur='{"engine":"cli","resources":[]}'
+  if [[ -z "$cur" ]]; then
+    cur='{"engine":"api","resources":[]}'
+    [[ ! -f "$PROVIDERS_DIR/$p/cli.yaml" ]] || cur='{"engine":"cli","resources":[]}'
+  fi
+  case "$kind" in
+    database) list=databases; creds=database_credentials ;;
+    service)  list=services;  creds=service_credentials ;;
+    bucket)   list=buckets;   creds=bucket_keys ;;
+    all)      list=""; creds="" ;;
+  esac
   case "$op" in
-    set)    jq -c --arg n "$name" --argjson d "$db" --argjson c "$cred" --arg k "$p-$name" \
-              '.outputs.databases = (((.outputs.databases // []) | map(select(.name != $n))) + [$d]) | .outputs.database_credentials = ((.outputs.database_credentials // {}) + {($k): $c})' <<< "$cur" > "$TMP/api/$p.record" ;;
+    set)    jq -c --arg n "$name" --argjson d "$entry" --argjson c "$cred" --arg k "$p-$name" --arg l "$list" --arg cr "$creds" \
+              '.outputs[$l] = (((.outputs[$l] // []) | map(select(.name != $n))) + [$d]) | .outputs[$cr] = ((.outputs[$cr] // {}) + {($k): $c})' <<< "$cur" > "$TMP/api/$p.record" ;;
     remove) jq -c --arg n "$name" --arg k "$p-$name" \
-              'if .outputs then .outputs.databases = ((.outputs.databases // []) | map(select(.name != $n))) | .outputs.database_credentials = ((.outputs.database_credentials // {}) | del(.[$k])) else . end' <<< "$cur" > "$TMP/api/$p.record" ;;
+              'if .outputs then reduce [["databases","database_credentials"],["services","service_credentials"],["buckets","bucket_keys"]][] as $x (.; .outputs[$x[0]] = ((.outputs[$x[0]] // []) | map(select(.name != $n))) | .outputs[$x[1]] = ((.outputs[$x[1]] // {}) | del(.[$k]))) else . end' <<< "$cur" > "$TMP/api/$p.record" ;;
   esac
   record_push "$p" "$TMP/api/$p.record" || rc=$?
-  [[ $rc -ne 2 ]] || die "cli: the store's record of $p changed while this ran (another machine or CI): run it again"
+  [[ $rc -ne 2 ]] || die "$p: the store's record of $p changed while this ran (another machine or CI): run it again"
   return $rc
+}
+
+# record_has_output <provider> <app>: whether the record already has outputs for it
+record_has_output() {
+  local rec; rec="$(record_pull "$1")"
+  [[ -n "$rec" ]] && jq -e --arg n "$2" 'any(.outputs[]?; type == "array" and any(.[]?; type == "object" and .name == $n))' <<< "$rec" >/dev/null
 }
 
 # cli_capture <provider> <verb>: run the verb's command and print its output (not its errors),
@@ -4400,32 +4443,68 @@ cli_capture() {
   "${words[@]}" 2> "$TMP/api/$p.cli.err" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$' | tail -1
 }
 
-# cli_database_outputs <provider> <app> <name>: for a provider whose resources are databases, ask
-# the tool for the address and a token, and keep them in the record as the database contract. The
-# token is not printed or logged; a database already in the record keeps its token.
-cli_database_outputs() {
-  local p="$1" app="$2" name="$3" url token conn host port eng rec
-  api_has "$p" .database.url || return 0
-  [[ -n "$(state_config)" ]] || die "cli: $p makes databases, and the connection string is kept in the provider's record in the state store, which this project doesn't have yet (freelunch state init)"
-  rec="$(record_pull "$p")"
-  if [[ -n "$rec" ]] && jq -e --arg n "$app" 'any(.outputs.databases[]?; .name == $n)' <<< "$rec" >/dev/null; then return 0; fi
-  url="$(cli_capture "$p" database.url)" || true
-  [[ -n "$url" ]] || die "cli: $p gave no address for $name: $(head -c 300 "$TMP/api/$p.cli.err")"
-  token=""
-  if api_has "$p" .database.token; then
-    token="$(cli_capture "$p" database.token)" || true
-    [[ -n "$token" ]] || die "cli: $p gave no token for $name: $(head -c 300 "$TMP/api/$p.cli.err")"
-  fi
-  conn="$(api_cfg "$p" .database.connection)"; [[ -n "$conn" ]] || conn="{url}"
-  conn="${conn//\{url\}/$url}"; conn="${conn//\{token\}/$token}"
-  host="${url#*://}"; host="${host%%[/?:]*}"
-  port="$(api_cfg "$p" .database.port)"; [[ -n "$port" ]] || port=443
-  eng="$(api_cfg "$p" .database.engine)"
-  record_outputs "$p" set "$app" \
-    "$(jq -nc --arg p "$p" --arg n "$app" --arg e "${eng:-unknown}" --arg h "$host" --argjson port "$port" --arg d "$name" --arg b "$(api_cfg "$p" .database.behavior)" \
-      '{provider: $p, name: $n, engine: $e, host: $h, port: $port, database: $d, behavior: (if $b == "" then null else $b end)}')" \
-    "$(jq -nc --arg u "$conn" --arg t "$token" '{url: $u} + (if $t == "" then {} else {password: $t} end)')"
-  log "$p: $name: its connection string is in the record: an app says database = \"$p-$app\""
+# cli_has_outputs <provider>: whether its resources are databases, services or buckets
+cli_has_outputs() { api_has "$1" .database.url || api_has "$1" .service.kind || api_has "$1" .bucket.endpoint; }
+
+# cli_template <provider> <caps json> <template>: the template with {name} of the captured values put in
+cli_template() {
+  jq -nr --argjson c "$2" --arg t "$3" 'reduce ($c | to_entries[]) as $e ($t; gsub("\\{" + $e.key + "\\}"; $e.value))'
+}
+
+# cli_captures <provider> <block> <app> <name>: run each command of the block's capture: and print
+# the values by name as JSON, with name, app and prefix; a command that prints nothing stops it
+cli_captures() {
+  local p="$1" block="$2" app="$3" name="$4" caps out key
+  caps="$(jq -nc --arg a "$app" --arg n "$name" --arg p "$(jq -r .prefix "$TMP/api/$p.vars")" '{app: $a, name: $n, prefix: $p}')"
+  for key in $(jq -r --arg b "$block" '.[$b].capture // {} | keys[]' "$TMP/api/$p.json"); do
+    out="$(cli_capture "$p" "$block.capture.$key")" || true
+    [[ -n "$out" ]] || die "cli: $p gave no $key for $name: $(head -c 300 "$TMP/api/$p.cli.err")"
+    caps="$(jq -c --arg k "$key" --arg v "$out" '. + {($k): $v}' <<< "$caps")"
+  done
+  echo "$caps"
+}
+
+# cli_outputs <provider> <app> <name>: for a provider whose resources are databases, services or
+# buckets, ask the tool for what an app needs and keep it in the record as that contract. Nothing
+# is printed or logged of the secrets. What is already in the record is kept (a token is made once).
+cli_outputs() {
+  local p="$1" app="$2" name="$3" kind="" caps entry cred url token conn host port eng
+  cli_has_outputs "$p" || return 0
+  if api_has "$p" .database.url; then kind=database
+  elif api_has "$p" .service.kind; then kind=service
+  else kind=bucket; fi
+  [[ -n "$(state_config)" ]] || die "cli: $p makes ${kind}s, and $([[ $kind == database ]] && echo "the connection string" || echo "what an app needs of one (its variables or keys)") is kept in the provider's record in the state store, which this project doesn't have yet (freelunch state init)"
+  if record_has_output "$p" "$app"; then return 0; fi
+  case "$kind" in
+    database)
+      url="$(cli_capture "$p" database.url)" || true
+      [[ -n "$url" ]] || die "cli: $p gave no address for $name: $(head -c 300 "$TMP/api/$p.cli.err")"
+      token=""
+      if api_has "$p" .database.token; then
+        token="$(cli_capture "$p" database.token)" || true
+        [[ -n "$token" ]] || die "cli: $p gave no token for $name: $(head -c 300 "$TMP/api/$p.cli.err")"
+      fi
+      conn="$(api_cfg "$p" .database.connection)"; [[ -n "$conn" ]] || conn="{url}"
+      conn="${conn//\{url\}/$url}"; conn="${conn//\{token\}/$token}"
+      host="${url#*://}"; host="${host%%[/?:]*}"
+      port="$(api_cfg "$p" .database.port)"; [[ -n "$port" ]] || port=443
+      eng="$(api_cfg "$p" .database.engine)"
+      entry="$(jq -nc --arg p "$p" --arg n "$app" --arg e "${eng:-unknown}" --arg h "$host" --argjson port "$port" --arg d "$name" --arg b "$(api_cfg "$p" .database.behavior)" \
+        '{provider: $p, name: $n, engine: $e, host: $h, port: $port, database: $d, behavior: (if $b == "" then null else $b end)}')"
+      cred="$(jq -nc --arg u "$conn" --arg t "$token" '{url: $u} + (if $t == "" then {} else {password: $t} end)')" ;;
+    service)
+      caps="$(cli_captures "$p" service "$app" "$name")"
+      entry="$(jq -nc --arg p "$p" --arg n "$app" --arg k "$(api_cfg "$p" .service.kind)" --arg h "$(cli_template "$p" "$caps" "$(api_cfg "$p" .service.host)")" --arg port "$(api_cfg "$p" .service.port)" \
+        '{provider: $p, name: $n, kind: $k, host: (if $h == "" then null else $h end), port: (if $port == "" then null else ($port | tonumber) end)}')"
+      cred="$(jq -c --argjson c "$caps" '{env: ((.service.env // {}) | map_values(. as $t | reduce ($c | to_entries[]) as $e ($t; gsub("\\{" + $e.key + "\\}"; $e.value))))}' "$TMP/api/$p.json")" ;;
+    bucket)
+      caps="$(cli_captures "$p" bucket "$app" "$name")"
+      entry="$(jq -nc --arg p "$p" --arg n "$app" --arg b "$(cli_template "$p" "$caps" "$(api_cfg "$p" '.bucket.bucket // "{name}"')")" --arg e "$(api_cfg "$p" .bucket.endpoint)" --arg r "$(api_cfg "$p" .bucket.region)" \
+        '{provider: $p, name: $n, bucket: $b, endpoint: $e, region: (if $r == "" then "auto" else $r end)}')"
+      cred="$(jq -c --argjson c "$caps" '{access_key_id: (.bucket.access_key_id // "{access_key_id}"), secret_access_key: (.bucket.secret_access_key // "{secret_access_key}")} | map_values(. as $t | reduce ($c | to_entries[]) as $e ($t; gsub("\\{" + $e.key + "\\}"; $e.value)))' "$TMP/api/$p.json")" ;;
+  esac
+  record_outputs "$p" set "$kind" "$app" "$entry" "$cred"
+  log "$p: $name: what an app needs of it is in the record: an app says $([[ $kind == database ]] && echo database || echo needs) = \"$p-$app\""
 }
 
 # cli_deploy <provider> <app> <adopt 0|1> <dry run 0|1>: make <prefix>-<app> if it isn't there; run
@@ -4466,7 +4545,7 @@ cli_deploy() {
     cli_run "$p" deploy || die "cli: the deploy of $name at $p failed: $(head -c 300 "$TMP/api/$p.cli.out")"
     log "$p: $name: deployed"
   fi
-  cli_database_outputs "$p" "$app" "$name"
+  cli_outputs "$p" "$app" "$name"
 }
 
 # cli_destroy <provider> <all with the prefix 0|1>: delete what the provider's record names
@@ -4496,7 +4575,7 @@ cli_destroy() {
       log "$p: deleted $name"
     fi
     api_record "$p" remove "$name"
-    api_has "$p" .database.url && record_outputs "$p" remove "${name#"$(jq -r .prefix "$TMP/api/$p.vars")"-}"
+    ! cli_has_outputs "$p" || record_outputs "$p" remove all "${name#"$(jq -r .prefix "$TMP/api/$p.vars")"-}"
     done_any=1
   done <<< "$names"
   [[ $done_any -eq 1 ]] || log "$p: nothing of freelunch's to delete"
@@ -7390,21 +7469,24 @@ probe_stack_nodes() {
   done
 }
 
-# probe_record_nodes: databases that engines without a state file (api, cli) made, from the
-# outputs of their records in the state store
+# probe_record_nodes: databases, services and buckets that engines without a state file (api, cli)
+# made, from the outputs of their records in the state store
 probe_record_nodes() {
-  local p rec row host port
+  local p rec row host port type
   [[ -n "$(state_config)" && $STATE_ON -eq 1 ]] || return 0
   for p in $(cd "$PROVIDERS_DIR" && ls -d -- */ 2>/dev/null | sed 's|/$||' | grep -v '^_'); do
     [[ -d "$PROJECT/$p" ]] || continue
     [[ -f "$PROVIDERS_DIR/$p/api.yaml" || -f "$PROVIDERS_DIR/$p/cli.yaml" ]] || continue
     rec="$(record_pull "$p")"
-    [[ -n "$rec" ]] && jq -e '.outputs.databases' <<< "$rec" >/dev/null 2>&1 || continue
-    while IFS=$'\x1f' read -r row host port; do
+    [[ -n "$rec" ]] && jq -e '.outputs' <<< "$rec" >/dev/null 2>&1 || continue
+    while IFS=$'\x1f' read -r type row host port; do
       [[ -n "$row" ]] || continue
-      if [[ -n "$host" && -n "$port" ]]; then probe_tcp "$row" database "$host" "$port"
-      else probe_row "$row" database true null null "it gave no address to ask"; fi
-    done < <(jq -r '.outputs.databases[]? | ["\(.provider)-\(.name)", (.host // ""), (.port // "" | tostring)] | join("\u001f")' <<< "$rec")
+      if [[ -n "$host" && -n "$port" ]]; then probe_tcp "$row" "$type" "$host" "$port"
+      else probe_row "$row" "$type" true null null "it gave no address to ask"; fi
+    done < <(jq -r '(.outputs.databases[]? | ["database", "\(.provider)-\(.name)", (.host // ""), (.port // "" | tostring)]),
+                    (.outputs.services[]?  | ["service",  "\(.provider)-\(.name)", (.host // ""), (.port // "" | tostring)]),
+                    (.outputs.buckets[]?   | ["bucket",   "\(.provider)-\(.name)", (.endpoint | sub("^https?://"; "") | sub("[:/].*$"; "")), "443"])
+                    | join("\u001f")' <<< "$rec")
   done
 }
 

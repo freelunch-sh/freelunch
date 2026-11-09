@@ -3445,6 +3445,8 @@ case "$1" in
   list) [[ -z "${FAKE_CLI_LIST_FAIL:-}" ]] || { echo "boom" >&2; exit 1; }; echo "NAME  REGION"; sed 's/$/  eu/' "$FAKE_CLI_DIR/dbs" ;;
   create) grep -qx "$2" "$FAKE_CLI_DIR/dbs" && { echo "$2 exists" >&2; exit 1; }; echo "$2" >> "$FAKE_CLI_DIR/dbs" ;;
   deploy) ;;
+  key) echo "k-$2" ;;
+  secret) echo "s-$2" ;;
   destroy) grep -qx "$2" "$FAKE_CLI_DIR/dbs" || { echo "database $2 not found" >&2; exit 1; }; grep -vx "$2" "$FAKE_CLI_DIR/dbs" > "$FAKE_CLI_DIR/dbs.new"; mv "$FAKE_CLI_DIR/dbs.new" "$FAKE_CLI_DIR/dbs" ;;
 esac
 EOF
@@ -4223,6 +4225,83 @@ test_cli_engine_database_needs_a_state_store() {
   new_project "$p"
   if out="$(turso_in "$p" cli turso deploy main 2>&1)"; then echo "deploy should have failed"; return 1; fi
   contains "$out" "the connection string is kept in the provider's record in the state store"
+}
+
+# --- services and buckets from the cli and api engines, through their records -----------------
+
+# A cli.yaml with service: or bucket: keeps what an app needs in the record; the secrets are never
+# printed; destroy takes them out.
+test_cli_engine_makes_a_service_and_a_bucket_for_the_record() {
+  local co p out rec
+  for kind in service bucket; do
+    co="$WORK/cli-co-$kind"; p="$WORK/cli-proj-$kind"
+    engine_checkout "$co" "sample-cli-$kind"
+    mkdir -p "$p/.freelunch"; state_store "$p"
+    out="$(cli_in "$co" "$p" cli "sample-cli-$kind" deploy hb 2>&1)"
+    contains "$out" "sample-cli-$kind: freelunch-hb: made"
+    contains "$out" "is in the record"
+    lacks "$out" "k-freelunch-hb"
+    rec="$(cli_in "$co" "$p" state record pull "sample-cli-$kind")"
+    if [[ $kind == service ]]; then
+      equals "$(jq -c '.outputs.services' <<< "$rec")" '[{"provider":"sample-cli-service","name":"hb","kind":"observability","host":"freelunch-hb.fakecli.test","port":443}]'
+      equals "$(jq -cS '.outputs.service_credentials["sample-cli-service-hb"].env' <<< "$rec")" '{"MONITOR_NAME":"freelunch-hb","MONITOR_URL":"https://hb.fakecli.test/k-freelunch-hb"}'
+    else
+      equals "$(jq -c '.outputs.buckets[0] | [.name, .bucket, .endpoint, .region] ' <<< "$rec")" '["hb","freelunch-hb","https://s3.fakecli.test","us-east-1"]'
+      equals "$(jq -c '.outputs.bucket_keys["sample-cli-bucket-hb"]' <<< "$rec")" '{"access_key_id":"k-freelunch-hb","secret_access_key":"s-freelunch-hb"}'
+    fi
+    cli_in "$co" "$p" cli "sample-cli-$kind" destroy >/dev/null 2>&1
+    rec="$(cli_in "$co" "$p" state record pull "sample-cli-$kind")"
+    equals "$(jq -c '[.outputs.services, .outputs.buckets] | map(. // [] | length) | add' <<< "$rec")" "0"
+  done
+}
+
+# An api.yaml with outputs: turns the create answer into the contract's entry and credentials
+test_api_engine_keeps_what_the_create_answer_gives() {
+  local dir="$WORK/api-outputs" p="$WORK/api-outputs-proj" out rec
+  api_checkout "$dir" sample-api-outputs
+  mkdir -p "$p/.freelunch"; state_store "$p"
+  printf 'X=1\n' > "$WORK/api-outputs.env"
+  out="$(API_CWD="$p" api_run "$dir" sample-api-outputs create deploy hb --image img:1 --env-file "$WORK/api-outputs.env" 2>&1)" || { echo "$out"; return 1; }
+  contains "$out" "freelunch-hb: made"
+  contains "$out" 'what an app needs of it is in the record: an app says needs = "sample-api-outputs-hb"'
+  lacks "$out" "hb-key-123"
+  rec="$(cd "$p" && "$dir/bin/freelunch" state record pull sample-api-outputs)"
+  equals "$(jq -c '.outputs.services' <<< "$rec")" '[{"kind":"observability","host":"freelunch-hb.sample.test","port":443,"provider":"sample-api-outputs","name":"hb"}]'
+  equals "$(jq -c '.outputs.service_credentials["sample-api-outputs-hb"]' <<< "$rec")" '{"env":{"SAMPLE_PUSH_URL":"https://push.sample.test/hb-key-123"}}'
+  # destroy takes them out
+  API_CWD="$p" api_run "$dir" sample-api-outputs destroy destroy >/dev/null 2>&1
+  rec="$(cd "$p" && "$dir/bin/freelunch" state record pull sample-api-outputs)"
+  equals "$(jq -c '.outputs.services | length' <<< "$rec")" "0"
+}
+
+# deploy gives an app what services and buckets from records hold, as it does for databases
+test_deploy_reads_services_and_buckets_from_engine_records() {
+  local p="$WORK/rec-svc" out
+  new_project "$p"
+  state_store "$p"
+  mkdir -p "$p/.freelunch/deno-deploy"
+  sed -i.bak 's|env_file = "api.env" }|env_file = "api.env", bucket = "filebase-assets", needs = ["uptimerobot-hb"] }|' "$p/.freelunch/apps.tfvars"
+  jq -n '{engine: "api", resources: [], outputs: {
+      services: [{provider: "uptimerobot", name: "hb", kind: "observability", host: "heartbeat.uptimerobot.com", port: 443}],
+      service_credentials: {"uptimerobot-hb": {env: {HEARTBEAT_URL: "https://heartbeat.uptimerobot.com/m-mock-key"}}},
+      buckets: [{provider: "filebase", name: "assets", bucket: "freelunch-assets", endpoint: "https://s3.filebase.com", region: "us-east-1"}],
+      bucket_keys: {"filebase-assets": {access_key_id: "FBKEY", secret_access_key: "mock-fb-secret"}}}}' > "$p/rec.json"
+  in_dir "$p" "$CLI" state record push deno-deploy "$p/rec.json" >/dev/null 2>&1
+  out="$(GHCR_TOKEN=x deploy_in "$p" --dry-run 2>&1)"
+  lacks "$out" "m-mock-key"; lacks "$out" "mock-fb-secret"
+  GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  contains "$(cat "$p/host/apps/api/.env")" "HEARTBEAT_URL=https://heartbeat.uptimerobot.com/m-mock-key"
+  contains "$(cat "$p/host/apps/api/.env")" "S3_BUCKET=freelunch-assets"
+  contains "$(cat "$p/host/apps/api/.env")" "AWS_SECRET_ACCESS_KEY=mock-fb-secret"
+  # the nodes are asked where they say they answer
+  out="$(check_in "$p" --json 2>/dev/null)"
+  equals "$(jq -r '.[] | select(.node == "uptimerobot-hb") | "\(.type) \(.healthy)"' <<< "$out")" "service true"
+  equals "$(jq -r '.[] | select(.node == "filebase-assets") | "\(.type) \(.healthy)"' <<< "$out")" "bucket true"
+  contains "$(cat "$p/fake.log")" "nc -z -w 5 s3.filebase.com 443"
+  # one that doesn't answer holds the deploy back
+  rm -r "$p/host"
+  if out="$(FAKE_TCP_DOWN="heartbeat.uptimerobot.com" GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "api needs uptimerobot-hb: nothing answers at heartbeat.uptimerobot.com:443"
 }
 
 # A provider's engine is what its provider.yaml says, or what its iac implies.

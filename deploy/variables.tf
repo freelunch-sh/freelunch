@@ -128,6 +128,45 @@ variable "service_state_paths" {
   default     = []
 }
 
+variable "extra_services" {
+  description = "Services from engine records, in the shape of the services output."
+  type = list(object({
+    provider = string
+    name     = string
+    kind     = optional(string)
+    host     = optional(string)
+    port     = optional(number)
+    behavior = optional(string)
+  }))
+  default = []
+}
+
+variable "extra_service_credentials" {
+  description = "What an app gets of those services, keyed <provider>-<name>, each with an env map."
+  type        = map(object({ env = map(string) }))
+  default     = {}
+  sensitive   = true
+}
+
+variable "extra_buckets" {
+  description = "Buckets from engine records, in the shape of the buckets output."
+  type = list(object({
+    provider = string
+    name     = string
+    bucket   = string
+    endpoint = string
+    region   = optional(string, "auto")
+  }))
+  default = []
+}
+
+variable "extra_bucket_keys" {
+  description = "Keys of those buckets, keyed <provider>-<name>."
+  type        = map(object({ access_key_id = string, secret_access_key = string }))
+  default     = {}
+  sensitive   = true
+}
+
 variable "tunnel_state_path" {
   description = "State file of the cloudflare stack, or null when it is not deployed."
   type        = string

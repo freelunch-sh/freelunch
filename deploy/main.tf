@@ -72,17 +72,29 @@ locals {
   # The graph: an app's effective needs are its needs plus its bucket and database.
   needs = { for name, a in var.apps : name => distinct(concat(a.needs, compact([a.bucket, a.database]))) }
   # The nodes a need can name: other apps, buckets and databases.
-  services = merge(concat([{}], [for s in data.terraform_remote_state.services : { for x in try(s.outputs.services, []) : "${x.provider}-${x.name}" => x }])...)
+  services = merge(concat([{}],
+    [for s in data.terraform_remote_state.services : { for x in try(s.outputs.services, []) : "${x.provider}-${x.name}" => x }],
+    [{ for x in var.extra_services : "${x.provider}-${x.name}" => x }]
+  )...)
   # What a service hands the app that needs it: the variables it names, as they are
   # (its tools read them by their own names: AXIOM_TOKEN, AMQP_URL).
-  service_env = merge(concat([{}], [for s in data.terraform_remote_state.services : { for n, c in try(nonsensitive(s.outputs.service_credentials), {}) : n => c.env }])...)
-  need_nodes  = setunion(keys(var.apps), keys(local.buckets), keys(local.databases), keys(local.services))
+  service_env = merge(concat([{}],
+    [for s in data.terraform_remote_state.services : { for n, c in try(nonsensitive(s.outputs.service_credentials), {}) : n => c.env }],
+    [{ for n, c in nonsensitive(var.extra_service_credentials) : n => c.env }]
+  )...)
+  need_nodes = setunion(keys(var.apps), keys(local.buckets), keys(local.databases), keys(local.services))
   unknown_needs = sort(flatten([
     for name, ns in local.needs : [for n in ns : "${name} (needs ${n})" if !contains(local.need_nodes, n) && !(n == var.apps[name].bucket || n == var.apps[name].database)]
   ]))
 
-  buckets     = merge(concat([{}], [for s in data.terraform_remote_state.storage : { for b in try(s.outputs.buckets, []) : "${b.provider}-${b.name}" => b }])...)
-  bucket_keys = merge(concat([{}], [for s in data.terraform_remote_state.storage : try(s.outputs.bucket_keys, {})])...)
+  buckets = merge(concat([{}],
+    [for s in data.terraform_remote_state.storage : { for b in try(s.outputs.buckets, []) : "${b.provider}-${b.name}" => b }],
+    [{ for b in var.extra_buckets : "${b.provider}-${b.name}" => b }]
+  )...)
+  bucket_keys = merge(concat([{}],
+    [for s in data.terraform_remote_state.storage : try(s.outputs.bucket_keys, {})],
+    [nonsensitive(var.extra_bucket_keys)]
+  )...)
   unknown_buckets = sort([
     for name, a in var.apps : "${name} (bucket ${a.bucket})" if a.bucket != null && !(contains(keys(local.buckets), coalesce(a.bucket, "-")) && contains(keys(local.bucket_keys), coalesce(a.bucket, "-")))
   ])

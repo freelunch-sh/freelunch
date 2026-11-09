@@ -1,0 +1,19 @@
+# A made-up tool whose resources are buckets: after create, freelunch asks for a key pair and keeps the
+# bucket and its keys in the record (the storage contract).
+tool: fakecli
+auth:
+  env: FAKECLI_TOKEN
+check: [fakecli, whoami]
+list: { command: [fakecli, list], format: lines, skip: 1 }
+create: [fakecli, create, "{name}"]
+delete: [fakecli, destroy, "{name}", --yes]
+gone: "not found"
+bucket:
+  endpoint: "https://s3.fakecli.test"
+  region: us-east-1
+  bucket: "{name}"
+  capture:
+    ak: [fakecli, key, "{name}"]
+    sk: [fakecli, secret, "{name}"]
+  access_key_id: "{ak}"
+  secret_access_key: "{sk}"

@@ -206,4 +206,4 @@ service it needs doesn't answer, like a database or bucket in `needs`.
 Built against the contract: [Axiom](../providers/axiom/README.md) and
 [Healthchecks.io](../providers/healthchecks-io/README.md) (observability),
 [CloudAMQP](../providers/cloudamqp/README.md) (messaging), [Doppler](../providers/doppler/README.md)
-(secrets). A service from an `api` or `cli` engine, through its record, is not read yet.
+(secrets). A service (or a database, or a bucket) from an `api` or `cli` engine reaches an app through that provider's record in the state store; `check` asks it there too.

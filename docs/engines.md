@@ -72,6 +72,43 @@ out of the record. The token is made once with the database and never printed. T
 which is where the record, and so the connection string, lives. [Turso](../providers/turso/README.md) is
 the first.
 
+A provider whose resources are **services** or **buckets** says so the same way, with a `service:` or
+`bucket:` block: `capture:` names commands whose output is kept under that name, and the other values
+are templates over them (`{key}`, `{name}`, `{app}`, `{prefix}`):
+
+```yaml
+service:                       # the service contract
+  kind: observability
+  host: "{name}.example.com"   # where `freelunch check` asks (optional)
+  port: 443
+  capture: { key: [tool, key, "{name}"] }
+  env: { MONITOR_URL: "https://hb.example.com/{key}" }   # the variables an app gets
+bucket:                        # the storage contract
+  endpoint: "https://s3.example.com"
+  region: us-east-1
+  bucket: "{name}"
+  capture: { ak: [tool, key, "{name}"], sk: [tool, secret, "{name}"] }
+  access_key_id: "{ak}"
+  secret_access_key: "{sk}"
+```
+
+An `api.yaml` does it with an `outputs:` block of jq programs over the answer to the create call
+(`$item`, `$app`, `$name`, `$prefix`): `kind` (`database`, `service` or `bucket`), `entry` (the contract's
+entry) and `credentials`:
+
+```yaml
+outputs:
+  kind: service
+  entry: '{ kind: "observability", host: ($name + ".example.com"), port: 443 }'
+  credentials: '{ env: { PUSH_URL: ("https://push.example.com/" + $item.key) } }'
+```
+
+Either way the result is in the provider's record (`outputs.services` and `service_credentials`, or
+`buckets` and `bucket_keys`), `deploy` reads it for `needs = ["<provider>-<app>"]` or `bucket =
+"<provider>-<app>"`, `freelunch check` asks it, and `destroy` takes it out. The record is encrypted
+like state, so the secrets are no more exposed there than in a stack's state; without a state store
+nothing is made, because there would be nowhere to keep them.
+
 ### The `guided` engine
 
 `providers/<name>/guided.yaml` holds the steps to do by hand, and, when the provider has any way to

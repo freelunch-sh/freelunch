@@ -819,3 +819,31 @@ run "a_need_on_a_service_nobody_made_is_refused" {
 
   expect_failures = [output.graph]
 }
+
+run "services_and_buckets_can_come_from_engine_records" {
+  command = plan
+
+  variables {
+    extra_services = [{ provider = "uptimerobot", name = "heartbeat", kind = "observability", host = "heartbeat.uptimerobot.com", port = 443 }]
+    extra_service_credentials = {
+      "uptimerobot-heartbeat" = { env = { HEARTBEAT_URL = "https://heartbeat.uptimerobot.com/m-mock-key" } }
+    }
+    extra_buckets = [{ provider = "filebase", name = "assets", bucket = "freelunch-assets", endpoint = "https://s3.filebase.com", region = "us-east-1" }]
+    extra_bucket_keys = {
+      "filebase-assets" = { access_key_id = "FBKEY", secret_access_key = "mock-secret" }
+    }
+    apps = {
+      api = { host = "oci-main", compose = "compose.yaml", needs = ["uptimerobot-heartbeat"], bucket = "filebase-assets" }
+    }
+  }
+
+  assert {
+    condition     = nonsensitive(output.app_env.api.HEARTBEAT_URL) == "https://heartbeat.uptimerobot.com/m-mock-key"
+    error_message = "A service from a record gives the app the variables it names."
+  }
+
+  assert {
+    condition     = nonsensitive(output.app_env.api.S3_BUCKET) == "freelunch-assets" && nonsensitive(output.app_env.api.AWS_ACCESS_KEY_ID) == "FBKEY" && nonsensitive(output.app_env.api.AWS_ENDPOINT_URL_S3) == "https://s3.filebase.com"
+    error_message = "A bucket from a record gives the app its S3 settings."
+  }
+}

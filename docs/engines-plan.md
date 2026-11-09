@@ -193,7 +193,7 @@ an app's `needs` names one and gets the variables the service names
 - [ ] The other secrets providers: Infisical, Akeyless, Bitwarden Secrets, Phase
 - [ ] The other observability providers (Better Stack, Grafana Cloud, Datadog, Honeycomb, StatusCake...)
 - [ ] The other messaging providers (Ably, Synadia, Confluent, Redpanda)
-- [ ] A service from an `api` or `cli` engine, through its record
+- [x] A service from an `api` or `cli` engine, through its record (`service:` in `cli.yaml`, `outputs:` in `api.yaml`; `deploy` and `check` read it)
 - [ ] Live-account run for each
 
 ## 11. CI systems, registries and IaC platforms (was phase 5)
@@ -222,9 +222,10 @@ contract. A `cli.yaml` with a `database:` block now writes it into the provider'
 - [x] Records are nodes: `freelunch check` asks the databases in the records
 - [x] Turso (`cli`): `providers/turso/cli.yaml`, fake `turso` in the tests, README (CLI flags and `TURSO_API_TOKEN` from its docs, not run)
 - [x] Back4App, Leapcell, SnapDeploy (`guided`) and Deno Deploy (`api`) were done in sections 6 and 7
-- [ ] The same `database:` block for the `api` engine (no provider needs it yet: the databases left have no API I could check)
-- [ ] Services (secrets, observability, messaging) from a record: `outputs.services` and `service_credentials` in `deploy/`, for UptimeRobot and StatusCake (observability), Phase (secrets). Their APIs take form-encoded bodies, which the `api` engine does not send yet
-- [ ] Storage from a record (`outputs.buckets`, `bucket_keys`): Filebase
+- [x] The same for the `api` engine: `outputs:` (database, service or bucket) in `api.yaml`, tested with a made-up provider
+- [x] Services and buckets from a record: `deploy/` and the CLI read `outputs.services`/`service_credentials` and `outputs.buckets`/`bucket_keys`, `check` and the deploy gate ask them
+- [ ] UptimeRobot and StatusCake (observability), Phase (secrets): their APIs take form-encoded bodies, which the `api` engine does not send yet (a `body_format: form` is the next step), and their calls are not checked
+- [ ] Filebase (storage): its keys come from its console, not an API, so nothing for an engine to make
 - [ ] Databases whose tool or API is not checked yet: Tinybird, Nile, Prisma Postgres, InfluxDB Cloud, CrateDB Cloud
 - [ ] GPU providers (Modal, Vast.ai, Paperspace): no contract for them yet (a GPU is a host that is rented by the hour); out of scope until there is one
 - [ ] Live-account run for each
