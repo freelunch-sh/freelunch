@@ -69,6 +69,9 @@ Project:
                           so a push can run it, and running it again is safe. --dry-run says which
                           target it would use. An app with a volume stays on the target that runs it;
                           --move lets a target above it take the app, data left behind
+  rollback                Undo a move that did not finish (or that went wrong): make the
+                          previous host's tunnel again, deploy there, and move the routes
+                          back. up records each move; this reads that record
   deploy [target...]      Check that each image has a build for its host, copy Compose apps and
                           their env to the hosts over SSH, start them and wait until they are
                           healthy. On a container platform (northflank) each app becomes a
@@ -3595,6 +3598,8 @@ target_host() {
 # is deployed. Nothing when none is, or when the targets are wrong (up says so).
 default_host() {
   local t h
+  # rollback names the host the routes go back to
+  if [[ -n "${FREELUNCH_DEFAULT_HOST:-}" ]]; then echo "$FREELUNCH_DEFAULT_HOST"; return 0; fi
   for t in $(up_targets 2>/dev/null || true); do
     is_deployed "$t" || continue
     h="$(target_host "$t")"
@@ -3703,6 +3708,37 @@ up_stop_cloudflared() {
     | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' >/dev/null 2>&1
 }
 
+# move_file: the record of a move in progress: from=<hosts the tunnels were on> and to=<new host>.
+# up writes it when the new tunnel is made and removes it when the routes have moved.
+move_file() { echo "$(state_root)/up-move.state"; }
+
+# cmd_rollback: a move that stopped halfway, or went wrong, undone by moving back: the previous
+# host gets its tunnel again, cloudflared and the app are deployed there, and once cloudflared
+# is connected the routes go back and the tunnel of the host that was moved to is deleted.
+cmd_rollback() {
+  [[ $# -eq 0 ]] || die "rollback takes no arguments"
+  need_tf
+  command -v jq >/dev/null || die "jq is required for 'rollback'"
+  local file from to old_tunnels
+  file="$(move_file)"
+  [[ -f "$file" ]] || die "rollback: no move is recorded in $(rel "$(state_root)"): up records one when it starts moving an app, and removes it when the routes have moved. Nothing to undo"
+  from="$(sed -n 's/^from=//p' "$file" | awk '{ print $1 }')"
+  to="$(sed -n 's/^to=//p' "$file")"
+  [[ -n "$from" && -n "$to" ]] || die "rollback: $(rel "$file") is not a move record (from= and to= lines). Remove it if no move is half done"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  log "rollback: moving the app back from $to to $from"
+  export FREELUNCH_DEFAULT_HOST="$from"
+  cmd_hybrid >/dev/null
+  # what the routes leave: every tunnel but the one they go back to
+  old_tunnels="$(up_tunnels | awk -F'\t' -v h="$from" '$1 != h')"
+  up_make_tunnel "$from"
+  cmd_deploy
+  up_wait_tunnel "$from"
+  up_move_routes "$old_tunnels"
+  rm -f "$file"
+  log "rollback: the routes go to $from again. $to still runs the app, unused now; freelunch destroy removes it"
+}
+
 # up_cf_account: the Cloudflare account of the project, from its tfvars or from its zone
 up_cf_account() {
   local tfvars account zone
@@ -3735,7 +3771,7 @@ up_wait_tunnel() {
       healthy|degraded) log "up: cloudflared on $host is connected ($status)"; return 0 ;;
     esac
     if [[ $SECONDS -ge $deadline ]]; then
-      die "up: cloudflared on $host hasn't connected to its tunnel (status: ${status:-unknown}), so the routes were not moved: the address still goes to the old host, which still serves the app. See cloudflared's logs on $host, then run freelunch up again"
+      die "up: cloudflared on $host hasn't connected to its tunnel (status: ${status:-unknown}), so the routes were not moved: the address still goes to the old host, which still serves the app. See cloudflared's logs on $host, then run freelunch up again (or freelunch rollback, to drop the new tunnel)"
     fi
     log "up: waiting for cloudflared on $host to connect (status: ${status:-unknown})"
     sleep "${FREELUNCH_TUNNEL_CHECK_INTERVAL:-5}"
@@ -3769,7 +3805,7 @@ up_move_routes() {
       continue
     fi
     cat "$out" >&2
-    die "up: the routes could not move to the new tunnel (above). The app already runs on the new host; freelunch apply cloudflare finishes the move once the old tunnel has no connections"
+    die "up: the routes could not move to the new tunnel (above). The app already runs on the new host; freelunch apply cloudflare finishes the move once the old tunnel has no connections, or freelunch rollback moves the app back"
   done
 }
 
@@ -3880,6 +3916,7 @@ cmd_up() {
       old_tunnels="$(up_tunnels | awk -F'\t' -v h="$host" '$1 != h')"
       if [[ -n "$old_tunnels" ]] && ! up_tunnels | awk -F'\t' -v h="$host" '$1 == h { f = 1 } END { exit !f }'; then
         log "up: making the tunnel of $host first; the address keeps going to $(cut -f1 <<< "$old_tunnels" | paste -sd' ' -) until $host runs the app"
+        printf 'from=%s\nto=%s\n' "$(cut -f1 <<< "$old_tunnels" | paste -sd' ' -)" "$host" > "$(move_file)"
         up_make_tunnel "$host"
         moving=1
       else
@@ -3893,7 +3930,7 @@ cmd_up() {
   [[ "$chosen" != "oci" ]] || up_trust "$host"
   cmd_deploy
   # cloudflared runs on the new host now: move the routes there and drop the old tunnel.
-  if [[ $moving -eq 1 ]]; then up_wait_tunnel "$host"; up_move_routes "$old_tunnels"; fi
+  if [[ $moving -eq 1 ]]; then up_wait_tunnel "$host"; up_move_routes "$old_tunnels"; rm -f "$(move_file)"; fi
   local urls=""
   [[ ! -f "$TMP/urls" ]] || urls="$(awk -F'\t' -v h="$host" '$1 == h { print $2 }' "$TMP/urls" | sort -u | paste -sd' ' -)"
   if [[ -n "$urls" ]]; then
@@ -10474,6 +10511,7 @@ main() {
     ci)                   cmd_ci "$@" ;;
     deploy)               cmd_deploy "$@" ;;
     up)                   cmd_up "$@" ;;
+    rollback)             cmd_rollback "$@" ;;
     domain)               cmd_domain "$@" ;;
     list)                 cmd_list ;;
     plan|apply|destroy)   cmd_lifecycle "$cmd" "$@" ;;

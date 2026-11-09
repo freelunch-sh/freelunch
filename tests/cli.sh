@@ -1218,7 +1218,7 @@ up_in() {
     FREELUNCH_TF="$WORK/bin/up-tf" UP_FIXTURES="$ROOT" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_ROOT="$dir/host" \
     FAKE_CONSOLE_KEYS="${FAKE_CONSOLE_KEYS-$(cut -d' ' -f1,2 "$WORK/hostkey.pub")}" FAKE_SCANNED="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")" \
     FREELUNCH_TRUST_TIMEOUT="${FREELUNCH_TRUST_TIMEOUT:-0}" GHCR_TOKEN=ghp_test-token FREELUNCH_VERIFY_INTERVAL=0 \
-    NORTHFLANK_API_TOKEN="nf-token" CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN-}" "$dir-checkout/bin/freelunch" up "$@")
+    NORTHFLANK_API_TOKEN="nf-token" CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN-}" "$dir-checkout/bin/freelunch" "${UP_CMD:-up}" "$@")
 }
 
 # Tests ---------------------------------------------------------------------------------
@@ -5822,6 +5822,34 @@ test_up_keeps_the_routes_when_the_new_tunnel_never_connects() {
   contains "$out" "cloudflared on oci-main hasn't connected to its tunnel (status: inactive), so the routes were not moved"
   # only the new tunnel was applied: no full apply followed
   equals "$(grep -c 'providers/cloudflare/stack apply' "$p/fake.log")" 1
+}
+
+# freelunch rollback: a move that got stuck is undone by moving back to the previous host.
+test_rollback_moves_the_app_back_after_a_stuck_move() {
+  local p="$WORK/up-rollback" out rc=0
+  up_project "$p" oci northflank
+  FAKE_UP="oci=capacity northflank=ok" up_in "$p" >/dev/null 2>&1
+  rm -f "$p"/fake.log.*.n
+  FAKE_UP="oci=ok cloudflare=ok,connections" FREELUNCH_TUNNEL_RETRIES=0 FREELUNCH_TUNNEL_INTERVAL=0 up_in "$p" >/dev/null 2>&1 || rc=$?
+  equals "$rc" 1
+  grep -qx 'from=northflank-main' "$p/.freelunch/up-move.state"
+  grep -qx 'to=oci-main' "$p/.freelunch/up-move.state"
+  : > "$p/fake.log"; rm -f "$p"/fake.log.*.n
+  out="$(UP_CMD=rollback FAKE_UP="oci=ok northflank=ok cloudflare=ok" up_in "$p" 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "rollback: moving the app back from oci-main to northflank-main"
+  contains "$out" "rollback: the routes go to northflank-main again. oci-main still runs the app, unused now"
+  # the tunnel of the previous host first, on its own, for the host it goes back to
+  grep 'providers/cloudflare/stack apply' "$p/fake.log" | sed -n 1p | grep -q -- '-target=module.tunnel.cloudflare_zero_trust_tunnel_cloudflared.host\["northflank-main"\]'
+  grep 'providers/cloudflare/stack apply' "$p/fake.log" | grep -q -- '-var=default_host=northflank-main'
+  fails test -e "$p/.freelunch/up-move.state"
+}
+
+test_rollback_without_a_move_says_there_is_nothing_to_undo() {
+  local p="$WORK/up-rollback-none" out rc=0
+  up_project "$p" oci
+  out="$(UP_CMD=rollback up_in "$p" 2>&1)" || rc=$?
+  equals "$rc" 1
+  contains "$out" "rollback: no move is recorded"
 }
 
 # Cloudflare keeps refusing: up says the app is on the new host and what finishes the move.
