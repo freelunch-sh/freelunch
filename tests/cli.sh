@@ -5910,6 +5910,31 @@ test_volume_says_what_is_wrong() {
   contains "$out" "volume: pull <app>"
 }
 
+# destroy won't take an app's data with it while nothing has a backup of it.
+test_destroy_refuses_to_remove_data_without_a_backup() {
+  local p="$WORK/destroy-data" out rc=0
+  up_project "$p" oci
+  FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["127.0.0.1:8080:8080"]\n    volumes: ["results:/var/lib/results"]\nvolumes:\n  results:\n' > "$p/compose.yaml"
+  : > "$p/fake.log"
+  out="$(UP_CMD=destroy up_in "$p" oci 2>&1)" || rc=$?
+  equals "$rc" 1
+  contains "$out" "destroy: this would remove data nothing has a backup of: api on oci-main"
+  fails grep -q 'providers/oci/stack destroy' "$p/fake.log"
+  # a backup (volume pull, or the copy a move keeps) lets it go ahead
+  mkdir -p "$p/host/volumes/api_results/_data" "$p/.freelunch/backups/api/20260101T000000Z"
+  echo x > "$p/host/volumes/api_results/_data/f"
+  UP_CMD=volume up_in "$p" pull api >/dev/null 2>&1
+  out="$(UP_CMD=destroy up_in "$p" oci 2>&1)" || { echo "$out" >&2; return 1; }
+  lacks "$out" "nothing has a backup"
+  # or --discard-data says the data may go
+  rm -rf "$p/.freelunch/backups"
+  out="$(UP_CMD=destroy up_in "$p" oci --discard-data 2>&1)" || { echo "$out" >&2; return 1; }
+  lacks "$out" "nothing has a backup"
+  out="$(UP_CMD=destroy up_in "$p" --discard-data oci 2>&1)" || true
+  fails grep -q "unknown option" <<< "$out"
+}
+
 # Cloudflare keeps refusing: up says the app is on the new host and what finishes the move.
 test_up_says_what_to_run_when_the_old_tunnel_wont_go() {
   local p="$WORK/up-tunnel-stuck" out rc=0

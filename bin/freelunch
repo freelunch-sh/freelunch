@@ -155,6 +155,8 @@ Infrastructure:
                           that outlasts the machine's day goes to CI with freelunch ci wait
   destroy <p...|all>      Destroy provider stacks in reverse layer order, then refresh hybrid. On
                           a platform it also deletes what apply and deploy made there
+                          Refuses while an app's data in Docker volumes has no backup in
+                          .freelunch/backups (freelunch volume pull); --discard-data removes it anyway
   status                  Hosts and platforms, the apps on each one and whether they run,
                           tunnels and their URLs, service token expiry, and capacity waits
   agent [claude|codex|cursor|copilot|all]
@@ -1822,13 +1824,14 @@ cmd_output() { # cmd_output <stack|hybrid> [tofu/terraform output args]
 cmd_lifecycle() { # plan|apply|destroy
   need_tf
   local action="$1"; shift
-  local names=() extra=() wait_for_capacity=0 user_data=0 detach=0 out="" saved="" plan_file="" a child=() to=()
+  local names=() extra=() wait_for_capacity=0 user_data=0 detach=0 discard_data=0 out="" saved="" plan_file="" a child=() to=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --)                  shift; extra=("$@"); break ;;
       --wait-for-capacity) wait_for_capacity=1 ;;
       --show-user-data)    user_data=1 ;;
       --detach)            detach=1 ;;
+      --discard-data)      discard_data=1 ;;
       --out|--plan)        [[ $# -gt 1 ]] || die "$action: $1 takes a file"
                            if [[ "$1" == "--out" ]]; then out="$2"; else plan_file="$2"; fi
                            shift ;;
@@ -1841,6 +1844,7 @@ cmd_lifecycle() { # plan|apply|destroy
   done
   [[ $wait_for_capacity -eq 0 || "$action" == "apply" ]] || die "$action: only apply takes --wait-for-capacity"
   [[ $user_data -eq 0 || "$action" == "plan" ]] || die "$action: only plan takes --show-user-data"
+  [[ $discard_data -eq 0 || "$action" == "destroy" ]] || die "$action: only destroy takes --discard-data"
   [[ $user_data -eq 0 ]] || command -v jq >/dev/null || die "jq is required for --show-user-data"
   [[ -z "$out" || "$action" == "plan" ]] || die "$action: only plan takes --out (apply takes the saved plan with --plan)"
   [[ -z "$plan_file" || "$action" == "apply" ]] || die "$action: only apply takes --plan (save one with freelunch plan <stack> --out <file>)"
@@ -1923,6 +1927,8 @@ cmd_lifecycle() { # plan|apply|destroy
       [[ " ${hosts[*]-} " != *" oci "* ]] || { echo "Billing"; billing_line_oci; }
       next_steps ${hosts[@]+"${hosts[@]}"} ${platforms[@]+"${platforms[@]}"} ;;
     destroy)
+      # A host or platform takes its volumes with it: not while an app's data has no backup.
+      [[ $discard_data -eq 1 ]] || destroy_data_guard ${hosts[@]+"${hosts[@]}"} ${platforms[@]+"${platforms[@]}"}
       # destroy all first removes the records the project made, while it still knows the hosts
       if [[ " ${names[*]-} " == *" all "* ]]; then dns_all destroy; fi
       for a in ${hosts[@]+"${hosts[@]}"}; do ci_wait_guard "$a" ""; done
@@ -3840,6 +3846,30 @@ up_copy_data() {
     vol_target "$app" "$to_host"
     vol_push "$app" "$dir"
   done
+}
+
+# destroy_data_guard <host or platform stack...>: refuse to destroy a stack that runs an app
+# with data in Docker volumes while no backup of that app is in <project>/backups (freelunch
+# volume pull makes one, and so does up --move). --discard-data says the data may go.
+destroy_data_guard() {
+  local p app host data_apps risky="" apps_file tunnel_state=""
+  command -v jq >/dev/null || return 0
+  apps_file="$(state_root)/apps.tfvars"
+  [[ -f "$apps_file" ]] || return 0
+  data_apps="$(up_data_apps)"
+  [[ -n "$data_apps" ]] || return 0
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1 || return 0
+  for p in "$@"; do
+    for app in $data_apps; do
+      while IFS= read -r host; do
+        [[ -n "$host" ]] || continue
+        compgen -G "$(state_root)/backups/$app/*/*.tar.gz" >/dev/null || risky="${risky:+$risky; }$app on $host"
+      done < <(jq -r --arg p "$p-" --arg a "$app" 'to_entries[] | select((.key | startswith($p)) and (.value.apps | has($a))) | .key' "$TMP/targets.json")
+    done
+  done
+  [[ -z "$risky" ]] || die "destroy: this would remove data nothing has a backup of: $risky. freelunch volume pull <app> saves it to $(rel "$(state_root)")/backups (a container platform's volumes can't be pulled over SSH), or add --discard-data to remove it anyway"
 }
 
 # --- moving the tunnel with the app ---------------------------------------------------
