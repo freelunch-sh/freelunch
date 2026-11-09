@@ -1451,7 +1451,8 @@ test_oci_runs_check_the_session_first() {
     "$(printf 'refresh\ninit\nplan')"
   rm "$p/fake.log"*
   if out="$(FAKE_SESSION_REFRESHES=0 freelunch_in "$p" plan oci 2>&1)"; then echo "plan should have failed"; return 1; fi
-  equals "$(grep -v '^==>' <<< "$out")" "freelunch: oci: session expired. Sign in again: oci session authenticate --profile-name tradio"
+  # (the harness's own "  failed:" trace can land in a captured output on bash 3.2, so it is left out too)
+  equals "$(grep -v -e '^==>' -e '^  failed:' <<< "$out")" "freelunch: oci: session expired. Sign in again: oci session authenticate --profile-name tradio"
   fails grep -q '/stack ' "$p/fake.log"
   FAKE_SESSION_REFRESHES=0 fails freelunch_in "$p" destroy oci
   fails grep -q '/stack ' "$p/fake.log"
@@ -4347,6 +4348,26 @@ test_api_engine_keeps_the_heartbeat_url_of_a_monitor() {
   contains "$out" "deleted freelunch-hb"
   contains "$(cat "$dir/fake/log")" "DELETE /v3/monitors/4711"
   lacks "$(cat "$dir/fake/log")" "DELETE /v3/monitors/4712"
+}
+
+# Tests run side by side, each in folders under $WORK. Two tests that name the same folder
+# overwrite each other, and fail once in a while only when they happen to overlap, so no folder
+# name may be declared by more than one test.
+test_every_test_has_work_folders_of_its_own() {
+  local dup
+  dup="$(awk '
+    /^test_[A-Za-z0-9_]+\(\) \{/ { fn = $1 }
+    /^\}/ { fn = "" }
+    fn != "" {
+      line = $0
+      while (match(line, /"\$WORK\/[A-Za-z0-9_-]+"/)) {
+        name = substr(line, RSTART + 7, RLENGTH - 8)
+        if (!((name, fn) in seen)) { seen[name, fn] = 1; count[name]++; who[name] = who[name] " " fn }
+        line = substr(line, RSTART + RLENGTH)
+      }
+    }
+    END { for (n in count) if (count[n] > 1) print n ":" who[n] }' "$ROOT/tests/cli.sh")"
+  [[ -z "$dup" ]] || { echo "folders used by more than one test:"; echo "$dup"; return 1; }
 }
 
 # A provider's engine is what its provider.yaml says, or what its iac implies.
