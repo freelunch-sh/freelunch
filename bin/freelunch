@@ -158,7 +158,9 @@ Infrastructure:
                           the branch deploys from, and CODEOWNERS for workflows and .freelunch/
   verify [--path /x] [--timeout s] <url>...
                           Wait until the app answers at its address; fails with what it saw
-  check                   Check the config in git without any secret: complete, real targets,
+  check [node] [--json]   With a node name or --json: ask every node (or that one) whether it
+                          exists, answers and is healthy. Without: check the config in git
+                          without any secret: complete, real targets,
                           no secret in a file. What a pull request runs
   logs <app> [--lines n]  The last lines an app (or cloudflared) logged on Northflank
   doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in and
@@ -6842,6 +6844,144 @@ cmd_check() {
   if [[ $FAILS -eq 0 ]]; then echo "The config is complete."; else echo "$FAILS problem(s)."; return 1; fi
 }
 
+# --- node probes ----------------------------------------------------------------------------
+#
+# freelunch check <node> / --json: every node of the project (host, platform, app, database,
+# bucket, tunnel) answers the same three questions: does it exist, can it be reached, is it
+# healthy. Each answer is true, false or null (not asked, and the reason says why). It reads the
+# same state as status and doctor, and changes nothing.
+
+# probe_row <node> <type> <exists> <reachable> <healthy> <reason>: one JSON line per node
+probe_row() {
+  jq -nc --arg n "$1" --arg t "$2" --argjson e "$3" --argjson r "$4" --argjson h "$5" --arg why "$6" \
+    '{node: $n, type: $t, exists: $e, reachable: $r, healthy: $h, reason: (if $why == "" then null else $why end)}'
+}
+
+# tcp_open <host> <port>: whether something answers there within a few seconds
+tcp_open() { nc -z -w 5 "$1" "$2" >/dev/null 2>&1; }
+
+# probe_tcp <node> <type> <host> <port>: a node that is a service at an address
+probe_tcp() {
+  if ! command -v nc >/dev/null; then probe_row "$1" "$2" true null null "nc isn't installed, so $3:$4 wasn't asked"
+  elif tcp_open "$3" "$4"; then probe_row "$1" "$2" true true true ""
+  else probe_row "$1" "$2" true false false "nothing answers at $3:$4"; fi
+}
+
+# probe_stack_nodes: databases and buckets of every deployed stack, from its state
+probe_stack_nodes() {
+  local p state row host port
+  for p in $(all_providers); do
+    [[ -d "$(stack_dir "$p")" ]] && is_deployed "$p" || continue
+    state="$(config_dir "$p")/terraform.tfstate"
+    while IFS=$'\t' read -r row host port; do
+      [[ -n "$row" ]] && probe_tcp "$row" database "$host" "$port"
+    done < <(jq -r '.outputs.databases.value[]? | ["\(.provider)-\(.name)", .host, .port] | @tsv' "$state" 2>/dev/null)
+    while IFS=$'\t' read -r row host; do
+      [[ -n "$row" ]] && probe_tcp "$row" bucket "$host" 443
+    done < <(jq -r '.outputs.buckets.value[]? | ["\(.provider)-\(.name)", (.endpoint | sub("^https?://"; "") | sub("[:/].*$"; ""))] | @tsv' "$state" 2>/dev/null)
+  done
+}
+
+# probe_hosts_and_apps: hosts (over SSH), the apps on them, and the platforms, from the deploy plan
+# shellcheck disable=SC2016 # the remote script is expanded by the remote shell
+probe_hosts_and_apps() {
+  local apps_file tunnel_state="" host kind address user out app service state health seen reach why ok bad
+  apps_file="$(state_root)/apps.tfvars"
+  [[ -n "$TF" ]] || return 0
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  [[ -f "$apps_file" || -n "$tunnel_state" ]] || return 0
+  { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1 || die "check: apps.tfvars doesn't resolve against the inventory (freelunch deploy --dry-run says why)"
+  ssh_options yes
+  for host in $(jq -r 'keys[]' "$TMP/targets.json"); do
+    kind="$(jq -r --arg h "$host" '.[$h].kind' "$TMP/targets.json")"
+    if [[ "$kind" == "platform" ]]; then
+      probe_row "$host" platform true null null "its API is asked by freelunch status"
+      for app in $(jq -r --arg h "$host" '.[$h].apps | keys[]' "$TMP/targets.json"); do
+        probe_row "$app" app null null null "runs on $host: freelunch status asks the platform"
+      done
+      continue
+    fi
+    address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
+    user="$(jq -r --arg h "$host" '.[$h].user' "$TMP/targets.json")"
+    reach=null; why=""; out=""
+    if [[ -z "$address" ]]; then why="it has no address"
+    elif ! ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1; then why="its host key isn't pinned yet (freelunch trust $host)"
+    elif ! out="$(printf '%s\n' "$REMOTE_STATUS" | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' 2>/dev/null)"; then
+      reach=false; why="can't reach $user@$address over SSH"
+    else reach=true; fi
+    if [[ "$reach" == true ]]; then probe_row "$host" host true true true ""
+    elif [[ "$reach" == false ]]; then probe_row "$host" host true false false "$why"
+    else probe_row "$host" host true null null "$why"; fi
+    seen=" "
+    if [[ "$reach" == true ]]; then
+      for app in $(jq -r --arg h "$host" '.[$h].apps | keys[]' "$TMP/targets.json"); do
+        ok=0; bad=0
+        while IFS='|' read -r a service state health; do
+          [[ "$a" == "$app" ]] || continue
+          if [[ "$state" == running && ( -z "$health" || "$health" == healthy ) ]]; then ok=$((ok + 1)); else bad=$((bad + 1)); fi
+        done <<< "$out"
+        if [[ $((ok + bad)) -eq 0 ]]; then probe_row "$app" app false true false "not deployed on $host yet (freelunch deploy)"
+        elif [[ $bad -gt 0 ]]; then probe_row "$app" app true true false "$bad of its containers on $host aren't running and healthy"
+        else probe_row "$app" app true true true ""; fi
+      done
+    else
+      for app in $(jq -r --arg h "$host" '.[$h].apps | keys[]' "$TMP/targets.json"); do
+        probe_row "$app" app null "$reach" null "not asked: $host $why"
+      done
+    fi
+  done
+}
+
+# probe_tunnels: Cloudflare Tunnels, by the API
+probe_tunnels() {
+  local state account zone host id out token="${CLOUDFLARE_API_TOKEN:-}" tfvars st
+  state="$(config_dir cloudflare)/terraform.tfstate"
+  [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare || return 0
+  tfvars="$(config_dir cloudflare)/terraform.tfvars"
+  account="$(tfvar "$tfvars" account_id 2>/dev/null || true)"
+  zone="$(tfvar "$tfvars" zone 2>/dev/null || true)"
+  if [[ -n "$token" && -z "$account" && -n "$zone" ]]; then account="$(cf_get "/zones?name=$zone" | jq -r '.result[0].account.id // empty' 2>/dev/null)"; fi
+  while IFS=$'\t' read -r host id; do
+    if [[ -z "$token" || -z "$account" ]]; then probe_row "tunnel-$host" tunnel true null null "not checked without CLOUDFLARE_API_TOKEN"; continue; fi
+    out="$(cf_get "/accounts/$account/cfd_tunnel/$id")"
+    st="$(jq -r '.result.status // empty' <<< "$out" 2>/dev/null)"
+    case "$st" in
+      healthy)  probe_row "tunnel-$host" tunnel true true true "" ;;
+      degraded) probe_row "tunnel-$host" tunnel true true false "degraded: some of its connections are down" ;;
+      inactive) probe_row "tunnel-$host" tunnel true false false "never connected: freelunch deploy starts cloudflared" ;;
+      down)     probe_row "tunnel-$host" tunnel true false false "cloudflared isn't connected" ;;
+      *)        probe_row "tunnel-$host" tunnel null null null "unknown: $(cf_errors "$out")" ;;
+    esac
+  done < <(jq -r '(.outputs.tunnels.value // {}) | to_entries[] | [.key, .value] | @tsv' "$state")
+}
+
+# cmd_probe [node] [--json]: the rows above, as a table or as a JSON list. Exits 1 when a node
+# that should be there isn't, or isn't healthy; null answers don't fail it.
+cmd_probe() {
+  local node="" json=0 a rows
+  for a in "$@"; do
+    case "$a" in
+      --json) json=1 ;;
+      -*)     die "check: unknown option $a" ;;
+      *)      node="$a" ;;
+    esac
+  done
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  [[ -n "$PROJECT" ]] || die "check: run it in a project, where its .freelunch/ folder is"
+  rows="$( { probe_hosts_and_apps; probe_stack_nodes; probe_tunnels; } | jq -sc '.')"
+  if [[ -n "$node" ]]; then
+    jq -e --arg n "$node" 'any(.[]; .node == $n)' <<< "$rows" >/dev/null \
+      || die "check: no node named $node. Nodes: $(jq -r '[.[].node] | join(", ")' <<< "$rows")"
+    rows="$(jq -c --arg n "$node" 'map(select(.node == $n))' <<< "$rows")"
+  fi
+  if [[ $json -eq 1 ]]; then jq . <<< "$rows"
+  else
+    jq -r '.[] | [(if .healthy == true then "ok" elif .healthy == false or .exists == false then "FAIL" else "-" end), .type, .node, (.reason // "")] | @tsv' <<< "$rows" \
+      | awk -F'\t' '{ printf "  %-5s %-9s %-24s %s\n", $1, $2, $3, $4 }'
+  fi
+  ! jq -e 'any(.[]; .healthy == false or .exists == false)' <<< "$rows" >/dev/null
+}
+
 cmd_doctor() {
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   SCRATCH_HYBRID=1
@@ -9067,7 +9207,7 @@ main() {
     status)               cmd_status ;;
     logs)                 cmd_logs "$@" ;;
     doctor)               cmd_doctor ;;
-    check)                cmd_check ;;
+    check)                if [[ $# -gt 0 ]]; then resolve_state_refs; sync_start status; cmd_probe "$@"; else cmd_check; fi ;;
     verify)               cmd_verify "$@" ;;
     build)                cmd_build "$@" ;;
     harden)               cmd_harden "$@" ;;

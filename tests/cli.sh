@@ -59,6 +59,15 @@ case "$1 ${2:-}" in
 esac
 exit 0
 EOF
+cat > "$WORK/bin/nc" <<'EOF'
+#!/usr/bin/env bash
+# nc -z -w 5 <host> <port>: answers, unless host:port is in FAKE_TCP_DOWN
+for a; do last="$a"; prev2="${prev:-}"; prev="$a"; done
+host="$prev2"
+echo "nc $*" >> "$FAKE_LOG"
+[[ " ${FAKE_TCP_DOWN:-} " != *" $host "* ]]
+EOF
+chmod +x "$WORK/bin/nc"
 ssh-keygen -q -t ed25519 -N '' -C fake-host -f "$WORK/hostkey"
 printf '#!/bin/sh\nexit 0\n' > "$WORK/bin/cloud-init"
 # Records the arguments a stack run gets instead of running tofu/terraform. Like them, init
@@ -3677,6 +3686,65 @@ test_deploy_reads_a_database_from_an_engine_record() {
   contains "$(cat "$p/host/apps/api/.env")" "DATABASE_URL=libsql://app-me.turso.io?authToken=mock-token"
   out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" --dry-run 2>&1)"
   lacks "$out" "mock-token"
+}
+
+# --- node probes -------------------------------------------------------------------------------
+
+# check_in <dir> [args]: freelunch check with the fakes (ssh, docker, nc)
+check_in() {
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" \
+    CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN:-}" "$CLI" check "$@")
+}
+
+# Every node answers exists, reachable and healthy, as JSON or as a table.
+test_check_probes_each_node_type() {
+  local p="$WORK/probe" out key
+  new_project "$p"
+  give_database "$p"
+  mkdir -p "$p/.freelunch/backblaze-b2"
+  cp "$ROOT/deploy/tests/fixtures/storage.tfstate" "$p/.freelunch/backblaze-b2/terraform.tfstate"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$p" >/dev/null 2>&1
+  out="$(check_in "$p" --json)"
+  equals "$(jq -r '.[] | select(.node == "oci-main") | "\(.type) \(.exists) \(.reachable) \(.healthy)"' <<< "$out")" "host true true true"
+  equals "$(jq -r '.[] | select(.node == "api") | "\(.type) \(.exists) \(.reachable) \(.healthy)"' <<< "$out")" "app true true true"
+  equals "$(jq -r '.[] | select(.node == "neon-main") | "\(.type) \(.healthy)"' <<< "$out")" "database true"
+  equals "$(jq -r '.[] | select(.node == "backblaze-b2-results") | "\(.type) \(.healthy)"' <<< "$out")" "bucket true"
+  equals "$(jq -r '.[] | select(.type == "tunnel") | "\(.node) \(.reachable) \(.reason)"' <<< "$out")" "tunnel-oci-main null not checked without CLOUDFLARE_API_TOKEN"
+  contains "$(cat "$p/fake.log")" "nc -z -w 5 ep-mock.eu-central-1.aws.neon.tech 5432"
+  contains "$(cat "$p/fake.log")" "nc -z -w 5 s3.us-west-004.backblazeb2.com 443"
+  # one node, as a table
+  out="$(check_in "$p" neon-main)"
+  contains "$out" "ok    database  neon-main"
+  lacks "$out" "oci-main"
+  # a node that isn't there is named, with the ones that are
+  if out="$(check_in "$p" nonesuch 2>&1)"; then echo "check should have failed"; return 1; fi
+  contains "$out" "no node named nonesuch. Nodes: "
+}
+
+# A broken node says what is wrong, and fails the command; a node that was not asked does not.
+test_check_reports_broken_nodes() {
+  local p="$WORK/probe-bad" out key
+  new_project "$p"
+  give_database "$p"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$p" >/dev/null 2>&1
+  if out="$(FAKE_TCP_DOWN="ep-mock.eu-central-1.aws.neon.tech" check_in "$p" --json)"; then echo "check should have failed"; return 1; fi
+  equals "$(jq -r '.[] | select(.node == "neon-main") | "\(.reachable) \(.healthy) \(.reason)"' <<< "$out")" "false false nothing answers at ep-mock.eu-central-1.aws.neon.tech:5432"
+  # a stopped container
+  if out="$(FAKE_STOPPED=api check_in "$p" --json)"; then echo "check should have failed"; return 1; fi
+  equals "$(jq -r '.[] | select(.node == "api") | "\(.exists) \(.healthy) \(.reason)"' <<< "$out")" "true false 1 of its containers on oci-main aren't running and healthy"
+  # an app that was never deployed
+  rm -r "$p/host/apps/api"
+  if out="$(check_in "$p" --json)"; then echo "check should have failed"; return 1; fi
+  equals "$(jq -r '.[] | select(.node == "api") | "\(.exists) \(.reason)"' <<< "$out")" "false not deployed on oci-main yet (freelunch deploy)"
+  # a host whose key isn't pinned is not asked, and that is not a failure
+  rm "$p/.freelunch/known_hosts"
+  sed -i.bak 's|, database = "neon-main"||' "$p/.freelunch/apps.tfvars"
+  out="$(check_in "$p" --json)"
+  equals "$(jq -r '.[] | select(.node == "oci-main") | "\(.healthy) \(.reason)"' <<< "$out")" "null its host key isn't pinned yet (freelunch trust oci-main)"
+  equals "$(jq -r '.[] | select(.node == "api") | .exists' <<< "$out")" "null"
 }
 
 # A provider's engine is what its provider.yaml says, or what its iac implies.

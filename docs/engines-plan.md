@@ -108,11 +108,12 @@ What the code has today (read before starting, so nothing is built twice):
 
 ### 9a. Nodes work alone (the gate for the rest)
 
-- [ ] Inventory: one table in `docs/graph.md` of every node type, what makes it, what it outputs,
+- [x] Inventory: one table in `docs/graph.md` of every node type, what makes it, what it outputs,
   and how to tell it is healthy (from `status`, `doctor` and the contracts in `architecture.md`)
-- [ ] A uniform health probe per node type, machine-readable (`freelunch check [node] --json`):
+- [x] A uniform health probe per node type, machine-readable (`freelunch check [node] --json`):
   exists, reachable, healthy, with the reason when not. Reuses what `status` and `doctor` already ask
-- [ ] Tests: the probe for each node type against the fakes, healthy and broken
+  (done for host, app, database, bucket, tunnel; platforms and their apps answer `null` until their engines give a machine-readable `status`)
+- [x] Tests: the probe for each node type against the fakes, healthy and broken (platform probes wait for the line above)
 - [ ] Live run of each node type that has none yet (needs your accounts, listed in `docs/graph.md`
   with the exact command and what to look for). Not blocked for building, but 9d cannot be marked
   `verified` without it
