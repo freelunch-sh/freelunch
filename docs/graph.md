@@ -1,7 +1,7 @@
 # The graph: nodes, edges, journeys
 
 Plan: section 9 of [engines-plan.md](engines-plan.md). This page grows with each step; today it
-holds the node inventory and the health probe (9a) and the `needs` format (9b).
+holds the node inventory and the health probe (9a) the `needs` format (9b), and edge media and the mesh (9c).
 
 ## Nodes
 
@@ -80,3 +80,59 @@ Checks, all before anything is sent:
 - A database or bucket named in `needs` is probed (as in `freelunch check`) before the deploy
   sends anything; if nothing answers there, the deploy stops and says so
   (`FREELUNCH_CHECK_NEEDS=0` skips it). The old `bucket` and `database` fields are not probed.
+
+## Edge media: how a need becomes reachable
+
+A need on another app resolves to an address by where the two nodes are, and the dependant gets it
+as `<APP>_URL` (`api` gives `API_URL`). `deploy` says which medium each edge got, and why:
+
+| Dependant and dependency | Medium | Address |
+|---|---|---|
+| same host | the Docker network `freelunch`, by name | `http://api:8080` |
+| same platform | the platform's service name | `http://api:8080` |
+| different nodes, the dependency's host on a mesh | the mesh address | `http://100.64.0.7:8080` |
+| different nodes, a Cloudflare route to the dependency | the route's hostname | `https://api.example.com` |
+
+Where both a mesh and a route would work, the mesh wins: it stays off the internet. When none
+applies the deploy stops before sending anything: `web (on oci-edge-1) needs api (on oci-main), and
+nothing connects them`. The dependency needs a `port` in `apps.tfvars` in every case.
+
+On a host, `deploy` makes the Docker network `freelunch`. Apps that reach each other by name join
+it in their Compose files:
+
+```yaml
+services:
+  api:
+    networks: [default, freelunch]
+networks:
+  freelunch:
+    external: true
+```
+
+On a mesh, the app's port has to listen on the host's mesh address, not only on `127.0.0.1`.
+
+## The mesh
+
+A mesh is a node that connects hosts privately. Its stack outputs `mesh`, per host
+(`<provider>-<name>`): `{ address, ssh }`. Any deployed stack with that output counts. `deploy`
+and `check` read it, so the address replaces a hand-written `hosts.<name>.address` for edges, and
+for SSH when the stack says `ssh = true` (an address in `apps.tfvars` still wins).
+
+[Tailscale](../providers/tailscale/README.md) is the first: it makes the join key hosts use on first
+boot (the `tailscale_auth_key` of the host stacks) and looks the hosts up once they have joined.
+NetBird and ZeroTier follow in 9d with the same output.
+
+## A hybrid example
+
+A frontend on one cloud, a backend on another, and a database:
+
+```hcl
+apps = {
+  web = { host = "oci-edge-1", compose = "../web.yaml", env_file = "web.env", needs = ["api"] }
+  api = { host = "oci-main",   compose = "../api.yaml", port = 8080, needs = ["neon-main"] }
+}
+```
+
+`freelunch deploy` puts `api` first, with `NEON_MAIN_URL` in its environment (after checking that
+Neon answers), then `web` with `API_URL=http://<mesh address of oci-main>:8080`, or the route's
+hostname when there is no mesh. `freelunch check` then asks every node.

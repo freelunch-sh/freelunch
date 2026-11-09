@@ -2653,6 +2653,7 @@ deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
   if [[ -f "$apps_file" ]]; then args+=(-var-file="$apps_file"); fi
   if [[ -n "$tunnel_state" ]]; then args+=(-var "tunnel_state_path=$tunnel_state"); fi
   args+=(-var "storage_state_paths=$(storage_states)")
+  args+=(-var "mesh=$(mesh_nodes)")
   args+=(-var "database_state_paths=$(database_states "$apps_file")")
   if database_records "$apps_file" "$TMP/databases.tfvars.json"; then args+=(-var-file="$TMP/databases.tfvars.json"); fi
   default="$(default_host)"
@@ -2664,6 +2665,7 @@ deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
     TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" output -state="$TMP/deploy.tfstate" -json "$o" > "$TMP/$o.json" || return 1
   done
   graph_prepare || return 1
+  graph_edges || return 1
   # in GitHub Actions, keep what a bucket or a database hands an app out of the job's log
   if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
     jq -r '.[] | .[] | strings | select(length >= 8)' "$TMP/app_env.json" | while IFS= read -r value; do echo "::add-mask::$value"; done
@@ -2721,6 +2723,72 @@ graph_prepare() {
     | from_entries' "$TMP/targets.json" > "$TMP/targets.ordered.json" && mv "$TMP/targets.ordered.json" "$TMP/targets.json"
 }
 
+# --- edge media: how a need becomes reachable ----------------------------------------------------
+#
+# A need on another app resolves to an address, by where the two nodes are:
+#   same host            the shared Docker network "freelunch", by app name
+#   same platform        the platform's service name
+#   different, private   a mesh address, when the dependency's host is on a mesh
+#   different, public    the hostname of a Cloudflare route to the dependency
+# The dependant gets it as <APP>_URL (api -> API_URL). Private beats public where both exist:
+# it stays off the internet. When none applies the deploy stops, saying what is missing.
+
+# mesh_nodes: host -> {address, ssh} of every mesh a deployed stack outputs (`mesh`), as JSON
+mesh_nodes() {
+  local p state out='{}'
+  for p in $(all_providers); do
+    [[ -d "$(stack_dir "$p")" ]] && is_deployed "$p" || continue
+    state="$(config_dir "$p")/terraform.tfstate"
+    jq -e '.outputs.mesh' "$state" >/dev/null 2>&1 || continue
+    out="$(jq -c --slurpfile s "$state" '. + $s[0].outputs.mesh.value' <<< "$out")"
+  done
+  echo "$out"
+}
+
+# edge_resolve <dependant> <dependency>: "medium<TAB>url<TAB>why", or nothing and a message
+edge_resolve() {
+  local from="$1" dep="$2" from_host dep_host port kind route mesh
+  from_host="$(jq -r --arg a "$from" '.[$a].host' "$TMP/graph.json")"
+  dep_host="$(jq -r --arg a "$dep" '.[$a].host' "$TMP/graph.json")"
+  port="$(jq -r --arg a "$dep" '.[$a].port // empty' "$TMP/graph.json")"
+  if [[ -z "$port" ]]; then
+    echo "freelunch: $from needs $dep, but $dep has no port in apps.tfvars (port = 8080): a dependant can't reach it without one" >&2; return 1
+  fi
+  kind="$(jq -r --arg h "$dep_host" '.[$h].kind // "host"' "$TMP/targets.json")"
+  if [[ "$from_host" == "$dep_host" ]]; then
+    if [[ "$kind" == platform ]]; then printf 'platform service\thttp://%s:%s\tboth run on %s, which reaches a service by its name\n' "$dep" "$port" "$dep_host"
+    else printf 'compose network\thttp://%s:%s\tboth run on %s: put both in the Docker network freelunch\n' "$dep" "$port" "$dep_host"; fi
+    return 0
+  fi
+  mesh="$(jq -r --arg h "$dep_host" '.[$h].address // empty' "$TMP/mesh.json")"
+  if [[ -n "$mesh" ]]; then printf 'mesh\thttp://%s:%s\t%s is on a mesh (private), as %s\n' "$mesh" "$port" "$dep_host" "$mesh"; return 0; fi
+  route=""
+  if [[ -n "${CF_ROUTES:-}" ]]; then
+    route="$(jq -r --arg a "$dep" --arg h "$dep_host" --argjson p "$port" 'to_entries[] | select(.value.app == $a or (.value.host == $h and (.value.service | test(":" + ($p | tostring) + "$")))) | .key' <<< "$CF_ROUTES" | head -1)"
+  fi
+  if [[ -n "$route" ]]; then printf 'cloudflare route\thttps://%s\t%s and %s are on different nodes, and a Cloudflare route reaches %s publicly\n' "$route" "$from_host" "$dep_host" "$dep"; return 0; fi
+  echo "freelunch: $from (on $from_host) needs $dep (on $dep_host), and nothing connects them: $dep_host is on no mesh and no Cloudflare route goes to $dep. Add a route (cloudflare routes in terraform.tfvars) or a mesh (freelunch apply tailscale)" >&2
+  return 1
+}
+
+# graph_edges: resolve every need on an app, put <APP>_URL in the dependant's environment
+# (app_env.json), and say which medium each got. Writes $TMP/edges.json.
+graph_edges() {
+  local from dep line medium url why state edges='[]'
+  mesh_nodes > "$TMP/mesh.json"
+  CF_ROUTES=""
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then CF_ROUTES="$(jq -c '.outputs.routes.value // {}' "$(config_dir cloudflare)/terraform.tfstate")"; fi
+  while IFS=' ' read -r from dep; do
+    [[ -n "$from" ]] || continue
+    line="$(edge_resolve "$from" "$dep")" || return 1
+    IFS=$'\t' read -r medium url why <<< "$line"
+    log "$from needs $dep: $medium ($url)"
+    edges="$(jq -c --arg f "$from" --arg t "$dep" --arg m "$medium" --arg u "$url" --arg w "$why" '. + [{from: $f, to: $t, medium: $m, url: $u, why: $w}]' <<< "$edges")"
+  done < "$TMP/graph.edges"
+  printf '%s\n' "$edges" > "$TMP/edges.json"
+  jq --argjson e "$edges" '. as $env | reduce $e[] as $x ($env; .[$x.from] = ((.[$x.from] // {}) + {(($x.to | ascii_upcase | gsub("-"; "_")) + "_URL"): $x.url}))' "$TMP/app_env.json" > "$TMP/app_env.new" && mv "$TMP/app_env.new" "$TMP/app_env.json"
+}
+
 # graph_gate <hosts...>: an app is not deployed against a database or bucket it needs (in
 # `needs`) that does not answer. The old bucket and database fields are not asked.
 graph_gate() {
@@ -2742,7 +2810,7 @@ graph_gate() {
 # remote_script <host> <redact>: the script deploy pipes to `sudo bash -s` on a host.
 # Files travel as base64 heredocs; with redact=1 (dry run) contents and secrets are left out.
 remote_script() {
-  local host="$1" redact="$2" name compose env_file server username var token what
+  local host="$1" redact="$2" name compose env_file server username var token what needs_env
   local targets="$TMP/targets.json"
 
   cat <<EOF
@@ -2790,6 +2858,8 @@ trap 'for r in ${registries[@]+"${registries[@]}"}; do docker logout "$r" >/dev/
 if command -v cloud-init >/dev/null 2>&1; then timeout 900 cloud-init status --wait >/dev/null 2>&1 || true; fi
 docker compose version >/dev/null 2>&1 || { echo "!! docker compose is not installed on this host" >&2; exit 1; }
 install -d -m 0750 "$apps"
+# apps that need each other on this host reach one another by name in this network
+docker network create freelunch >/dev/null 2>&1 || true
 EOF
 
   while IFS=$'\t' read -r server username var; do
@@ -2806,12 +2876,15 @@ EOF
     if [[ "$redact" == 1 ]]; then echo "<$compose>"; else b64 < "$compose"; fi
     echo "FREELUNCH_EOF"
     # The bucket's settings and the database's URL come first, so the env_file can override them.
-    if [[ -n "$env_file$bucket$database" ]]; then
+    needs_env=""
+    jq -e --arg a "$name" 'has($a)' "$TMP/app_env.json" >/dev/null && needs_env=1
+    if [[ -n "$env_file$bucket$database$needs_env" ]]; then
       echo "put \"\$apps/$name/.env\" 0600 <<'FREELUNCH_EOF'"
       if [[ "$redact" == 1 ]]; then
         what=""
         [[ -z "$bucket" ]] || what="the S3 settings of $bucket"
         [[ -z "$database" ]] || what="${what:+$what, }DATABASE_URL of $database"
+        [[ "$needs_env" != 1 || -n "$bucket$database" ]] || what="what its needs give it"
         [[ -z "$env_file" ]] || what="${what:+$what, then }$env_file"
         echo "<$what, redacted>"
       else

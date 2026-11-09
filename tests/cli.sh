@@ -3812,6 +3812,67 @@ test_deploy_checks_the_nodes_an_app_needs() {
   exists "$p/host/apps/api/.env"
 }
 
+# --- edge media ------------------------------------------------------------------------------
+
+# A mesh stack "applied" from a fixture: the tailscale stack with the mesh output of two hosts
+give_mesh() { # give_mesh <project> <ssh true|false>
+  mkdir -p "$1/.freelunch/tailscale"
+  jq -n --argjson ssh "$2" '{version: 4, serial: 1, lineage: "x", outputs: {mesh: {value: {
+      "oci-main": {address: "100.64.0.7", ssh: $ssh}, "oci-edge-1": {address: "100.64.0.8", ssh: $ssh}},
+      type: "dynamic"}}, resources: []}' > "$1/.freelunch/tailscale/terraform.tfstate"
+}
+
+# web (on oci-edge-1 unless said) needs api (oci-main, port 8080): the medium follows where they are.
+test_edges_pick_a_medium_by_where_the_nodes_are() {
+  local p="$WORK/edge" out
+  # same host: the Docker network, by name
+  graph_project "$p" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", port = 8080 }
+  web = { host = "oci-main", compose = "../compose.yaml", needs = ["api"] }'
+  out="$(GHCR_TOKEN=x deploy_in "$p" 2>&1)"
+  contains "$out" "web needs api: compose network (http://api:8080)"
+  contains "$(cat "$p/host/apps/web/.env")" "API_URL=http://api:8080"
+  contains "$(cat "$p/fake.log")" "docker network create freelunch"
+  # different hosts, a Cloudflare route to the app: public
+  graph_project "$p-pub" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", port = 8080 }
+  web = { host = "oci-edge-1", compose = "../compose.yaml", needs = ["api"] }'
+  out="$(GHCR_TOKEN=x deploy_in "$p-pub" 2>&1)"
+  contains "$out" "web needs api: cloudflare route (https://api.example.com)"
+  contains "$(cat "$p-pub/host/apps/web/.env")" "API_URL=https://api.example.com"
+  # a mesh beats the public route: private
+  give_mesh "$p-pub" false
+  out="$(GHCR_TOKEN=x deploy_in "$p-pub" 2>&1)"
+  contains "$out" "web needs api: mesh (http://100.64.0.7:8080)"
+  contains "$(cat "$p-pub/host/apps/web/.env")" "API_URL=http://100.64.0.7:8080"
+  # with ssh on, deploy goes to the mesh address
+  give_mesh "$p-pub" true
+  GHCR_TOKEN=x deploy_in "$p-pub" >/dev/null 2>&1
+  contains "$(cat "$p-pub/fake.log")" "ubuntu@100.64.0.7"
+  # different hosts, no route and no mesh: stopped, with what is missing
+  graph_project "$p-none" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", port = 8080 }
+  web = { host = "oci-edge-1", compose = "../compose.yaml", needs = ["api"] }'
+  rm -r "$p-none/.freelunch/cloudflare"
+  if out="$(GHCR_TOKEN=x deploy_in "$p-none" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "web (on oci-edge-1) needs api (on oci-main), and nothing connects them"
+  # a dependency without a port can't be reached
+  graph_project "$p-noport" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env" }
+  web = { host = "oci-main", compose = "../compose.yaml", needs = ["api"] }'
+  if out="$(GHCR_TOKEN=x deploy_in "$p-noport" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "api has no port in apps.tfvars"
+}
+
+# A hybrid project: a frontend on one host, a backend on another, and a database.
+test_edges_hybrid_frontend_backend_database() {
+  local p="$WORK/edge-hybrid" out
+  graph_project "$p" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", port = 8080, needs = ["neon-main"] }
+  web = { host = "oci-edge-1", compose = "../compose.yaml", needs = ["api"] }'
+  give_mesh "$p" false
+  GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  contains "$(cat "$p/host/apps/web/.env")" "API_URL=http://100.64.0.7:8080"
+  contains "$(cat "$p/host/apps/api/.env")" "NEON_MAIN_URL=$DB_URL"
+  lacks "$(cat "$p/host/apps/web/.env")" "mock-db-pass"
+  equals "$(grep -o 'docker compose up .* @ [a-z]*' "$p/fake.log" | sed 's/.* @ //' | tr '\n' ' ')" "api cloudflared web "
+}
+
 # A provider's engine is what its provider.yaml says, or what its iac implies.
 test_engine_of_defaults_from_iac() {
   equals "$("$CLI" engine render)" tofu

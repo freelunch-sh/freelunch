@@ -747,3 +747,43 @@ run "a_need_on_nothing_is_refused" {
 
   expect_failures = [output.graph]
 }
+
+run "a_mesh_address_is_used_for_ssh_when_asked" {
+  command = plan
+
+  variables {
+    mesh = { "oci-main" = { address = "100.64.0.7", ssh = true } }
+  }
+
+  assert {
+    condition     = output.targets["oci-main"].address == "100.64.0.7"
+    error_message = "A host on a mesh with ssh on is reached at its mesh address."
+  }
+}
+
+run "a_mesh_address_is_not_used_for_ssh_by_default" {
+  command = plan
+
+  variables {
+    mesh = { "oci-main" = { address = "100.64.0.7" } }
+  }
+
+  assert {
+    condition     = output.targets["oci-main"].address == "203.0.113.10"
+    error_message = "Without ssh = true, the public address stays."
+  }
+}
+
+run "an_address_in_apps_tfvars_beats_the_mesh" {
+  command = plan
+
+  variables {
+    mesh  = { "oci-main" = { address = "100.64.0.7", ssh = true } }
+    hosts = { "oci-main" = { address = "freelunch-oci-main" } }
+  }
+
+  assert {
+    condition     = output.targets["oci-main"].address == "freelunch-oci-main"
+    error_message = "A hand-written address wins."
+  }
+}

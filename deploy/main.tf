@@ -144,7 +144,7 @@ locals {
     for h in local.target_hosts : h => {
       kind     = contains(keys(local.platforms), h) ? "platform" : "host"
       provider = try(local.inventory[h].provider, local.platforms[h].provider, null)
-      address  = contains(keys(local.platforms), h) ? null : try(coalesce(try(var.hosts[h].address, null), try(local.inventory[h].public_ip, null), try(local.inventory[h].private_ip, null)), null)
+      address  = contains(keys(local.platforms), h) ? null : try(coalesce(try(var.hosts[h].address, null), try(var.mesh[h].ssh ? var.mesh[h].address : null, null), try(local.inventory[h].public_ip, null), try(local.inventory[h].private_ip, null)), null)
       user     = contains(keys(local.platforms), h) ? null : try(coalesce(try(var.hosts[h].user, null), try(local.inventory[h].ssh_user, null)), "ubuntu")
       arch     = try(local.inventory[h].arch, local.platforms[h].arch, null)
       apps     = { for name, a in local.apps : name => { compose = a.compose, env_file = a.env_file, bucket = a.bucket, database = a.database } if a.host == h }

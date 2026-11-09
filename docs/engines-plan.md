@@ -146,14 +146,14 @@ The same `needs` resolves to a different address depending on where the two node
 | different nodes, public | a Cloudflare route's hostname (exists) |
 | different nodes, private | a mesh address (Tailscale first) |
 
-- [ ] The resolver: given two nodes, pick the medium, and give the dependant `<NAME>_URL` in its
+- [x] The resolver: given two nodes, pick the medium, and give the dependant `<NAME>_URL` in its
   environment. Say in `docs/graph.md` which medium was chosen and why; fail when none applies
-- [ ] The mesh as a node: a network (Tailscale first) makes a join key, hosts join on first boot
-  (extends the existing docker-bootstrap key), its outputs give each host's private address
-- [ ] Mesh addresses used for SSH and for edges (replaces hand-written `hosts.<name>.address`)
-- [ ] DNS as a node: a zone provider makes records for a route's hostname (see 9d)
-- [ ] Tests per row of the table, and the failure when no medium applies
-- [ ] A hybrid example in `docs/graph.md`: frontend on one host, backend on another, a database
+- [x] The mesh as a node: a network (Tailscale first) makes a join key, hosts join on first boot
+  (extends the existing docker-bootstrap key), its outputs give each host's private address (`providers/tailscale`)
+- [x] Mesh addresses used for SSH and for edges (replaces hand-written `hosts.<name>.address`)
+- [ ] DNS as a node: a zone provider makes records for a route's hostname (see 9d; waits for the deSEC and DuckDNS providers)
+- [x] Tests per row of the table, and the failure when no medium applies
+- [x] A hybrid example in `docs/graph.md`: frontend on one host, backend on another, a database
 
 ### 9d. Providers that make the media (the old phase 3 list)
 

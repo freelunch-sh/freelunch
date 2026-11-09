@@ -59,6 +59,15 @@ variable "hosts" {
   default = {}
 }
 
+variable "mesh" {
+  description = "Mesh addresses from the stacks that output `mesh`: per host, an address and whether deploy should SSH to it."
+  type = map(object({
+    address = string
+    ssh     = optional(bool, false)
+  }))
+  default = {}
+}
+
 variable "default_host" {
   description = "Where apps without a host go: <provider>-<instance>. bin/freelunch sets it to the first deployed target of the project (targets in apps.tfvars)."
   type        = string
