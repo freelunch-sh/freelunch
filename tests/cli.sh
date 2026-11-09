@@ -1218,7 +1218,7 @@ up_in() {
     FREELUNCH_TF="$WORK/bin/up-tf" UP_FIXTURES="$ROOT" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_ROOT="$dir/host" \
     FAKE_CONSOLE_KEYS="${FAKE_CONSOLE_KEYS-$(cut -d' ' -f1,2 "$WORK/hostkey.pub")}" FAKE_SCANNED="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")" \
     FREELUNCH_TRUST_TIMEOUT="${FREELUNCH_TRUST_TIMEOUT:-0}" GHCR_TOKEN=ghp_test-token FREELUNCH_VERIFY_INTERVAL=0 \
-    NORTHFLANK_API_TOKEN="nf-token" CLOUDFLARE_API_TOKEN="" "$dir-checkout/bin/freelunch" up "$@")
+    NORTHFLANK_API_TOKEN="nf-token" CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN-}" "$dir-checkout/bin/freelunch" up "$@")
 }
 
 # Tests ---------------------------------------------------------------------------------
@@ -5795,7 +5795,8 @@ test_up_makes_the_new_tunnel_first_and_moves_the_routes_after_the_deploy() {
   up_project "$p" oci northflank
   FAKE_UP="oci=capacity northflank=ok" up_in "$p" >/dev/null 2>&1
   : > "$p/fake.log"; rm -f "$p"/fake.log.*.n
-  out="$(FAKE_UP="oci=ok cloudflare=ok,connections,ok" FREELUNCH_TUNNEL_INTERVAL=0 up_in "$p" 2>&1)" || { echo "$out" >&2; return 1; }
+  out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" FAKE_UP="oci=ok cloudflare=ok,connections,ok" FREELUNCH_TUNNEL_INTERVAL=0 up_in "$p" 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "cloudflared on oci-main is connected (healthy)"
   contains "$out" "up: making the tunnel of oci-main first; the address keeps going to northflank-main until oci-main runs the app"
   contains "$out" "Cloudflare won't delete the old tunnel while it has connections; waiting (try 1 of 10)"
   contains "$out" "oci-main: https://api.example.com"
@@ -5807,6 +5808,20 @@ test_up_makes_the_new_tunnel_first_and_moves_the_routes_after_the_deploy() {
   lacks "$second" "-target"
   # the deploy (ssh to the host) comes between the targeted apply and the one that moves the routes
   awk -v a="${first%%:*}" -v b="${second%%:*}" 'NR > a && NR < b && /^ssh /' "$p/fake.log" | grep -q .
+}
+
+# Before the routes move, cloudflared on the new host has to have connected. If it doesn't, the
+# routes stay where they are.
+test_up_keeps_the_routes_when_the_new_tunnel_never_connects() {
+  local p="$WORK/up-tunnel-down" out rc=0
+  up_project "$p" oci northflank
+  FAKE_UP="oci=capacity northflank=ok" up_in "$p" >/dev/null 2>&1
+  : > "$p/fake.log"; rm -f "$p"/fake.log.*.n
+  out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" FAKE_TUNNEL_STATUS=inactive FREELUNCH_TUNNEL_TIMEOUT=0 FAKE_UP="oci=ok" up_in "$p" 2>&1)" || rc=$?
+  equals "$rc" 1
+  contains "$out" "cloudflared on oci-main hasn't connected to its tunnel (status: inactive), so the routes were not moved"
+  # only the new tunnel was applied: no full apply followed
+  equals "$(grep -c 'providers/cloudflare/stack apply' "$p/fake.log")" 1
 }
 
 # Cloudflare keeps refusing: up says the app is on the new host and what finishes the move.

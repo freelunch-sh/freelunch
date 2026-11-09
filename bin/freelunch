@@ -3703,6 +3703,45 @@ up_stop_cloudflared() {
     | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' >/dev/null 2>&1
 }
 
+# up_cf_account: the Cloudflare account of the project, from its tfvars or from its zone
+up_cf_account() {
+  local tfvars account zone
+  tfvars="$(config_dir cloudflare)/terraform.tfvars"
+  account="$(tfvar "$tfvars" account_id 2>/dev/null || true)"
+  zone="$(tfvar "$tfvars" zone 2>/dev/null || true)"
+  if [[ -z "$account" && -n "$zone" ]]; then account="$(cf_get "/zones?name=$zone" | jq -r '.result[0].account.id // empty' 2>/dev/null)"; fi
+  echo "$account"
+}
+
+# up_wait_tunnel <host>: wait until cloudflared on <host> has connected to its tunnel, before the
+# routes move to it. If it never does, stop here: the routes still go to the old host, which
+# still serves the app. Without a Cloudflare token the tunnel can't be asked, so it goes on.
+up_wait_tunnel() {
+  local host="$1" id account status deadline
+  if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+    log "up: no CLOUDFLARE_API_TOKEN, so the tunnel of $host isn't checked before the routes move"
+    return 0
+  fi
+  id="$(up_tunnels | awk -F'\t' -v h="$host" '$1 == h { print $2 }')"
+  account="$(up_cf_account)"
+  if [[ -z "$id" || -z "$account" ]]; then
+    log "up: can't tell the tunnel or the account of $host, so the tunnel isn't checked before the routes move"
+    return 0
+  fi
+  deadline=$((SECONDS + ${FREELUNCH_TUNNEL_TIMEOUT:-120}))
+  while :; do
+    status="$(cf_get "/accounts/$account/cfd_tunnel/$id" | jq -r '.result.status // empty' 2>/dev/null || true)"
+    case "$status" in
+      healthy|degraded) log "up: cloudflared on $host is connected ($status)"; return 0 ;;
+    esac
+    if [[ $SECONDS -ge $deadline ]]; then
+      die "up: cloudflared on $host hasn't connected to its tunnel (status: ${status:-unknown}), so the routes were not moved: the address still goes to the old host, which still serves the app. See cloudflared's logs on $host, then run freelunch up again"
+    fi
+    log "up: waiting for cloudflared on $host to connect (status: ${status:-unknown})"
+    sleep "${FREELUNCH_TUNNEL_CHECK_INTERVAL:-5}"
+  done
+}
+
 # up_move_routes <old tunnels, "host<TAB>id" lines>: apply the whole Cloudflare stack, which moves
 # the routes and deletes the tunnels of hosts that have none now. Cloudflare refuses to delete a
 # tunnel with connections, so cloudflared is stopped on those hosts first, and a refusal is
@@ -3854,7 +3893,7 @@ cmd_up() {
   [[ "$chosen" != "oci" ]] || up_trust "$host"
   cmd_deploy
   # cloudflared runs on the new host now: move the routes there and drop the old tunnel.
-  [[ $moving -eq 0 ]] || up_move_routes "$old_tunnels"
+  if [[ $moving -eq 1 ]]; then up_wait_tunnel "$host"; up_move_routes "$old_tunnels"; fi
   local urls=""
   [[ ! -f "$TMP/urls" ]] || urls="$(awk -F'\t' -v h="$host" '$1 == h { print $2 }' "$TMP/urls" | sort -u | paste -sd' ' -)"
   if [[ -n "$urls" ]]; then
