@@ -9952,6 +9952,16 @@ cmd_test() { # cmd_test [folder...]: folders are relative to the checkout; `test
     roots=("$ROOT/shared" "$ROOT/providers" "$ROOT/hybrid" "$ROOT/catalog" "$ROOT/deploy")
   fi
   if [[ ${#roots[@]} -gt 0 ]]; then
+    # A run leaves nothing behind: each suite's .terraform data goes in a temp folder (not in the
+    # checkout, where it would be a copy of the providers per suite, gigabytes in all), providers are
+    # downloaded once into a shared cache unless the caller has one, and the lock file a suite made
+    # goes with it. The caller's own .terraform folders and lock files are not touched.
+    local scratch lock n=0 had_lock
+    scratch="$(mktemp -d)"
+    # shellcheck disable=SC2064 # expanded now, on purpose
+    trap "rm -rf '$scratch'" EXIT
+    if [[ -z "${TF_PLUGIN_CACHE_DIR:-}" ]]; then export TF_PLUGIN_CACHE_DIR="$scratch/plugins"; fi
+    mkdir -p "$TF_PLUGIN_CACHE_DIR"
     while IFS= read -r dir; do
       # A suite whose mocks only OpenTofu understands says so with tests/.tofu-only
       if [[ -f "$dir/tests/.tofu-only" && "$(tool_name)" != tofu ]]; then
@@ -9959,8 +9969,11 @@ cmd_test() { # cmd_test [folder...]: folders are relative to the checkout; `test
         continue
       fi
       log "test ${dir#"$ROOT"/}"
-      init_dir "$dir"
-      tf_in "$dir" test || failed=1
+      n=$((n + 1)); lock="$dir/.terraform.lock.hcl"; had_lock=0; [[ ! -e "$lock" ]] || had_lock=1
+      TF_DATA_DIR="$scratch/data-$n" init_dir "$dir"
+      TF_DATA_DIR="$scratch/data-$n" tf_in "$dir" test || failed=1
+      rm -rf "$scratch/data-$n"
+      [[ $had_lock -eq 1 ]] || rm -f "$lock"
     done < <(find "${roots[@]}" -type d -name tests -not -path '*/.terraform/*' -not -path '*/fixtures/*' -exec dirname {} \; | sort)
   fi
   if [[ $cli -eq 1 ]]; then
