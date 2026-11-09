@@ -1,3 +1,14 @@
+# Independent of the host, so it is made in the first apply even while the host waits for
+# capacity. (A depends_on would defer the host module's data sources to apply time.)
+module "budget" {
+  source = "../modules/budget"
+
+  tenancy_id   = var.tenancy_ocid
+  name         = var.name_prefix
+  amount       = var.budget_amount
+  alert_emails = var.budget_alert_emails
+}
+
 module "docker_host" {
   source = "../modules/docker-host"
 

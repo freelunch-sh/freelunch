@@ -12,6 +12,11 @@ tenancy_ocid = "ocid1.tenancy.oc1..aaaaaaaa..."        # grep tenancy ~/.oci/con
 # and add:
 # oci_auth = "SecurityToken"
 
+# A budget alert is created before the first VM: you are emailed when the tenancy's spend
+# reaches budget_amount (default $1) or is forecast to. Always Free costs $0, so an email
+# means something is billed. Without an address no budget is created.
+budget_alert_emails = ["you@example.com"]
+
 ssh_public_keys = [
   "ssh-ed25519 AAAA... you@laptop",
 ]

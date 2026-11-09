@@ -257,10 +257,30 @@ API key.
 |---|---|
 | [`modules/network`](modules/network/) | VCN, internet gateway, route table, security list (SSH from `ssh_source_cidrs`, your TCP/UDP ports, ICMP for path MTU), public subnet |
 | [`modules/compute`](modules/compute/) | Instances (latest Ubuntu 24.04 for each shape), free-tier guardrails, automatic availability-domain placement |
+| [`modules/budget`](modules/budget/) | A monthly tenancy budget (default $1) with an email alert on actual and forecast spend, made when `budget_alert_emails` is set |
 | [`modules/docker-host`](modules/docker-host/) | Combines network + compute with [`shared/modules/docker-bootstrap`](../../shared/modules/docker-bootstrap/) and OCI's host-firewall fix |
 
 The stack outputs `hosts` (the [host contract](../../docs/architecture.md#host-contract)),
 `ssh` commands and `free_tier_usage` (for example `a1_ocpus = "2/2"`).
+
+## Cost safety
+
+Always Free costs $0, so any bill is a mistake. freelunch puts several nets under it:
+
+- **Budget alert.** Set `budget_alert_emails` and apply creates a $1 monthly budget over the
+  tenancy with an email at actual and forecast spend. `freelunch doctor` warns when there is none.
+- **Billing state.** `doctor` says whether the tenancy can create paid resources at all (a
+  free-trial credit or Pay As You Go) or is Always Free only, where compute can't be charged.
+- **Tenancy-wide limits.** `doctor` counts every boot and block volume (200 GB free together),
+  reserved IP and load balancer in the tenancy, not just this stack's, through OCI Search.
+- **Cost in `plan`.** `plan oci` prints `cost: $0, within Always Free`, or what falls outside it.
+- **Billed this month.** `status` and the end of `apply` show `billing this month: $0.00` from
+  OCI's usage API (needs `oci` and a user allowed to read usage).
+- **Across targets.** `.freelunch/billing.tfvars` sets one `spend_cap_usd` for the month, a
+  `paid_fallback` target that `freelunch up` uses only after the free targets had no room for
+  `paid_fallback_after_days` and its `paid_fallback_monthly_usd` fits under the cap, and
+  `credit_expires_<provider>` dates that `status` and `doctor` count down. Hetzner has no stack
+  yet, so a fallback has to be a provider with one.
 
 ## OCI-specific behaviour
 
@@ -293,7 +313,7 @@ The stack outputs `hosts` (the [host contract](../../docs/architecture.md#host-c
 - **"Out of host capacity"** on A1 creation is common. `apply oci --wait-for-capacity`
   keeps trying until the host exists (see [Waiting for capacity](#waiting-for-capacity)).
   Upgrading to Pay-As-You-Go improves capacity, but then anything over the caps is billed,
-  so set a $1 budget alert first.
+  so set `budget_alert_emails`: the stack then creates a $1 budget alert before the first VM.
 - **Idle reclamation.** Oracle may reclaim Always Free instances whose CPU, network and (for A1)
   memory stay under ~20% at the 95th percentile for 7 days. Run real workloads. Synthetic load
   generators break the spirit of the free tier.
@@ -315,6 +335,7 @@ bin/freelunch test     # or: cd providers/oci/modules/compute && terraform test
 |---|---|
 | `modules/compute/tests/guardrails.tftest.hcl` | Maximum free layout passes; legacy 4/24, 3rd micro, over-200 GB, paid shapes and non-home region are blocked; opt-in allows overage; AD auto-placement, and the offset that moves to the next AD |
 | `modules/docker-host/tests/firewall.tftest.hcl` | Every ingress port reaches the host firewall; no `netfilter-persistent save`; valid YAML |
+| `modules/budget/tests/budget.tftest.hcl` | No email, no budget; an email makes a $1 monthly tenancy budget with actual and forecast alerts; forecast can be turned off |
 | `modules/network/tests/ingress.tftest.hcl` | With no ingress ports (Tunnel layout) only SSH and path-MTU ICMP are allowed in; default ports open |
 | `stack/tests/plan.tftest.hcl` | Full stack plans; host contract output; arch per shape |
 
@@ -323,7 +344,7 @@ bin/freelunch test     # or: cd providers/oci/modules/compute && terraform test
 - [ ] Block volume module (attach + mount the rest of the 200 GB)
 - [ ] Reserved public IP option
 - [x] Object Storage bucket for the project's state (`freelunch state init oci`, through the S3-compatible API)
-- [ ] Budget alert module ($1 threshold)
+- [x] Budget alert module ($1 threshold, `budget_alert_emails`)
 - [ ] Always Free Autonomous DB / MySQL HeatWave modules
 - [ ] k3s cluster layout (see `inspire/repos/oci-kubernetes`)
 

@@ -202,6 +202,29 @@ case "$1 ${2:-}" in
   "iam customer-secret-key")
     echo '{"data": {"id": "ak-from-oci", "key": "sk-from-oci", "lifecycle-state": "ACTIVE"}}'
     exit 0 ;;
+  "usage-api usage-summary")
+    # FAKE_BILLED is this month's cost; FAKE_USAGE_ERROR makes the API refuse
+    if [[ -n "${FAKE_USAGE_ERROR:-}" ]]; then printf 'ServiceError:\n{"code": "NotAuthorizedOrNotFound", "message": "not allowed", "status": 404}\n' >&2; exit 1; fi
+    printf '{"data": {"items": [{"computed-amount": %s}]}}\n' "${FAKE_BILLED:-0}"
+    exit 0 ;;
+  "budgets budget")
+    # FAKE_BUDGET=1: the tenancy has a $1 budget
+    if [[ -n "${FAKE_BUDGET:-}" ]]; then echo '{"data": [{"display-name": "freelunch-budget", "amount": 1}]}'; else echo '{"data": []}'; fi
+    exit 0 ;;
+  "search resource")
+    # Volumes, public IPs and load balancers of the whole tenancy. FAKE_BOOT_GB and
+    # FAKE_VOLUME_GB are the sizes of one boot and one block volume, FAKE_LOOSE_IP an
+    # unattached reserved IP, FAKE_LBS how many load balancers there are.
+    case "$5" in
+      "query bootvolume"*) printf '{"data": {"items": [{"lifecycle-state": "AVAILABLE", "additional-details": {"sizeInGBs": "%s"}}]}}\n' "${FAKE_BOOT_GB:-50}" ;;
+      "query volume"*)     printf '{"data": {"items": [{"lifecycle-state": "AVAILABLE", "additional-details": {"sizeInGBs": "%s"}}]}}\n' "${FAKE_VOLUME_GB:-0}" ;;
+      "query publicip"*)
+        if [[ -n "${FAKE_LOOSE_IP:-}" ]]; then echo '{"data": {"items": [{"additional-details": {"lifetime": "RESERVED"}}]}}'
+        else echo '{"data": {"items": [{"additional-details": {"lifetime": "RESERVED", "assignedEntityId": "ocid1.privateip.oc1..x"}}, {"additional-details": {"lifetime": "EPHEMERAL"}}]}}'; fi ;;
+      "query loadbalancer"*) items=""; for ((i = 0; i < ${FAKE_LBS:-0}; i++)); do items="${items:+$items,}{}"; done; printf '{"data": {"items": [%s]}}\n' "$items" ;;
+      *) echo '{"data": {"items": []}}' ;;
+    esac
+    exit 0 ;;
   "limits resource-availability")
     for a; do
       case "${prev:-}" in
@@ -211,6 +234,7 @@ case "$1 ${2:-}" in
       prev="$a"
     done
     case "$limit" in
+      standard-e4-core-count) printf '{"data": {"available": %s, "used": 0}}\n' "${FAKE_PAID_LEFT:-0}" ;;
       vcn-count) printf '{"data": {"available": %s, "used": %s}}\n' "${FAKE_VCNS_LEFT:-1}" "${FAKE_VCNS_USED:-1}" ;;
       standard-a1-core-count)
         if [[ "$ad" == *-AD-1 ]]; then used="${FAKE_A1_USED:-2}"; else used=0; fi
@@ -1408,7 +1432,7 @@ test_apply_waits_for_capacity() {
   contains "$out" "oci: OCI asks for fewer requests (TooManyRequests); attempt 3 in"
   contains "$out" "oci: applied on attempt 3"
   # An API key needs no session refresh: oci_auth is only in a comment of the example.
-  fails grep -q '^oci ' "$p/fake.log"
+  fails grep -q '^oci [^u]' "$p/fake.log"
 }
 
 # A session token lasts an hour. It is refreshed before each attempt, which works until the
@@ -1418,7 +1442,7 @@ test_capacity_retries_refresh_the_oci_session() {
   capacity_project "$p"
   session_profile "$p" freelunch
   FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity
-  equals "$(grep -E '^oci |/stack (apply|plan) ' "$p/fake.log" | sed -E 's/^oci session refresh --profile freelunch$/refresh/; s/.*\/stack (apply|plan) .*/\1/')" \
+  equals "$(grep -E '^oci [^u]|/stack (apply|plan) ' "$p/fake.log" | sed -E 's/^oci session refresh --profile freelunch$/refresh/; s/.*\/stack (apply|plan) .*/\1/')" \
     "$(printf 'refresh\napply\nrefresh\nplan\napply')"
   # When the session ends during the wait, it stops there and says why.
   rm "$p/fake.log"*
@@ -1447,7 +1471,7 @@ test_oci_runs_check_the_session_first() {
   capacity_project "$p"
   session_profile "$p" tradio
   freelunch_in "$p" plan oci
-  equals "$(grep -E '^oci |/stack (init|plan) ' "$p/fake.log" | sed -E 's/^oci session refresh --profile tradio$/refresh/; s/.*\/stack (init|plan) .*/\1/')" \
+  equals "$(grep -E '^oci [^u]|/stack (init|plan) ' "$p/fake.log" | sed -E 's/^oci session refresh --profile tradio$/refresh/; s/.*\/stack (init|plan) .*/\1/')" \
     "$(printf 'refresh\ninit\nplan')"
   rm "$p/fake.log"*
   if out="$(FAKE_SESSION_REFRESHES=0 freelunch_in "$p" plan oci 2>&1)"; then echo "plan should have failed"; return 1; fi
@@ -1463,7 +1487,7 @@ test_oci_runs_check_the_session_first() {
   # An API key has nothing to refresh.
   capacity_project "$p-key"
   freelunch_in "$p-key" plan oci
-  fails grep -q '^oci ' "$p-key/fake.log"
+  fails grep -q '^oci [^u]' "$p-key/fake.log"
 }
 
 # Without the OCI CLI (the runner image), the token's own expiry is checked instead.
@@ -1588,11 +1612,12 @@ runcmd: []" '{resource_changes: [
   contains "$out" "$(printf '==> oci-edge-1: cloud-init (no-op), secrets left out\n#cloud-config\nruncmd: []')"
   contains "$out" "oci-edge-1 exists already. cloud-init only runs on first boot"
   lacks "$out" "oci-main exists already"
-  # Without the flag nothing is saved or shown, and only plan takes it.
+  # Without the flag nothing is shown (OCI keeps a plan in a temp folder for its cost line),
+  # and only plan takes it.
   rm "$p/fake.log"*
   out="$(FAKE_PLAN="$plan" freelunch_in "$p" plan oci 2>&1)"
   lacks "$out" "cloud-init"
-  fails grep -q -- '-out=' "$p/fake.log"
+  lacks "$out" "saved the plan"
   fails freelunch_in "$p" apply oci --show-user-data
 }
 
@@ -1710,6 +1735,31 @@ test_capacity_wait_sweeps_availability_domains() {
   contains "$out" "oci: applied on attempt 3 in UK-LONDON-1-AD-1"
 }
 
+# plan prints what the plan costs: nothing within Always Free, or what falls outside it.
+test_plan_prints_the_cost_of_an_oci_plan() {
+  local p="$WORK/plan-cost" out inst
+  capacity_project "$p"
+  inst='{"address":"oci_core_instance.this","type":"oci_core_instance","change":{"actions":["create"],"after":{"shape":"%s","shape_config":[{"ocpus":%s,"memory_in_gbs":%s}],"source_details":[{"boot_volume_size_in_gbs":"%s"}]}}}'
+  out="$(FAKE_PLAN="{\"resource_changes\":[$(printf "$inst" VM.Standard.A1.Flex 2 12 100)]}" freelunch_in "$p" plan oci 2>&1)"
+  contains "$out" "oci: cost: \$0, within Always Free"
+  out="$(FAKE_PLAN="{\"resource_changes\":[$(printf "$inst" VM.Standard.A1.Flex 4 24 250)]}" freelunch_in "$p" plan oci 2>&1)"
+  contains "$out" "oci: cost: outside Always Free, so billed: A1 4 OCPUs (free: 2); A1 24 GB memory (free: 12); 250 GB of volumes (free: 200)"
+  out="$(FAKE_PLAN="{\"resource_changes\":[$(printf "$inst" VM.Standard.E4.Flex 1 8 50)]}" freelunch_in "$p" plan oci 2>&1)"
+  contains "$out" "paid shape VM.Standard.E4.Flex"
+}
+
+# status and the end of an apply show what OCI has billed this month.
+test_status_shows_oci_billing_this_month() {
+  local p="$WORK/status-billing" out
+  doctor_project "$p"
+  out="$(PATH="$WORK/doctor-bin:$PATH" status_in "$p")"
+  contains "$out" "oci            billing this month: \$0.00"
+  out="$(FAKE_BILLED=3.5 PATH="$WORK/doctor-bin:$PATH" status_in "$p")"
+  contains "$out" "billing this month: \$3.50. Always Free costs nothing, so something is billed"
+  out="$(FAKE_USAGE_ERROR=1 PATH="$WORK/doctor-bin:$PATH" status_in "$p")"
+  contains "$out" "billing this month: unknown (404 NotAuthorizedOrNotFound: not allowed)"
+}
+
 # A wait says which size it got, and reminds you to match the tfvars when fallbacks were set.
 test_capacity_wait_names_the_size() {
   local p="$WORK/size" out plan
@@ -1750,6 +1800,33 @@ test_detached_wait_and_status() {
   # The wait's files stay out of git.
   git -C "$p" init -q
   for f in wait.log wait.state reviewed.tfplan; do git -C "$p" check-ignore -q ".freelunch/oci/$f"; done
+}
+
+# A wait that gets a SIGTERM or SIGHUP says which signal ended it (not just "stopped"), and
+# a wait that is gone without a word says what that usually means.
+test_wait_says_which_signal_ended_it() {
+  local p="$WORK/signal" pid sig
+  capacity_project "$p"
+  for sig in HUP TERM; do
+    rm -f "$p/.freelunch/oci/wait.state"
+    FAKE_PLAN="$(plan_with 'oci_core_instance.this["main"] create Xyz:UK-LONDON-1-AD-1')" freelunch_in "$p" plan oci --out .freelunch/oci/reviewed.tfplan
+    FAKE_APPLY="$(printf 'capacity %.0s' $(seq 1 3000))" FAKE_PLAN="$(plan_with 'oci_core_instance.this["main"] create Xyz:UK-LONDON-1-AD-1')" \
+      freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity >/dev/null 2>&1 &
+    for _ in $(seq 1 100); do
+      pid="$(sed -n 's/^pid=//p' "$p/.freelunch/oci/wait.state" 2>/dev/null || true)"
+      [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && break
+      /bin/sleep 0.1
+    done
+    kill -$sig "$pid"
+    for _ in $(seq 1 600); do
+      [[ "$(sed -n 's/^state=//p' "$p/.freelunch/oci/wait.state" || true)" != "stopped" ]] || break
+      /bin/sleep 0.1
+    done
+    contains "$(sed -n 's/^last=//p' "$p/.freelunch/oci/wait.state")" "got SIG$sig"
+  done
+  # A pid that is gone while the state says waiting: killed or lost its machine.
+  printf 'state=waiting\npid=999999\nstarted=%s\nupdated=%s\nattempt=497\nlast=out of host capacity\nnext=\nlog=\nsession=\n' "$(date +%s)" "$(date +%s)" > "$p/.freelunch/oci/wait.state"
+  contains "$(freelunch_in "$p" status)" "was killed (SIGKILL, out of memory) or lost its machine"
 }
 
 test_status_shows_each_wait() {
@@ -2079,6 +2156,31 @@ test_deploy_rejects_unknown_hosts_and_missing_secrets() {
   sed -i.bak 's/oci-main/oci-mian/' "$p/.freelunch/apps.tfvars"
   if out="$(GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
   contains "$out" "not in the inventory"
+}
+
+# doctor shows the net under the free tier: a budget alert, whether a charge is possible,
+# and what the whole tenancy holds of the storage, IPs and load balancers that are free.
+test_doctor_checks_billing_and_tenancy_wide_free_limits() {
+  local p="$WORK/doctor-billing" out
+  doctor_project "$p"
+  sed -i.bak '/^budget_alert_emails/d' "$p/.freelunch/oci/terraform.tfvars"
+  out="$(FAKE_A1_USED=0 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "no budget alert: anything billed goes unnoticed"
+  contains "$out" "billing: Always Free only, with no paid compute allowed"
+  contains "$out" "  ok    storage: 50 of the 200 free GB of boot and block volumes in use in the tenancy"
+  contains "$out" "  ok    reserved IPs: 1 in the tenancy, none unattached"
+  contains "$out" "  ok    load balancers: 0 load balancer(s) and 0 network load balancer(s) in the tenancy, within Always Free"
+  # A budget, a paid tenancy, and leftovers made elsewhere.
+  out="$(FAKE_BUDGET=1 FAKE_PAID_LEFT=8 FAKE_VOLUME_GB=120 FAKE_BOOT_GB=100 FAKE_LOOSE_IP=1 FAKE_LBS=2 FAKE_A1_USED=0 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  ok    budget alert: freelunch-budget (1/month) watches the tenancy"
+  contains "$out" "billing: this tenancy may create paid resources"
+  contains "$out" "  fail  storage: the tenancy's boot and block volumes hold 220 GB"
+  contains "$out" "reserved IPs: 1 of 1 aren't attached to anything"
+  contains "$out" "load balancers: 2 load balancer(s)"
+  # budget_alert_emails in the tfvars is enough before the budget exists.
+  printf 'budget_alert_emails = ["me@example.com"]\n' >> "$p/.freelunch/oci/terraform.tfvars"
+  out="$(FAKE_A1_USED=0 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "budget_alert_emails is set, so apply creates"
 }
 
 # doctor checks what plan, apply and deploy will need, before they spend time on it.
@@ -5330,9 +5432,12 @@ test_ci_wait_hands_a_reviewed_plan_to_ci() {
   exists "$p/.freelunch/oci/approved.json"
   if out="$(apply_in "$p" oci 2>&1)"; then echo "apply should have failed"; return 1; fi
   contains "$out" "CI waits for capacity for this stack"
+  rm "$p/fake.log"
   out="$(TEST_TF="$WORK/bin/fake-tf" TEST_CLI="$p-checkout/bin/freelunch" ci_in "$p" ci wait oci --cancel 2>&1)"
-  contains "$out" "oci: CI stopped waiting"
+  contains "$out" "oci: CI stopped waiting: freelunch-wait.yml is off. FREELUNCH_BUNDLE is untouched"
   grep -qx 'gh workflow disable freelunch-wait.yml' "$p/fake.log"
+  # The secret was not written again by the cancel.
+  fails grep -q 'gh secret set' "$p/fake.log"
   absent "$p/.freelunch/oci/approved.json"
   # A plan older than the tfvars doesn't show what CI would apply.
   touch -t 202601010000 "$p/.freelunch/oci/reviewed.tfplan"
@@ -5562,6 +5667,61 @@ test_up_goes_to_the_next_target_when_one_has_no_room() {
   contains "$out" "northflank-main: https://api.example.com"
   # A VM's host keys are for VMs.
   lacks "$(cat "$p/fake.log")" "console-history"
+}
+
+# A paid fallback waits until the free targets have had no room for the days billing.tfvars
+# says, and then only if its cost fits under the spend cap.
+test_up_uses_a_paid_fallback_only_after_days_and_under_the_cap() {
+  local p="$WORK/up-paid" out
+  up_project "$p" oci northflank
+  printf 'paid_fallback = "northflank"\npaid_fallback_after_days = "7"\npaid_fallback_monthly_usd = "5"\nspend_cap_usd = "3"\n' > "$p/.freelunch/billing.tfvars"
+  # Day 0: the free target has no room, and the paid one isn't tried.
+  if out="$(FAKE_UP="oci=capacity northflank=ok" up_in "$p" 2>&1)"; then echo "up should have failed"; return 1; fi
+  contains "$out" "the paid fallback northflank waits until the free targets have had no room for 7 day(s)"
+  contains "$out" "up: targets, in order: oci"
+  exists "$p/.freelunch/no-room.since"
+  # Two days later still no.
+  echo $(($(date +%s) - 2 * 86400)) > "$p/.freelunch/no-room.since"
+  if out="$(FAKE_UP="oci=capacity northflank=ok" up_in "$p" 2>&1)"; then echo "up should have failed"; return 1; fi
+  contains "$out" "no free target has had room for 2d 0h; the paid fallback northflank is used after 7 day(s)"
+  # After the days, the cap (3) is below its cost (5).
+  echo $(($(date +%s) - 8 * 86400)) > "$p/.freelunch/no-room.since"
+  if out="$(FAKE_UP="oci=capacity northflank=ok" up_in "$p" 2>&1)"; then echo "up should have failed"; return 1; fi
+  contains "$out" "held back by spend_cap_usd: it costs about \$5 a month, \$0 is billed this month already, and the cap is \$3"
+  # A cap that is set without a cost can't be checked.
+  printf 'paid_fallback = "northflank"\npaid_fallback_after_days = "7"\nspend_cap_usd = "10"\n' > "$p/.freelunch/billing.tfvars"
+  echo $(($(date +%s) - 8 * 86400)) > "$p/.freelunch/no-room.since"
+  if out="$(FAKE_UP="oci=capacity northflank=ok" up_in "$p" 2>&1)"; then echo "up should have failed"; return 1; fi
+  contains "$out" "paid_fallback_monthly_usd isn't"
+  # A cap that fits lets it through.
+  printf 'paid_fallback = "northflank"\npaid_fallback_after_days = "7"\npaid_fallback_monthly_usd = "5"\nspend_cap_usd = "10"\n' > "$p/.freelunch/billing.tfvars"
+  out="$(FAKE_UP="oci=capacity northflank=ok" up_in "$p" 2>&1)"
+  contains "$out" "up: targets, in order: oci northflank"
+  contains "$out" "up: using the paid fallback northflank, about \$5 a month"
+}
+
+# status and doctor show the spend cap and when each free-trial credit ends.
+test_status_and_doctor_show_credit_expiry() {
+  local p="$WORK/credits" out soon later
+  doctor_project "$p"
+  soon="$(date -u -v+10d +%Y-%m-%d 2>/dev/null || date -u -d '+10 days' +%Y-%m-%d)"
+  later="$(date -u -v+200d +%Y-%m-%d 2>/dev/null || date -u -d '+200 days' +%Y-%m-%d)"
+  printf 'spend_cap_usd = "10"\ncredit_expires_gcp = "%s"\ncredit_expires_aws = "%s"\ncredit_expires_azure = "2020-01-01"\ncredit_expires_oci = "someday"\n' "$soon" "$later" > "$p/.freelunch/billing.tfvars"
+  out="$(PATH="$WORK/doctor-bin:$PATH" status_in "$p")"
+  contains "$out" "cap            spend cap \$10 a month across every target"
+  contains "$out" "gcp            free-trial credit ends on $soon, in "
+  contains "$out" "move off it or expect a bill"
+  contains "$out" "aws            free-trial credit ends on $later, in "
+  contains "$out" "azure          free-trial credit ended on 2020-01-01: the account bills now"
+  contains "$out" "oci            someday is not a date"
+  out="$(FAKE_A1_USED=0 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  warn  gcp: the free-trial credit ends on $soon"
+  contains "$out" "  ok    aws: free-trial credit until $later"
+  contains "$out" "  warn  azure: the free-trial credit ended on 2020-01-01"
+  # A fallback with no stack to make is a problem.
+  printf 'paid_fallback = "hetzner"\n' > "$p/.freelunch/billing.tfvars"
+  out="$(FAKE_A1_USED=0 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  fail  paid_fallback hetzner has no stack to make"
 }
 
 # A host that has room is used, its keys are pinned from the console and the app goes there.
