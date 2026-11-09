@@ -41,6 +41,8 @@ if [[ -n "${FAKE_HOST_KEY:-}" ]] && ! ssh-keygen -F "${dest#*@}" -f "$known" >/d
   echo "${dest#*@} $FAKE_HOST_KEY" >> "$known"
 fi
 [[ "$last" == "true" ]] && exit 0
+# a command given on the line (freelunch volume), with stdin for the command itself
+if [[ "$last" == "S=''; "* ]]; then exec bash -c "${last//\/opt\/freelunch\/apps/$FAKE_ROOT/apps}"; fi
 sed "s#/opt/freelunch/apps#$FAKE_ROOT/apps#" | bash -s
 EOF
 cat > "$WORK/bin/docker" <<'EOF'
@@ -54,11 +56,21 @@ case "$1 ${2:-}" in
   # One container per app, stopped when the app is in FAKE_STOPPED.
   "compose ps")
     if [[ " ${FAKE_STOPPED:-} " == *" $(basename "$PWD") "* ]]; then echo "$(basename "$PWD")|exited|"; else echo "$(basename "$PWD")|running|healthy"; fi ;;
+  # volumes live in $FAKE_ROOT/volumes/<name>/_data, labelled by the app: <app>_<name>
+  "volume ls") app="${last#label=com.docker.compose.project=}"; ls "$FAKE_ROOT/volumes" 2>/dev/null | grep "^${app}_" || true ;;
+  "volume inspect") echo "$FAKE_ROOT/volumes/$last/_data" ;;
   "push "*)    echo "latest: digest: sha256:abc123def456 size: 1234" ;;
   "image inspect") echo "${last%%:*}@sha256:digest-of-$(basename "${last%%:*}")" ;;
 esac
 exit 0
 EOF
+# sudo -n <command>: the command, as the user running the tests
+cat > "$WORK/bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" != "-n" ]] || shift
+exec "$@"
+EOF
+chmod +x "$WORK/bin/sudo"
 cat > "$WORK/bin/nc" <<'EOF'
 #!/usr/bin/env bash
 # nc -z -w 5 <host> <port>: answers, unless host:port is in FAKE_TCP_DOWN
@@ -179,6 +191,11 @@ case "$1 ${2:-}" in
         fi
         printf 'Ubuntu 24.04 LTS main ttyS0\r\n\r\nmain login: \r\n' ;;
     esac
+    exit 0 ;;
+  "compute instance")
+    # get: the instance was created FAKE_INSTANCE_AGE seconds ago (a minute by default)
+    e=$(( $(/bin/date +%s) - ${FAKE_INSTANCE_AGE:-60} ))
+    printf '%s.000000+00:00\n' "$(/bin/date -u -r "$e" +%Y-%m-%dT%H:%M:%S 2>/dev/null || /bin/date -u -d "@$e" +%Y-%m-%dT%H:%M:%S)"
     exit 0 ;;
   "iam region-subscription")
     if [[ -n "${FAKE_OCI_KEY_BAD:-}" ]]; then
@@ -910,6 +927,7 @@ case "${2:-}" in
       aws)      echo "│ Error: creating EC2 Instance: operation error EC2: RunInstances, api error InsufficientInstanceCapacity: We currently do not have sufficient t4g.small capacity in the Availability Zone you requested."; exit 1 ;;
       gcp)      echo "│ Error: Error waiting for instance to create: The zone 'projects/p/zones/us-central1-a' does not have enough resources available to fulfill the request. (ZONE_RESOURCE_POOL_EXHAUSTED)"; exit 1 ;;
       azure)    echo "│ Error: creating Linux Virtual Machine: unexpected status 409 (409 Conflict) with error: ZonalAllocationFailed: Allocation failed. We do not have sufficient capacity for the requested VM size in this zone."; exit 1 ;;
+      connections) echo "│ Error: failed to delete tunnel: Cannot delete tunnel because it has active connections (1022)"; exit 1 ;;
       quota)    echo "│ Error: creating EC2 Instance: operation error EC2: RunInstances, api error VcpuLimitExceeded: You have requested more vCPU capacity than your current vCPU limit of 0 allows."; exit 1 ;;
     esac
     case "$stack:$default" in
@@ -1217,7 +1235,7 @@ up_in() {
     FREELUNCH_TF="$WORK/bin/up-tf" UP_FIXTURES="$ROOT" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_ROOT="$dir/host" \
     FAKE_CONSOLE_KEYS="${FAKE_CONSOLE_KEYS-$(cut -d' ' -f1,2 "$WORK/hostkey.pub")}" FAKE_SCANNED="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")" \
     FREELUNCH_TRUST_TIMEOUT="${FREELUNCH_TRUST_TIMEOUT:-0}" GHCR_TOKEN=ghp_test-token FREELUNCH_VERIFY_INTERVAL=0 \
-    NORTHFLANK_API_TOKEN="nf-token" CLOUDFLARE_API_TOKEN="" "$dir-checkout/bin/freelunch" up "$@")
+    NORTHFLANK_API_TOKEN="nf-token" CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN-}" "$dir-checkout/bin/freelunch" "${UP_CMD:-up}" "$@")
 }
 
 # Tests ---------------------------------------------------------------------------------
@@ -5786,6 +5804,173 @@ test_up_moves_to_the_preferred_target_when_it_has_room() {
   exists "$p/nf/services/freelunch/api.json"
 }
 
+# The app moves to another host: the new host's tunnel is made on its own first, deploy runs
+# cloudflared there, and only then do the routes move and the old tunnel go. Cloudflare refusing
+# to delete a tunnel that still has connections is waited out.
+test_up_makes_the_new_tunnel_first_and_moves_the_routes_after_the_deploy() {
+  local p="$WORK/up-tunnel-move" out first second
+  up_project "$p" oci northflank
+  FAKE_UP="oci=capacity northflank=ok" up_in "$p" >/dev/null 2>&1
+  : > "$p/fake.log"; rm -f "$p"/fake.log.*.n
+  out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" FAKE_UP="oci=ok cloudflare=ok,connections,ok" FREELUNCH_TUNNEL_INTERVAL=0 up_in "$p" 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "cloudflared on oci-main is connected (healthy)"
+  contains "$out" "up: making the tunnel of oci-main first; the address keeps going to northflank-main until oci-main runs the app"
+  contains "$out" "Cloudflare won't delete the old tunnel while it has connections; waiting (try 1 of 10)"
+  contains "$out" "oci-main: https://api.example.com"
+  equals "$(grep -c 'providers/cloudflare/stack apply' "$p/fake.log")" 3
+  first="$(grep -n 'providers/cloudflare/stack apply' "$p/fake.log" | sed -n 1p)"
+  second="$(grep -n 'providers/cloudflare/stack apply' "$p/fake.log" | sed -n 2p)"
+  contains "$first" '-target=module.tunnel.cloudflare_zero_trust_tunnel_cloudflared.host["oci-main"]'
+  contains "$first" '-target=module.tunnel.data.cloudflare_zero_trust_tunnel_cloudflared_token.host["oci-main"]'
+  lacks "$second" "-target"
+  # the deploy (ssh to the host) comes between the targeted apply and the one that moves the routes
+  awk -v a="${first%%:*}" -v b="${second%%:*}" 'NR > a && NR < b && /^ssh /' "$p/fake.log" | grep -q .
+}
+
+# Before the routes move, cloudflared on the new host has to have connected. If it doesn't, the
+# routes stay where they are.
+test_up_keeps_the_routes_when_the_new_tunnel_never_connects() {
+  local p="$WORK/up-tunnel-down" out rc=0
+  up_project "$p" oci northflank
+  FAKE_UP="oci=capacity northflank=ok" up_in "$p" >/dev/null 2>&1
+  : > "$p/fake.log"; rm -f "$p"/fake.log.*.n
+  out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" FAKE_TUNNEL_STATUS=inactive FREELUNCH_TUNNEL_TIMEOUT=0 FAKE_UP="oci=ok" up_in "$p" 2>&1)" || rc=$?
+  equals "$rc" 1
+  contains "$out" "cloudflared on oci-main hasn't connected to its tunnel (status: inactive), so the routes were not moved"
+  # only the new tunnel was applied: no full apply followed
+  equals "$(grep -c 'providers/cloudflare/stack apply' "$p/fake.log")" 1
+}
+
+# freelunch rollback: a move that got stuck is undone by moving back to the previous host.
+test_rollback_moves_the_app_back_after_a_stuck_move() {
+  local p="$WORK/up-rollback" out rc=0
+  up_project "$p" oci northflank
+  FAKE_UP="oci=capacity northflank=ok" up_in "$p" >/dev/null 2>&1
+  rm -f "$p"/fake.log.*.n
+  FAKE_UP="oci=ok cloudflare=ok,connections" FREELUNCH_TUNNEL_RETRIES=0 FREELUNCH_TUNNEL_INTERVAL=0 up_in "$p" >/dev/null 2>&1 || rc=$?
+  equals "$rc" 1
+  grep -qx 'from=northflank-main' "$p/.freelunch/up-move.state"
+  grep -qx 'to=oci-main' "$p/.freelunch/up-move.state"
+  : > "$p/fake.log"; rm -f "$p"/fake.log.*.n
+  out="$(UP_CMD=rollback FAKE_UP="oci=ok northflank=ok cloudflare=ok" up_in "$p" 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "rollback: moving the app back from oci-main to northflank-main"
+  contains "$out" "rollback: the routes go to northflank-main again. oci-main still runs the app, unused now"
+  # the tunnel of the previous host first, on its own, for the host it goes back to
+  grep 'providers/cloudflare/stack apply' "$p/fake.log" | sed -n 1p | grep -q -- '-target=module.tunnel.cloudflare_zero_trust_tunnel_cloudflared.host\["northflank-main"\]'
+  grep 'providers/cloudflare/stack apply' "$p/fake.log" | grep -q -- '-var=default_host=northflank-main'
+  fails test -e "$p/.freelunch/up-move.state"
+}
+
+test_rollback_without_a_move_says_there_is_nothing_to_undo() {
+  local p="$WORK/up-rollback-none" out rc=0
+  up_project "$p" oci
+  out="$(UP_CMD=rollback up_in "$p" 2>&1)" || rc=$?
+  equals "$rc" 1
+  contains "$out" "rollback: no move is recorded"
+}
+
+# freelunch volume pull and push: an app's Docker volumes out to tar files and back in.
+test_volume_pull_and_push_copy_an_apps_volumes() {
+  local p="$WORK/volume" out dir
+  up_project "$p" oci
+  FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1
+  mkdir -p "$p/host/volumes/api_data/_data/sub"
+  echo "one" > "$p/host/volumes/api_data/_data/a.txt"
+  echo "two" > "$p/host/volumes/api_data/_data/sub/b.txt"
+  mkdir -p "$p/host/volumes/other_data/_data"
+  : > "$p/fake.log"
+  dir="$p/saved"
+  out="$(UP_CMD=volume up_in "$p" pull api --out "$dir" 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "volume: 1 volume(s) of api pulled from oci-main into"
+  exists "$dir/api_data.tar.gz"
+  fails test -e "$dir/other_data.tar.gz"
+  tar tzf "$dir/api_data.tar.gz" | grep -q 'sub/b.txt'
+  # push into a changed volume: the files come back as they were, and the app was stopped and started
+  rm -rf "$p/host/volumes/api_data/_data"/* ; echo "stale" > "$p/host/volumes/api_data/_data/old.txt"
+  : > "$p/fake.log"
+  out="$(UP_CMD=volume up_in "$p" push api "$dir" 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "volume: api_data restored"
+  equals "$(cat "$p/host/volumes/api_data/_data/sub/b.txt")" two
+  fails test -e "$p/host/volumes/api_data/_data/old.txt"
+  grep -q 'docker compose --project-directory .*/apps/api stop' "$p/fake.log"
+  grep -q 'docker compose --project-directory .*/apps/api start' "$p/fake.log"
+  # the default folder is under backups/<app>/
+  out="$(UP_CMD=volume up_in "$p" pull api 2>&1)"
+  contains "$out" "backups/api/"
+}
+
+test_volume_says_what_is_wrong() {
+  local p="$WORK/volume-errors" out rc=0
+  up_project "$p" oci
+  FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1
+  out="$(UP_CMD=volume up_in "$p" pull nothing 2>&1)" || rc=$?
+  equals "$rc" 1
+  contains "$out" "volume: no host runs an app named nothing"
+  out="$(UP_CMD=volume up_in "$p" push api "$p/no-such-dir" 2>&1)" || true
+  contains "$out" "volume: push takes the folder of .tar.gz files a pull wrote"
+  mkdir -p "$p/empty"
+  out="$(UP_CMD=volume up_in "$p" push api "$p/empty" 2>&1)" || true
+  contains "$out" "no .tar.gz files in"
+  out="$(UP_CMD=volume up_in "$p" frobnicate 2>&1)" || true
+  contains "$out" "volume: pull <app>"
+}
+
+# destroy won't take an app's data with it while nothing has a backup of it.
+test_destroy_refuses_to_remove_data_without_a_backup() {
+  local p="$WORK/destroy-data" out rc=0
+  up_project "$p" oci
+  FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["127.0.0.1:8080:8080"]\n    volumes: ["results:/var/lib/results"]\nvolumes:\n  results:\n' > "$p/compose.yaml"
+  : > "$p/fake.log"
+  out="$(UP_CMD=destroy up_in "$p" oci 2>&1)" || rc=$?
+  equals "$rc" 1
+  contains "$out" "destroy: this would remove data nothing has a backup of: api on oci-main"
+  fails grep -q 'providers/oci/stack destroy' "$p/fake.log"
+  # a backup (volume pull, or the copy a move keeps) lets it go ahead
+  mkdir -p "$p/host/volumes/api_results/_data" "$p/.freelunch/backups/api/20260101T000000Z"
+  echo x > "$p/host/volumes/api_results/_data/f"
+  UP_CMD=volume up_in "$p" pull api >/dev/null 2>&1
+  out="$(UP_CMD=destroy up_in "$p" oci 2>&1)" || { echo "$out" >&2; return 1; }
+  lacks "$out" "nothing has a backup"
+  # or --discard-data says the data may go
+  rm -rf "$p/.freelunch/backups"
+  out="$(UP_CMD=destroy up_in "$p" oci --discard-data 2>&1)" || { echo "$out" >&2; return 1; }
+  lacks "$out" "nothing has a backup"
+  out="$(UP_CMD=destroy up_in "$p" --discard-data oci 2>&1)" || true
+  fails grep -q "unknown option" <<< "$out"
+}
+
+# A VM that has restarted no longer has its host keys on the console: trust says so, and up
+# doesn't wait for keys that will not come.
+test_trust_says_a_restarted_vm_has_no_host_keys_to_read() {
+  local p="$WORK/trust-restarted" out rc=0
+  up_project "$p" oci
+  FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1
+  rm -f "$p/.freelunch/known_hosts"
+  out="$(UP_CMD=trust FAKE_CONSOLE_KEYS="" FAKE_INSTANCE_AGE=7200 up_in "$p" oci-main 2>&1)" || rc=$?
+  equals "$rc" 1
+  contains "$out" "trust: the console of oci-main no longer has its host keys: it is 2h 0m old and has restarted since its first boot"
+  rc=0
+  out="$(UP_CMD=trust FAKE_CONSOLE_KEYS="" FAKE_INSTANCE_AGE=60 up_in "$p" oci-main 2>&1)" || rc=$?
+  contains "$out" "the console of oci-main has no host keys. cloud-init prints them"
+  # up goes on at once, without the wait for a first boot
+  out="$(FAKE_UP="oci=ok" FAKE_CONSOLE_KEYS="" FAKE_INSTANCE_AGE=7200 FREELUNCH_TRUST_TIMEOUT=600 up_in "$p" 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "up: oci-main: its console no longer has the host keys (the VM has restarted since its first boot)"
+  lacks "$out" "waiting for its first boot"
+}
+
+# Cloudflare keeps refusing: up says the app is on the new host and what finishes the move.
+test_up_says_what_to_run_when_the_old_tunnel_wont_go() {
+  local p="$WORK/up-tunnel-stuck" out rc=0
+  up_project "$p" oci northflank
+  FAKE_UP="oci=capacity northflank=ok" up_in "$p" >/dev/null 2>&1
+  rm -f "$p"/fake.log.*.n
+  out="$(FAKE_UP="oci=ok cloudflare=ok,connections" FREELUNCH_TUNNEL_RETRIES=2 FREELUNCH_TUNNEL_INTERVAL=0 up_in "$p" 2>&1)" || rc=$?
+  equals "$rc" 1
+  contains "$out" "waiting (try 2 of 2)"
+  contains "$out" "The app already runs on the new host; freelunch apply cloudflare finishes the move"
+}
+
 # While the preferred target is full, the target that runs the app is kept up to date.
 test_up_keeps_a_fallback_up_to_date() {
   local p="$WORK/up-keep" out
@@ -5933,11 +6118,11 @@ test_up_keeps_an_app_with_data_where_it_is() {
   printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["127.0.0.1:8080:8080"]\n    volumes: ["results:/var/lib/results"]\nvolumes:\n  results:\n' > "$p/compose.yaml"
   : > "$p/fake.log"; rm -f "$p/fake.log.oci.n"
   out="$(FAKE_UP="oci=ok" up_in "$p" 2>&1)" || { echo "$out"; return 1; }
-  contains "$out" "up: the app keeps data in a volume, which stays on northflank, so oci aren't tried (freelunch up --move leaves the data behind and tries them)"
+  contains "$out" "up: the app keeps data in a volume, which stays on northflank, so oci aren't tried (freelunch up --move copies the data to the target it uses, and tries them)"
   lacks "$out" "up: making oci"
   fails grep -q 'providers/oci/stack apply' "$p/fake.log"
   out="$(FAKE_UP="oci=ok" up_in "$p" --move 2>&1)"
-  contains "$out" "up: --move: the data in the app's volumes stays on northflank"
+  contains "$out" "up: the data stays on northflank: volumes on a container platform aren't copied over SSH"
   contains "$out" "up: making oci"
   contains "$out" "up: northflank still runs the app, unused now"
 }
