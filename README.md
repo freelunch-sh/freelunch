@@ -6,11 +6,14 @@ an Arm VM on Oracle, a micro VM on Google, a container on Northflank, a Postgres
 and tunnels on Cloudflare, all joined in one inventory. Then deploy your project's containers
 onto it from your own repository, and move them to another provider by changing one name.
 
-> **Status:** early. Four hyperscalers are implemented (Oracle Cloud, Google Cloud, AWS and
-> Azure), Northflank for containers without a VM, and Cloudflare for tunnels and DNS, each
-> with offline test suites. GCP, AWS, Azure and Northflank have not been used against live
-> accounts yet. Every other provider is catalogued with its free tier, Terraform provider
-> and a plan. See the [checklist](#provider-checklist) and the [roadmap](#roadmap).
+> **Status:** early. Fifty-three providers are ready: four hyperscalers (Oracle Cloud, Google Cloud, AWS
+> and Azure); Northflank, Cloud Run, Scaleway and Render for containers without a VM; Cloudflare for
+> tunnels and DNS; and databases, DNS, meshes, observability, messaging, secrets, CI systems and
+> registries. Each has offline tests. **Oracle Cloud and Cloudflare have been used against live
+> accounts; the rest have not**, and each provider's README says which of its calls come from
+> documentation or a schema and should be checked on a first real run. See the [checklist](#provider-checklist), the
+> [engines plan](docs/engines-plan.md) (what is built, and what is left on purpose) and the
+> [roadmap](#roadmap).
 
 ## Principles
 
@@ -38,7 +41,7 @@ onto it from your own repository, and move them to another provider by changing 
 providers/oci/stack        ─┐                          ┌─> inventory.json / ansible / ssh_config
 providers/gcp/stack        ─┤                          │
 providers/aws/stack        ─┼─> hybrid/ (reads state) ─┤
-providers/azure/stack      ─┤   hosts and platforms    └─> glue stacks: cloudflare (DNS, tunnels), tailscale (ACLs)
+providers/azure/stack      ─┤   hosts and platforms    └─> glue stacks: cloudflare (DNS, tunnels), tailscale and netbird (mesh)
 providers/northflank/stack ─┘
 
 providers/neon/stack, providers/upstash/stack, ...   standalone services (databases, storage, monitoring)
@@ -49,6 +52,47 @@ capacity never blocks GCP, and you never need AWS credentials just to deploy to 
 `freelunch deploy` then copies your Compose apps to the hosts over SSH, or on a container
 platform turns each one into a service through the platform's API.
 Read [docs/architecture.md](docs/architecture.md) for the reasoning.
+
+### Engines: what makes each provider's resources
+
+A provider is driven by the **engine** its `provider.yaml` names, and every engine ends in the same
+contracts (`hosts`, `platforms`, `databases`, `buckets`, `services`, `mesh`), so the rest of freelunch
+does not care which one made a thing ([docs/engines.md](docs/engines.md)):
+
+| Engine | For | Examples |
+|---|---|---|
+| `tofu` | a maintained Terraform provider | OCI, Neon, Cloudflare, Sentry, NetBird |
+| `api` | an HTTP or GraphQL API, in a YAML file (`api.yaml`) | Deno Deploy, StatusCake, UptimeRobot |
+| `cli` | the vendor's command line tool (`cli.yaml`) | Turso |
+| `guided` | no usable API: prints the steps, checks the token | Back4App, Leapcell |
+| `dns` | records in a zone, each marked as the project's own with a TXT record | deSEC, Duck DNS |
+| `ci` | a CI system: `ci init` writes its pipeline from a template | CircleCI, Bitbucket, Buildkite, Azure DevOps, Codeberg |
+| `registry` | a container registry the image workflow pushes to | Docker Hub |
+
+What an `api` or `cli` engine makes is kept in the provider's **record** in the state store, encrypted
+like state, and a thing that is not in the record is never changed or deleted.
+
+### The graph: nodes, edges and journeys
+
+Every component is a **node** (a host, a platform, an app, a database, a bucket, a service, a DNS
+record, a tunnel) and a dependency between two is an **edge**. An app lists what it uses:
+
+```hcl
+# .freelunch/apps.tfvars
+apps = {
+  web = { host = "oci-edge-1", compose = "../web.yaml", needs = ["api"] }
+  api = { host = "oci-main",   compose = "../api.yaml", port = 8080, needs = ["neon-main", "axiom-logs"] }
+}
+```
+
+`freelunch deploy` then puts what an app needs first, hands it the settings of each node (a database's
+connection string, a service's key, `API_URL` for another app) and reaches the other app by the way that
+fits where the two are: a Docker network on one host, a platform's service name, a mesh address
+(Tailscale, NetBird), or a Cloudflare route. A circle, a node that does not exist, or a database or
+service that does not answer stops the deploy before anything is sent.
+`freelunch check` asks every node whether it exists, answers and is healthy, and `freelunch journey`
+follows each path from a hostname through the apps to the database and says which hop fails
+([docs/graph.md](docs/graph.md)).
 
 ## Quick start: deploy your project
 
@@ -178,14 +222,18 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 
 | Command | What it does |
 |---|---|
-| `freelunch init [--name <name>] [--image-workflow] [stack...]` | Create `.freelunch/` in your project (default stacks: `oci cloudflare`), with resources named after the project. `--image-workflow` adds a GitHub Actions workflow that builds your image for the hosts and pushes it to GHCR |
+| `freelunch init [--name <name>] [--image-workflow [--registry <p>]] [stack...]` | Create `.freelunch/` in your project (default stacks: `oci cloudflare`), with resources named after the project. `--image-workflow` adds a GitHub Actions workflow that builds your image for the hosts and pushes it to GHCR, or with `--registry` to Docker Hub or Codeberg ([registries](docs/ci.md#registries)) |
 | `freelunch deploy [host\|provider]` | Check that every image has a build for its host, copy Compose apps and their secrets to the hosts over SSH, start them, wait until healthy, start `cloudflared` (`--dry-run` to preview). On a container platform (Northflank) each app becomes a service through its API instead |
 | `freelunch trust <host>` | Pin an OCI host's SSH keys in `known_hosts` from its serial console before the first deploy, and check that the host answers with one of them |
 | `freelunch domain suggest <name...>` | Whether the name you typed is registered, then free names like it at every free domain provider, and similar ones where yours is taken ([docs/free-domains.md](docs/free-domains.md)) |
 | `freelunch domain add\|status <name>` | Put the name on Cloudflare and print the nameservers to set at its provider; say when they are set and the zone is active |
 | `freelunch state [push\|pull]`, `state init <store>` | Keep an encrypted copy of every stack's state where CI and your other machines reach it: OCI Object Storage (`state init oci` makes the bucket), R2, B2 or GitLab. Commands copy it on their own ([docs/ci.md](docs/ci.md#1-keep-the-state-in-a-store)) |
-| `freelunch agent` / `check` | Instructions for Claude Code, Codex, Cursor and Copilot that write the CI/CD workflow with freelunch as a step ([workflow template](docs/workflow-template.yml)); an offline config check for pull requests |
-| `freelunch ci init\|oidc\|secrets\|wait` | Run the project from CI: a workflow per job (provision, CI, deploy), the secrets and settings put in the repository with `gh` when you say so, keyless sign-in to AWS, Google Cloud and Azure (`ci oidc`), a wait for capacity handed to GitHub Actions with the plan you reviewed, and `FREELUNCH_BUNDLE` for one-secret setups ([docs/ci.md](docs/ci.md)) |
+| `freelunch agent` | Instructions for Claude Code, Codex, Cursor and Copilot that write the CI/CD workflow with freelunch as a step ([workflow template](docs/workflow-template.yml)) |
+| `freelunch ci init [github\|gitlab\|<ci>]`, `ci oidc\|secrets\|wait` | Run the project from CI: a workflow per job (provision, CI, deploy), or a pipeline for GitLab, CircleCI, Bitbucket, Buildkite, Azure DevOps or Codeberg, the secrets and settings put in the repository with `gh` when you say so, keyless sign-in to AWS, Google Cloud and Azure (`ci oidc`), a wait for capacity handed to GitHub Actions with the plan you reviewed, and `FREELUNCH_BUNDLE` for one-secret setups ([docs/ci.md](docs/ci.md)) |
+| `freelunch check [node] [--json]` | With a node name or `--json`: ask every node (or that one) whether it exists, answers and is healthy; exit 1 if one that should be there is not. Without: the offline config check for pull requests ([graph](docs/graph.md#nodes)) |
+| `freelunch journey [name] [--json]` | Follow each path from a hostname through the apps it needs to the database, hop by hop, and stop at the first that fails, saying which edge and why ([graph](docs/graph.md#journeys)) |
+| `freelunch dns <provider> init\|check\|status\|apply\|destroy` | Keep a project's DNS records at deSEC or Duck DNS, each marked with an ownership TXT record so records it did not make are never touched; `apply all` and `destroy all` do it too ([graph](docs/graph.md#dns-records)) |
+| `freelunch api\|cli\|guided <provider> ...` | Drive a provider that has no Terraform provider through its API, its command line tool or by hand, and keep what it made in the provider's record ([engines](docs/engines.md)) |
 | `freelunch list` | Every provider with category, status, layer, IaC support and deployment state |
 | `freelunch plan\|apply\|destroy <p...\|all>` | Run provider stacks in layer order (hosts and platforms → services → hybrid → glue). A platform's `apply` makes the target there (the Northflank project) and `destroy` deletes it with what `deploy` put in it. `plan --show-user-data` prints each host's cloud-init with secrets left out, `plan --out <file>` saves a plan and `apply --plan <file>` applies it without a prompt. `apply --wait-for-capacity` retries hosts while OCI is out of capacity, `--detach` in the background ([how](providers/oci/README.md#waiting-for-capacity)) |
 | `freelunch status` | One screen after setup: hosts and platforms, the apps on each one and whether they run, tunnels and their URLs, service token expiry, capacity waits |
@@ -220,14 +268,17 @@ freelunch/
 │   ├── gcp/, aws/, azure/         ✅ implemented, same layout as oci/
 │   ├── northflank/                ✅ container platform: a project per freelunch project, apps deployed through its API
 │   ├── cloudflare/                ✅ glue: tunnel, DNS and Access per host, plus the cloudflared app
+│   ├── tailscale/, netbird/       ✅ mesh: join keys, and each host's private address (the `mesh` output)
+│   ├── axiom/, sentry/, ...       ✅ services: an app's scoped key or URL (the service contract)
+│   ├── desec/, circleci/, ...     ✅ `dns`, `ci` and `registry` engines: dns.sh, pipeline.tpl, or registry fields
 │   └── <provider>/                provider.yaml + README for every catalogued provider
 ├── shared/modules/docker-bootstrap  provider-agnostic cloud-init: Docker, Compose apps, swap, Tailscale, hardening
 ├── hybrid/                        merges every deployed host stack into one inventory
 ├── deploy/                        resolves a project's apps.tfvars into a deploy plan per host
 ├── catalog/                       renders the checklist from providers/*/provider.yaml
 ├── examples/backend-app/          a project that deploys one container behind a tunnel
-├── tests/cli.sh                   offline tests for init, project state, deploy and domain suggest
-├── docs/                          architecture, deploying a container, running it from CI, free domains, adding a provider
+├── tests/cli.sh                   offline tests for the CLI: init, state, deploy, the graph, engines, CI
+├── docs/                          architecture and contracts, the graph, engines, CI, free domains, adding a provider, the engines plan
 └── inspire/                       local research corpus (git-ignored, not published)
 ```
 
@@ -243,9 +294,19 @@ doesn't break your project.
   Northflank's free plan when Oracle has no capacity), reach it at
   `https://api.example.com` through a Cloudflare Tunnel and DNS, and ship new versions with
   `freelunch deploy` without replacing the VM.
-- **On main since:** run the project from CI and other machines: an encrypted copy of
-  the state in a store, a GitHub Action, and a wait for capacity in GitHub Actions
-  ([docs/ci.md](docs/ci.md)).
+- **On main since:**
+  - run the project from CI and other machines: an encrypted copy of the state in a store, a GitHub
+    Action, and a wait for capacity in GitHub Actions ([docs/ci.md](docs/ci.md));
+  - **engines and the graph** ([docs/engines-plan.md](docs/engines-plan.md)): records in the state store,
+    the `api`, `cli`, `guided`, `dns`, `ci` and `registry` engines, `needs` between apps, databases,
+    buckets and services, node checks and journeys, DNS and mesh providers, and the service contract
+    with Axiom, Healthchecks.io, CloudAMQP, Doppler, Sentry, Better Stack, Ably, New Relic, StatusCake
+    and UptimeRobot;
+  - pipelines for GitLab, CircleCI, Bitbucket, Buildkite, Azure DevOps and Codeberg, and Docker Hub or
+    Codeberg as the image's registry.
+- **Not built, on purpose or for lack of a way to check it:** HCP Terraform, Spacelift and Scalr (they run
+  plans themselves), ZeroTier, ngrok, the GPU providers, and the providers whose API or tool is not
+  checked yet; the plan says why for each. **Every live-account run is still to do.**
 - **Next, in order:**
   1. **Menus:** ready-made stacks in one command, starting with the v0.1 setup.
   2. **$0 guardrails:** a budget alert on every provider and a cost summary after each plan.
