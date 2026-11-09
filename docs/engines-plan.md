@@ -71,8 +71,6 @@ Tick a box when the step is built, tested and committed. Design: [engines.md](en
 - [x] Deno Deploy: `api.yaml`, app create/delete (custom domains left out: the spec's domain endpoints were not read; the revision's `*.deno.net` address is reported)
 - [x] Deno Deploy: source upload `custom` function (`providers/deno-deploy/api.sh`)
 - [x] Deno Deploy: fixtures, tests, README, `status: ready` (`verified: fake-api`)
-- [ ] Zeabur: pin GraphQL calls from the schema (blocked: the SDL is behind a login and the endpoint can't be introspected without a key; providers/zeabur/README.md has what is known and the one query that unblocks it)
-- [ ] Zeabur: `api.yaml`, fixtures, tests, README, `status: ready`
 - [x] Back4App: `guided` (declared; the guided engine itself is section 7)
 - [x] Leapcell: `guided` (declared; the guided engine itself is section 7)
 - [x] SnapDeploy: recorded as refused (no delete): the api engine rejects a provider with no delete
@@ -92,9 +90,95 @@ Tick a box when the step is built, tested and committed. Design: [engines.md](en
 - [x] Secrets stay out of dry-run and logs
 - [x] Tests per platform path
 
+## 9. Wiring: components, edges, journeys (was phase 3)
+
+The model: every component is a **node** (a host, a platform, an app, a database, a bucket, a DNS
+zone, a mesh network). A **dependency** between two nodes is an **edge**, and networking is how an
+edge is made real. Build in this order: nodes that work alone, then the edges, then a check of a
+whole user journey. Each step is one commit, with the full suite run first.
+
+What the code has today (read before starting, so nothing is built twice):
+
+- Edges that exist, each with its own plumbing: app to host (`host`), app to bucket (`bucket`),
+  app to database (`database`, section 8), route to host or app (Cloudflare Tunnel `routes`).
+- No app-to-app edge, no declared order, and no check that follows a path through several nodes.
+  `up` picks one target from a failover list; it is not a graph walk.
+- Hosts can join Tailscale through an optional auth key in the docker-bootstrap module, and
+  `hosts.<name>.address` can point SSH at a mesh name. The mesh is not a node yet.
+
+### 9a. Nodes work alone (the gate for the rest)
+
+- [ ] Inventory: one table in `docs/graph.md` of every node type, what makes it, what it outputs,
+  and how to tell it is healthy (from `status`, `doctor` and the contracts in `architecture.md`)
+- [ ] A uniform health probe per node type, machine-readable (`freelunch check [node] --json`):
+  exists, reachable, healthy, with the reason when not. Reuses what `status` and `doctor` already ask
+- [ ] Tests: the probe for each node type against the fakes, healthy and broken
+- [ ] Live run of each node type that has none yet (needs your accounts, listed in `docs/graph.md`
+  with the exact command and what to look for). Not blocked for building, but 9d cannot be marked
+  `verified` without it
+
+### 9b. The graph, made explicit
+
+- [ ] Format: an app declares `needs`, a list of other nodes (apps in `apps.tfvars`, plus the existing
+  `bucket` and `database`, which stay and mean the same as a need). Decide and write down in
+  `docs/graph.md`: field names, and an app's `port` (so a dependant knows where to reach it)
+- [ ] Parse and validate: unknown node, a cycle, a need on a node that is not deployed. Errors name
+  the app and the missing node, and stop before anything is sent (like the unknown-database check)
+- [ ] Order: dependencies first for `apply`, `deploy` and `up`; reverse for `destroy`. Nodes with
+  nothing between them keep today's order
+- [ ] Output of a node feeds the dependant's input, through one function instead of one per edge
+  type (the database path is the model: outputs, then the app's environment, secrets kept out of logs)
+- [ ] Existing `bucket` and `database` run through that function with no change in behaviour
+- [ ] A dependant is not deployed against a dependency that is unhealthy (uses the 9a probe)
+- [ ] Tests: order, cycle, missing node, reverse destroy, the old fields unchanged, secrets not in
+  the dry run or the logs
+- [ ] `docs/graph.md` and `deploy/README.md`
+
+### 9c. Edge media: how an edge becomes reachable
+
+The same `needs` resolves to a different address depending on where the two nodes are:
+
+| Dependant and dependency | Reached through |
+|---|---|
+| same host | the Compose network, by service name |
+| same platform | the platform's service name (what `cloudflared` already uses) |
+| different nodes, public | a Cloudflare route's hostname (exists) |
+| different nodes, private | a mesh address (Tailscale first) |
+
+- [ ] The resolver: given two nodes, pick the medium, and give the dependant `<NAME>_URL` in its
+  environment. Say in `docs/graph.md` which medium was chosen and why; fail when none applies
+- [ ] The mesh as a node: a network (Tailscale first) makes a join key, hosts join on first boot
+  (extends the existing docker-bootstrap key), its outputs give each host's private address
+- [ ] Mesh addresses used for SSH and for edges (replaces hand-written `hosts.<name>.address`)
+- [ ] DNS as a node: a zone provider makes records for a route's hostname (see 9d)
+- [ ] Tests per row of the table, and the failure when no medium applies
+- [ ] A hybrid example in `docs/graph.md`: frontend on one host, backend on another, a database
+
+### 9d. Providers that make the media (the old phase 3 list)
+
+Each is a `tofu` stack or an `api`/`cli` definition, with a fake and the same tests as its
+neighbours. None can be `verified` without a live run.
+
+- [ ] DNS: deSEC and DuckDNS first (small HTTP APIs, `api` engine), then ClouDNS and Gcore (`tofu`)
+- [ ] Mesh: Tailscale first, then NetBird and ZeroTier (same contract)
+- [ ] Ingress: ngrok, as another way a route can be reached
+- [ ] Deferred until the contracts above are settled: Namecheap (API needs an IP allow-list, awkward
+  in CI), Firezone, Twingate, Defined Networking (team and SSO products)
+
+### 9e. Journeys
+
+- [ ] A journey is a path through the graph (user, hostname, frontend, backend, database). Derived
+  from `needs` and routes, no new file
+- [ ] `freelunch journey [name]` probes each hop in order and stops at the first that fails, saying
+  which edge and why
+- [ ] `--json` output, so CI can use it
+- [ ] `ci init` offers to run it after a deploy (ask first, like the first run)
+- [ ] Tests: a passing path, a broken hop in each position, a path with no route
+- [ ] Live acceptance: one real path across two clouds (needs your accounts)
+
 ## Later phases (from the rollout)
 
-- [ ] Phase 3: networking and DNS glue
+- [ ] Phase 3: networking and DNS glue: now section 9 above
 - [ ] Phase 4: secrets, observability, messaging
 - [ ] Phase 5: IaC state, CI, registries
 - [ ] Phase 6: no-provider and stale-provider cases (uses the `api` and `cli` engines)
