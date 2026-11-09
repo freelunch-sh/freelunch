@@ -3667,10 +3667,77 @@ up_trust() {
   done
 }
 
+# --- moving the tunnel with the app ---------------------------------------------------
+#
+# A Cloudflare tunnel belongs to one host. When up moves the app, the routes go to the new
+# host's tunnel and the old host's tunnel is deleted, and two things can go wrong: the address
+# points at the new tunnel before cloudflared runs there, and Cloudflare won't delete a tunnel
+# that still has connections. So the new host's tunnel is made first (and only that), deploy
+# starts cloudflared and the app, and only then do the routes move and the old tunnel go.
+
+# up_tunnels: "host<TAB>tunnel id" for each tunnel the Cloudflare stack has now
+up_tunnels() {
+  local state; state="$(config_dir cloudflare)/terraform.tfstate"
+  [[ -f "$state" ]] || return 0
+  jq -r '(.outputs.tunnels.value // {}) | to_entries[] | [.key, .value] | @tsv' "$state" 2>/dev/null || true
+}
+
+# up_make_tunnel <host>: apply the Cloudflare stack for <host>'s tunnel alone, so the routes
+# and the other tunnels stay as they are
+up_make_tunnel() {
+  local mod='module.tunnel.cloudflare_zero_trust_tunnel_cloudflared.host' cfg='module.tunnel.cloudflare_zero_trust_tunnel_cloudflared_config.host'
+  local tok='module.tunnel.data.cloudflare_zero_trust_tunnel_cloudflared_token.host'
+  cmd_lifecycle apply cloudflare -- "-target=${mod}[\"$1\"]" "-target=${cfg}[\"$1\"]" "-target=${tok}[\"$1\"]"
+}
+
+# up_stop_cloudflared <host>: stop cloudflared on a host that no longer serves the app, so its
+# tunnel has no connections left. Best effort: the host may be gone or its key not pinned.
+up_stop_cloudflared() {
+  local host="$1" provider="${1%%-*}" address user
+  IFS=$'\t' read -r address user < <(jq -r --arg h "$host" '.outputs.hosts.value[]? | select("\(.provider)-\(.name)" == $h) | [(.public_ip // .private_ip // ""), (.ssh_user // "ubuntu")] | @tsv' "$(config_dir "$provider")/terraform.tfstate" 2>/dev/null) || true
+  [[ -n "${address:-}" ]] || return 1
+  ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1 || return 1
+  ssh_options yes
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  printf '%s\n' 'cd /opt/freelunch/apps/cloudflared 2>/dev/null && docker compose stop' \
+    | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' >/dev/null 2>&1
+}
+
+# up_move_routes <old tunnels, "host<TAB>id" lines>: apply the whole Cloudflare stack, which moves
+# the routes and deletes the tunnels of hosts that have none now. Cloudflare refuses to delete a
+# tunnel with connections, so cloudflared is stopped on those hosts first, and a refusal is
+# waited out and retried (FREELUNCH_TUNNEL_RETRIES times, FREELUNCH_TUNNEL_INTERVAL seconds apart).
+up_move_routes() {
+  local old="$1" host id tries=0 max="${FREELUNCH_TUNNEL_RETRIES:-10}" out rc
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  out="$TMP/cloudflare-move.out"
+  while IFS=$'\t' read -r host id; do
+    [[ -n "$host" ]] || continue
+    if up_stop_cloudflared "$host"; then log "up: stopped cloudflared on $host, so its tunnel can go"
+    else log "up: couldn't stop cloudflared on $host (unreachable, or its key isn't pinned); its tunnel is deleted once it disconnects"; fi
+  done <<< "$old"
+  while :; do
+    # A job of its own, waited for: inside an if or ||, bash would turn set -e off and a failed
+    # apply would carry on as if it had worked.
+    rc=0
+    ( cmd_lifecycle apply cloudflare ) > "$out" 2>&1 &
+    wait "$!" || rc=$?
+    if [[ $rc -eq 0 ]]; then cat "$out" >&2; return 0; fi
+    if grep -qiE 'active connections|has active connection|\(1022\)' "$out" && [[ $tries -lt $max ]]; then
+      tries=$((tries + 1))
+      log "up: Cloudflare won't delete the old tunnel while it has connections; waiting (try $tries of $max)"
+      sleep "${FREELUNCH_TUNNEL_INTERVAL:-15}"
+      continue
+    fi
+    cat "$out" >&2
+    die "up: the routes could not move to the new tunnel (above). The app already runs on the new host; freelunch apply cloudflare finishes the move once the old tunnel has no connections"
+  done
+}
+
 cmd_up() {
   need_tf
   command -v jq >/dev/null || die "jq is required for 'up'"
-  local dry_run=0 move=0 a t list chosen="" tried=() skipped=() rc reason out host others=() tunnel verb=runs
+  local dry_run=0 move=0 a t list chosen="" tried=() skipped=() rc reason out host others=() tunnel verb=runs old_tunnels="" moving=0
   for a in "$@"; do
     case "$a" in
       --dry-run) dry_run=1 ;;
@@ -3770,13 +3837,24 @@ cmd_up() {
       tunnel="$(jq -r 'if .outputs.platforms.value[0].tunnel == false then "no" else "yes" end' "$(config_dir "$chosen")/terraform.tfstate")"
     fi
     if [[ "$tunnel" == yes ]]; then
-      cmd_lifecycle apply cloudflare
+      # Tunnels of other hosts, when this host has none yet: the app is moving.
+      old_tunnels="$(up_tunnels | awk -F'\t' -v h="$host" '$1 != h')"
+      if [[ -n "$old_tunnels" ]] && ! up_tunnels | awk -F'\t' -v h="$host" '$1 == h { f = 1 } END { exit !f }'; then
+        log "up: making the tunnel of $host first; the address keeps going to $(cut -f1 <<< "$old_tunnels" | paste -sd' ' -) until $host runs the app"
+        up_make_tunnel "$host"
+        moving=1
+      else
+        old_tunnels=""
+        cmd_lifecycle apply cloudflare
+      fi
     else
       log "up: $host serves the app at its own address and can't hold a Cloudflare tunnel, so the routes stay as they are"
     fi
   fi
   [[ "$chosen" != "oci" ]] || up_trust "$host"
   cmd_deploy
+  # cloudflared runs on the new host now: move the routes there and drop the old tunnel.
+  [[ $moving -eq 0 ]] || up_move_routes "$old_tunnels"
   local urls=""
   [[ ! -f "$TMP/urls" ]] || urls="$(awk -F'\t' -v h="$host" '$1 == h { print $2 }' "$TMP/urls" | sort -u | paste -sd' ' -)"
   if [[ -n "$urls" ]]; then

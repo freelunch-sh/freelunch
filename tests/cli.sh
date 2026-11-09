@@ -910,6 +910,7 @@ case "${2:-}" in
       aws)      echo "│ Error: creating EC2 Instance: operation error EC2: RunInstances, api error InsufficientInstanceCapacity: We currently do not have sufficient t4g.small capacity in the Availability Zone you requested."; exit 1 ;;
       gcp)      echo "│ Error: Error waiting for instance to create: The zone 'projects/p/zones/us-central1-a' does not have enough resources available to fulfill the request. (ZONE_RESOURCE_POOL_EXHAUSTED)"; exit 1 ;;
       azure)    echo "│ Error: creating Linux Virtual Machine: unexpected status 409 (409 Conflict) with error: ZonalAllocationFailed: Allocation failed. We do not have sufficient capacity for the requested VM size in this zone."; exit 1 ;;
+      connections) echo "│ Error: failed to delete tunnel: Cannot delete tunnel because it has active connections (1022)"; exit 1 ;;
       quota)    echo "│ Error: creating EC2 Instance: operation error EC2: RunInstances, api error VcpuLimitExceeded: You have requested more vCPU capacity than your current vCPU limit of 0 allows."; exit 1 ;;
     esac
     case "$stack:$default" in
@@ -5784,6 +5785,40 @@ test_up_moves_to_the_preferred_target_when_it_has_room() {
   contains "$out" "oci-main: https://api.example.com"
   contains "$out" "up: northflank still runs the app, unused now. freelunch destroy northflank removes them"
   exists "$p/nf/services/freelunch/api.json"
+}
+
+# The app moves to another host: the new host's tunnel is made on its own first, deploy runs
+# cloudflared there, and only then do the routes move and the old tunnel go. Cloudflare refusing
+# to delete a tunnel that still has connections is waited out.
+test_up_makes_the_new_tunnel_first_and_moves_the_routes_after_the_deploy() {
+  local p="$WORK/up-tunnel-move" out first second
+  up_project "$p" oci northflank
+  FAKE_UP="oci=capacity northflank=ok" up_in "$p" >/dev/null 2>&1
+  : > "$p/fake.log"; rm -f "$p"/fake.log.*.n
+  out="$(FAKE_UP="oci=ok cloudflare=ok,connections,ok" FREELUNCH_TUNNEL_INTERVAL=0 up_in "$p" 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "up: making the tunnel of oci-main first; the address keeps going to northflank-main until oci-main runs the app"
+  contains "$out" "Cloudflare won't delete the old tunnel while it has connections; waiting (try 1 of 10)"
+  contains "$out" "oci-main: https://api.example.com"
+  equals "$(grep -c 'providers/cloudflare/stack apply' "$p/fake.log")" 3
+  first="$(grep -n 'providers/cloudflare/stack apply' "$p/fake.log" | sed -n 1p)"
+  second="$(grep -n 'providers/cloudflare/stack apply' "$p/fake.log" | sed -n 2p)"
+  contains "$first" '-target=module.tunnel.cloudflare_zero_trust_tunnel_cloudflared.host["oci-main"]'
+  contains "$first" '-target=module.tunnel.data.cloudflare_zero_trust_tunnel_cloudflared_token.host["oci-main"]'
+  lacks "$second" "-target"
+  # the deploy (ssh to the host) comes between the targeted apply and the one that moves the routes
+  awk -v a="${first%%:*}" -v b="${second%%:*}" 'NR > a && NR < b && /^ssh /' "$p/fake.log" | grep -q .
+}
+
+# Cloudflare keeps refusing: up says the app is on the new host and what finishes the move.
+test_up_says_what_to_run_when_the_old_tunnel_wont_go() {
+  local p="$WORK/up-tunnel-stuck" out rc=0
+  up_project "$p" oci northflank
+  FAKE_UP="oci=capacity northflank=ok" up_in "$p" >/dev/null 2>&1
+  rm -f "$p"/fake.log.*.n
+  out="$(FAKE_UP="oci=ok cloudflare=ok,connections" FREELUNCH_TUNNEL_RETRIES=2 FREELUNCH_TUNNEL_INTERVAL=0 up_in "$p" 2>&1)" || rc=$?
+  equals "$rc" 1
+  contains "$out" "waiting (try 2 of 2)"
+  contains "$out" "The app already runs on the new host; freelunch apply cloudflare finishes the move"
 }
 
 # While the preferred target is full, the target that runs the app is kept up to date.
