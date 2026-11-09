@@ -122,6 +122,12 @@ variable "extra_database_credentials" {
   sensitive   = true
 }
 
+variable "service_state_paths" {
+  description = "State files of the stacks that make services (outputs services and service_credentials): secrets, observability, messaging."
+  type        = list(string)
+  default     = []
+}
+
 variable "tunnel_state_path" {
   description = "State file of the cloudflare stack, or null when it is not deployed."
   type        = string

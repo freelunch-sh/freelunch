@@ -179,10 +179,27 @@ neighbours. None can be `verified` without a live run.
 - [x] Tests: a passing path, a broken hop in each position, a path with no route
 - [ ] Live acceptance: one real path across two clouds (needs your accounts)
 
+## 10. Services: secrets, observability, messaging (was phase 4)
+
+The contract first, then providers against it. A stack outputs `services` and `service_credentials`;
+an app's `needs` names one and gets the variables the service names
+([architecture.md](architecture.md#service-contract)).
+
+- [x] The service contract: `services`, `service_credentials` (`env`), written in `architecture.md`
+- [x] `deploy/` reads it (`service_state_paths`), a service is a node an app can need, an unknown one is refused
+- [x] `freelunch check` probes a service where it says it answers; the deploy gate holds an app back
+- [x] Tests: `deploy/` (tofu), and an app that needs a service through the CLI, with the secret out of the dry run
+- [x] Axiom (observability), Healthchecks.io (observability), CloudAMQP (messaging), Doppler (secrets)
+- [ ] The other secrets providers: Infisical, Akeyless, Bitwarden Secrets, Phase
+- [ ] The other observability providers (Better Stack, Grafana Cloud, Datadog, Honeycomb, StatusCake...)
+- [ ] The other messaging providers (Ably, Synadia, Confluent, Redpanda)
+- [ ] A service from an `api` or `cli` engine, through its record
+- [ ] Live-account run for each
+
 ## Later phases (from the rollout)
 
 - [ ] Phase 3: networking and DNS glue: now section 9 above (built except the 9d providers still unchecked there, and the live runs)
-- [ ] Phase 4: secrets, observability, messaging
+- [ ] Phase 4: secrets, observability, messaging: now section 10 above (contract and four providers built)
 - [ ] Phase 5: IaC state, CI, registries
 - [ ] Phase 6: no-provider and stale-provider cases (uses the `api` and `cli` engines)
 - [ ] SingleStore: unblocked only if a provider can create a free workspace

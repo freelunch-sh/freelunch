@@ -4051,6 +4051,40 @@ test_dns_duckdns_sets_and_clears_the_listed_names() {
   if out="$(dns_in "$p" dns desec status 2>&1)"; then echo "status should have failed"; return 1; fi
 }
 
+# --- services (secrets, observability, messaging) -----------------------------------------------
+
+# give_service <project>: the axiom stack "applied" from a fixture
+give_service() {
+  mkdir -p "$1/.freelunch/axiom"
+  cp "$ROOT/deploy/tests/fixtures/service.tfstate" "$1/.freelunch/axiom/terraform.tfstate"
+}
+
+# An app that needs a service gets the variables the service names, as they are; the secret stays
+# out of the dry run; the service is a node that check asks and that holds the deploy back.
+test_a_service_in_needs_reaches_the_app() {
+  local p="$WORK/svc" out
+  graph_project "$p" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", needs = ["axiom-logs"] }'
+  give_service "$p"
+  out="$(GHCR_TOKEN=x deploy_in "$p" --dry-run 2>&1)"
+  lacks "$out" "xaat-mock-service-token"
+  GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  contains "$(cat "$p/host/apps/api/.env")" "AXIOM_TOKEN=xaat-mock-service-token"
+  contains "$(cat "$p/host/apps/api/.env")" "AXIOM_DATASET=shop-logs"
+  out="$(check_in "$p" --json)"
+  equals "$(jq -r '.[] | select(.node == "axiom-logs") | "\(.type) \(.healthy)"' <<< "$out")" "service true"
+  contains "$(cat "$p/fake.log")" "nc -z -w 5 api.axiom.co 443"
+  # a service that doesn't answer holds the deploy back, before anything is sent
+  rm -r "$p/host"
+  if out="$(FAKE_TCP_DOWN="api.axiom.co" GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "api needs axiom-logs: nothing answers at api.axiom.co:443"
+  lacks "$out" "xaat-mock-service-token"
+  # a service no stack made is named, with the nodes there are
+  sed -i.bak 's|axiom-logs|axiom-nonesuch|' "$p/.freelunch/apps.tfvars"
+  if out="$(GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "api (needs axiom-nonesuch)"
+  contains "$out" "axiom-logs"
+}
+
 # A provider's engine is what its provider.yaml says, or what its iac implies.
 test_engine_of_defaults_from_iac() {
   equals "$("$CLI" engine render)" tofu

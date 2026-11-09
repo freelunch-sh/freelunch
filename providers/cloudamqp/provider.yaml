@@ -2,7 +2,7 @@
 name: cloudamqp
 display_name: "CloudAMQP"
 category: messaging
-status: planned
+status: ready
 layer: service
 terraform_provider: "cloudamqp/cloudamqp"
 iac: community
@@ -10,8 +10,9 @@ free_tier_type: always-free
 free_tier: "Little Lemur RabbitMQ: 1M messages/month, 20 connections, 100 queues"
 card_required: "no"
 url: "https://www.cloudamqp.com/plans.html"
+secrets: "CLOUDAMQP_APIKEY=CloudAMQP API key"
 last_verified: "2026-10-18"
-notes: null
+notes: "Makes the one free Little Lemur instance; an app that needs it gets AMQP_URL (docs/architecture.md#service-contract). Not yet run against a real account."
 sources:
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"

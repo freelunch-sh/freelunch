@@ -1,7 +1,7 @@
 # The graph: nodes, edges, journeys
 
 Plan: section 9 of [engines-plan.md](engines-plan.md). This page grows with each step; today it
-holds the node inventory and the health probe (9a) the `needs` format (9b), edge media and the mesh (9c), journeys (9e), and DNS records (9d).
+holds the node inventory and the health probe (9a) the `needs` format (9b), edge media and the mesh (9c), journeys (9e), DNS records (9d), and services (10).
 
 ## Nodes
 
@@ -30,6 +30,7 @@ answer never fails it.
 | `app` | `freelunch deploy` | its name in `apps.tfvars` | its address, from a route or the platform | on a host: its containers are there / the host is reached / all running, and healthy where they have a healthcheck. On a platform: not asked yet |
 | `database` | a stack with `databases` output, or an engine's record | `<provider>-<name>` (`neon-main`) | `databases`, `database_credentials` ([database contract](architecture.md#database-contract)) | in the state / TCP connect to `host:port` / same (a database that scales to zero wakes on the first connection) |
 | `bucket` | a stack with `buckets` output | `<provider>-<name>` (`backblaze-b2-results`) | `buckets`, `bucket_keys` ([storage contract](architecture.md#storage-contract)) | in the state / TCP connect to the endpoint on 443 / same |
+| `service` | a stack with a `services` output: secrets, observability, messaging ([service contract](architecture.md#service-contract)) | `<provider>-<name>` (`axiom-logs`) | `services`, `service_credentials` | in the state / TCP connect to `host:port` when it gave one / same |
 | `tunnel` | the `cloudflare` stack (one per host or platform with routes) | `tunnel-<target>` | `tunnels`, `routes` | in the state / Cloudflare reports it connected / status `healthy`. Needs `CLOUDFLARE_API_TOKEN`; `null` without |
 
 Not nodes yet: a DNS zone (the `cloudflare` zone is checked by `doctor`), a mesh network (9c), and
@@ -191,3 +192,18 @@ names you list, and says so.
 
 [ClouDNS](../providers/cloudns/README.md) and [Gcore](../providers/gcore/README.md) are plain `tofu` stacks (the state is the ownership); [deSEC](../providers/desec/README.md) is the first `dns` engine provider; [Duck DNS](../providers/duckdns/README.md)
 the update-only one. Nothing here has run against a live account.
+
+## Services
+
+A service is a node an app uses through a token, a URL or a key: a secrets manager, an observability
+tool, a message broker. Its stack outputs `services` and `service_credentials`
+([the contract](architecture.md#service-contract)); an app says `needs = ["axiom-logs"]` and gets
+exactly the environment variables the service names (`AXIOM_TOKEN`, `AMQP_URL`, `DOPPLER_TOKEN`),
+unprefixed, because its own tools read fixed names. The token an app gets is scoped to what it needs.
+`freelunch check` asks the service where it says it answers, and `deploy` holds an app back while a
+service it needs doesn't answer, like a database or bucket in `needs`.
+
+Built against the contract: [Axiom](../providers/axiom/README.md) and
+[Healthchecks.io](../providers/healthchecks-io/README.md) (observability),
+[CloudAMQP](../providers/cloudamqp/README.md) (messaging), [Doppler](../providers/doppler/README.md)
+(secrets). A service from an `api` or `cli` engine, through its record, is not read yet.

@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export DOPPLER_TOKEN (or put it in .freelunch/.env): a personal token, or a
+# service account's, that may create projects. Free for 5 users.
+
+# One project per entry. The app gets a read-only token for one of its configs (dev, stg, prd).
+projects = {
+  main = { config = "prd" }
+}

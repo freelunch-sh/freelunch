@@ -34,6 +34,15 @@ data "terraform_remote_state" "databases" {
   config  = { path = each.value }
 }
 
+# Stacks that make services (secrets, observability, messaging) output them as services
+# (docs/architecture.md#service-contract), and what an app gets as service_credentials.
+data "terraform_remote_state" "services" {
+  for_each = toset([for p in var.service_state_paths : p if fileexists(p)])
+
+  backend = "local"
+  config  = { path = each.value }
+}
+
 locals {
   inventory = { for h in try(data.terraform_remote_state.inventory[0].outputs.hosts, []) : "${h.provider}-${h.name}" => h }
   platforms = { for p in try(data.terraform_remote_state.inventory[0].outputs.platforms, []) : "${p.provider}-${p.name}" => p }
@@ -63,7 +72,11 @@ locals {
   # The graph: an app's effective needs are its needs plus its bucket and database.
   needs = { for name, a in var.apps : name => distinct(concat(a.needs, compact([a.bucket, a.database]))) }
   # The nodes a need can name: other apps, buckets and databases.
-  need_nodes = setunion(keys(var.apps), keys(local.buckets), keys(local.databases))
+  services = merge(concat([{}], [for s in data.terraform_remote_state.services : { for x in try(s.outputs.services, []) : "${x.provider}-${x.name}" => x }])...)
+  # What a service hands the app that needs it: the variables it names, as they are
+  # (its tools read them by their own names: AXIOM_TOKEN, AMQP_URL).
+  service_env = merge(concat([{}], [for s in data.terraform_remote_state.services : { for n, c in try(nonsensitive(s.outputs.service_credentials), {}) : n => c.env }])...)
+  need_nodes  = setunion(keys(var.apps), keys(local.buckets), keys(local.databases), keys(local.services))
   unknown_needs = sort(flatten([
     for name, ns in local.needs : [for n in ns : "${name} (needs ${n})" if !contains(local.need_nodes, n) && !(n == var.apps[name].bucket || n == var.apps[name].database)]
   ]))
@@ -122,6 +135,7 @@ locals {
     for name, a in var.apps : name => merge(concat(
       [for n in compact([a.bucket, a.database]) : try(local.legacy_env[n], {})],
       [for n in a.needs : try(local.need_env[n], {})],
+      [for n in a.needs : try(local.service_env[n], {})],
       [{}]
     )...)
     if length(compact([a.bucket, a.database])) > 0 || length(a.needs) > 0

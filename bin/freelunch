@@ -2630,6 +2630,18 @@ database_states() {
   done | jq -Rsc 'split("\n") | map(select(length > 0))'
 }
 
+# service_states <apps file>: the state files of deployed stacks that make services (secrets,
+# observability, messaging), as a JSON list; empty unless an app names a node
+service_states() {
+  local p state
+  apps_use_database "$1" || { echo '[]'; return 0; }
+  for p in $(all_providers); do
+    if [[ ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
+    state="$(config_dir "$p")/terraform.tfstate"
+    if jq -e '.outputs.services' "$state" >/dev/null 2>&1; then echo "$state"; fi
+  done | jq -Rsc 'split("\n") | map(select(length > 0))'
+}
+
 # database_records <apps file> <var file>: databases that engines without a state file (api, cli)
 # made, from the outputs of their records in the state store, as a var file for deploy/ (so
 # the credentials are never on a command line). A record holds them as
@@ -2662,6 +2674,7 @@ deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
   args+=(-var "storage_state_paths=$(storage_states)")
   args+=(-var "mesh=$(mesh_nodes)")
   args+=(-var "database_state_paths=$(database_states "$apps_file")")
+  args+=(-var "service_state_paths=$(service_states "$apps_file")")
   if database_records "$apps_file" "$TMP/databases.tfvars.json"; then args+=(-var-file="$TMP/databases.tfvars.json"); fi
   default="$(default_host)"
   if [[ -n "$default" ]]; then args+=(-var "default_host=$default"); fi
@@ -7268,6 +7281,13 @@ probe_stack_nodes() {
     while IFS=$'\t' read -r row host; do
       [[ -n "$row" ]] && probe_tcp "$row" bucket "$host" 443
     done < <(jq -r '.outputs.buckets.value[]? | ["\(.provider)-\(.name)", (.endpoint | sub("^https?://"; "") | sub("[:/].*$"; ""))] | @tsv' "$state" 2>/dev/null)
+    # a service (secrets, observability, messaging) that gave an address is asked there; one that
+    # gave none is only known to exist
+    while IFS=$'\x1f' read -r row host port; do
+      [[ -n "$row" ]] || continue
+      if [[ -n "$host" && -n "$port" ]]; then probe_tcp "$row" service "$host" "$port"
+      else probe_row "$row" service true null null "it gave no address to ask"; fi
+    done < <(jq -r '.outputs.services.value[]? | ["\(.provider)-\(.name)", (.host // ""), (.port // "" | tostring)] | join("\u001f")' "$state" 2>/dev/null)
   done
 }
 

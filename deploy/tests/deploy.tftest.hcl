@@ -787,3 +787,35 @@ run "an_address_in_apps_tfvars_beats_the_mesh" {
     error_message = "A hand-written address wins."
   }
 }
+
+run "a_need_on_a_service_gives_the_variables_it_names" {
+  command = plan
+
+  variables {
+    service_state_paths = ["tests/fixtures/service.tfstate"]
+    apps = {
+      api = { host = "oci-main", compose = "compose.yaml", needs = ["axiom-logs"] }
+      web = { host = "oci-main", compose = "compose.yaml" }
+    }
+  }
+
+  assert {
+    condition     = nonsensitive(output.app_env.api) == { AXIOM_TOKEN = "xaat-mock-service-token", AXIOM_DATASET = "shop-logs" } && !contains(keys(output.app_env), "web")
+    error_message = "A service gives the app the variables it names, as they are, and an app that doesn't need it gets nothing."
+  }
+
+  assert {
+    condition     = join(",", output.graph.api.needs) == "axiom-logs"
+    error_message = "A service is a node an app can need."
+  }
+}
+
+run "a_need_on_a_service_nobody_made_is_refused" {
+  command = plan
+
+  variables {
+    apps = { api = { host = "oci-main", compose = "compose.yaml", needs = ["axiom-logs"] } }
+  }
+
+  expect_failures = [output.graph]
+}

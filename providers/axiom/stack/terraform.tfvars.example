@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: the Axiom provider takes its token as an argument, so give it as
+# TF_VAR_api_token in .freelunch/.env (Axiom > Settings > API tokens; it needs to be able to
+# create datasets and tokens).
+
+# One dataset per entry; the free plan keeps 30 days.
+datasets = {
+  logs = {}
+  # traces = { retention_days = 7 }
+}
