@@ -11,3 +11,5 @@ inventory.json
 */wait.state
 */approved.json
 *.tfplan
+backups/
+up-move.state

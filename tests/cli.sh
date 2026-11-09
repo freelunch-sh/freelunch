@@ -6069,11 +6069,11 @@ test_up_keeps_an_app_with_data_where_it_is() {
   printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["127.0.0.1:8080:8080"]\n    volumes: ["results:/var/lib/results"]\nvolumes:\n  results:\n' > "$p/compose.yaml"
   : > "$p/fake.log"; rm -f "$p/fake.log.oci.n"
   out="$(FAKE_UP="oci=ok" up_in "$p" 2>&1)" || { echo "$out"; return 1; }
-  contains "$out" "up: the app keeps data in a volume, which stays on northflank, so oci aren't tried (freelunch up --move leaves the data behind and tries them)"
+  contains "$out" "up: the app keeps data in a volume, which stays on northflank, so oci aren't tried (freelunch up --move copies the data to the target it uses, and tries them)"
   lacks "$out" "up: making oci"
   fails grep -q 'providers/oci/stack apply' "$p/fake.log"
   out="$(FAKE_UP="oci=ok" up_in "$p" --move 2>&1)"
-  contains "$out" "up: --move: the data in the app's volumes stays on northflank"
+  contains "$out" "up: the data stays on northflank: volumes on a container platform aren't copied over SSH"
   contains "$out" "up: making oci"
   contains "$out" "up: northflank still runs the app, unused now"
 }

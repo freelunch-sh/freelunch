@@ -68,7 +68,8 @@ Project:
                           Apps and routes without a host go to that target. It asks nothing,
                           so a push can run it, and running it again is safe. --dry-run says which
                           target it would use. An app with a volume stays on the target that runs it;
-                          --move lets a target above it take the app, data left behind
+                          --move lets a target above it take the app, with its volumes copied
+                          (between VMs; a backup stays in .freelunch/backups)
   volume pull <app> [--host h] [--out dir]
   volume push <app> <dir> [--host h]
                           Copy an app's Docker volumes (Compose named volumes) from its host
@@ -3686,6 +3687,14 @@ up_trust() {
 # project it belongs to, and a project is the app's folder, so the volumes of an app are the
 # ones labelled with its name. A volume is copied as a tar of its mountpoint, through SSH.
 
+# host_ssh_info <host>: "address<TAB>ssh user" of a VM in the inventory, whatever apps it has
+host_ssh_info() {
+  local state=()
+  [[ -z "$PROJECT" ]] || state=(-state="$(hybrid_state)")
+  tf_for hybrid "$ROOT/hybrid" output ${state[@]+"${state[@]}"} -json hosts 2>/dev/null \
+    | jq -r --arg h "$1" '.[] | select("\(.provider)-\(.name)" == $h) | [(.public_ip // .private_ip // ""), (.ssh_user // "ubuntu")] | @tsv' | head -n1
+}
+
 # vol_target <app> [host]: the VM host an app runs on, as VOL_HOST, VOL_ADDR and VOL_USER, with
 # SSH set up to pinned keys only (nothing here trusts a key it sees first)
 vol_target() {
@@ -3700,11 +3709,16 @@ vol_target() {
   VOL_HOST="$want"
   [[ -n "$VOL_HOST" ]] || VOL_HOST="$(jq -r --arg a "$app" 'to_entries[] | select(.value.apps | has($a)) | .key' "$TMP/targets.json" | head -n1)"
   [[ -n "$VOL_HOST" ]] || die "volume: no host runs an app named $app (apps: $(jq -r '[.[].apps | keys[]] | unique | join(", ")' "$TMP/targets.json"))"
-  jq -e --arg h "$VOL_HOST" 'has($h)' "$TMP/targets.json" >/dev/null || die "volume: $VOL_HOST is not a host of this project (hosts: $(jq -r 'keys | join(", ")' "$TMP/targets.json"))"
-  kind="$(jq -r --arg h "$VOL_HOST" '.[$h].kind' "$TMP/targets.json")"
-  [[ "$kind" != platform ]] || die "volume: $VOL_HOST is a container platform; its volumes are copied with the provider's own tools, not over SSH"
-  VOL_ADDR="$(jq -r --arg h "$VOL_HOST" '.[$h].address // empty' "$TMP/targets.json")"
-  VOL_USER="$(jq -r --arg h "$VOL_HOST" '.[$h].user' "$TMP/targets.json")"
+  if jq -e --arg h "$VOL_HOST" 'has($h)' "$TMP/targets.json" >/dev/null; then
+    kind="$(jq -r --arg h "$VOL_HOST" '.[$h].kind' "$TMP/targets.json")"
+    [[ "$kind" != platform ]] || die "volume: $VOL_HOST is a container platform; its volumes are copied with the provider's own tools, not over SSH"
+    VOL_ADDR="$(jq -r --arg h "$VOL_HOST" '.[$h].address // empty' "$TMP/targets.json")"
+    VOL_USER="$(jq -r --arg h "$VOL_HOST" '.[$h].user' "$TMP/targets.json")"
+  else
+    # a host that has no app in the plan now (the app moved off it): the inventory knows it
+    IFS=$'\t' read -r VOL_ADDR VOL_USER < <(host_ssh_info "$VOL_HOST") || true
+    [[ -n "${VOL_ADDR:-}" ]] || die "volume: $VOL_HOST is not a host of this project (hosts: $(jq -r 'keys | join(", ")' "$TMP/targets.json"))"
+  fi
   [[ -n "$VOL_ADDR" ]] || die "volume: $VOL_HOST has no address"
   ssh_options yes
   ssh-keygen -F "$VOL_ADDR" -f "$(state_root)/known_hosts" >/dev/null 2>&1 || die "volume: the host key of $VOL_HOST isn't pinned yet: freelunch trust $VOL_HOST"
@@ -3726,6 +3740,11 @@ vol_pull() {
   vols="$(vol_list "$app")" || die "volume: can't list the volumes of $app on $VOL_HOST"
   [[ -n "$vols" ]] || { log "volume: $app has no Docker volumes on $VOL_HOST"; return 0; }
   mkdir -p "$dir"
+  # VOL_STOP=1: a copy of a running app can be half-written, so a move stops the old one first
+  if [[ "${VOL_STOP:-0}" == 1 ]]; then
+    log "volume: stopping $app on $VOL_HOST, so its volumes are copied whole"
+    vol_ssh "\$S docker compose --project-directory /opt/freelunch/apps/$app stop" >/dev/null || die "volume: can't stop $app on $VOL_HOST"
+  fi
   while IFS= read -r v; do
     [[ "$v" =~ ^[A-Za-z0-9_.-]+$ ]] || die "volume: unexpected volume name '$v'"
     mp="$(vol_ssh "\$S docker volume inspect --format '{{.Mountpoint}}' $v")" || die "volume: can't find $v on $VOL_HOST"
@@ -3792,6 +3811,37 @@ cmd_volume() {
   fi
 }
 
+# up_data_apps: the apps whose Compose file lists volumes
+up_data_apps() {
+  local app compose
+  while IFS=$'\t' read -r app compose; do
+    [[ -n "$compose" ]] || continue
+    [[ "$compose" == /* ]] || compose="$(state_root)/$compose"
+    if grep -Eq '^[[:space:]]*volumes:' "$compose" 2>/dev/null; then echo "$app"; fi
+  done < <(tfvars_map "$(state_root)/apps.tfvars" apps compose)
+}
+
+# up_copy_data <from target> <to target>: the data of the apps with volumes goes along with a
+# move (up --move): a backup is pulled from the old host, with its app stopped, and pushed into
+# the new one. Only between VMs: a platform keeps its volumes behind its own API.
+up_copy_data() {
+  local src="$1" dst="$2" from_host to_host app dir stamp
+  if is_platform "$src" || is_platform "$dst"; then
+    log "up: the data stays on $src: volumes on a container platform aren't copied over SSH"
+    return 0
+  fi
+  from_host="$(target_host "$src")"; to_host="$(target_host "$dst")"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  for app in $(up_data_apps); do
+    dir="$(state_root)/backups/$app/move-$stamp"
+    log "up: copying the data of $app from $from_host to $to_host (a copy stays in $(rel "$dir"))"
+    VOL_STOP=1 vol_target "$app" "$from_host"
+    VOL_STOP=1 vol_pull "$app" "$dir"
+    vol_target "$app" "$to_host"
+    vol_push "$app" "$dir"
+  done
+}
+
 # --- moving the tunnel with the app ---------------------------------------------------
 #
 # A Cloudflare tunnel belongs to one host. When up moves the app, the routes go to the new
@@ -3818,8 +3868,8 @@ up_make_tunnel() {
 # up_stop_cloudflared <host>: stop cloudflared on a host that no longer serves the app, so its
 # tunnel has no connections left. Best effort: the host may be gone or its key not pinned.
 up_stop_cloudflared() {
-  local host="$1" provider="${1%%-*}" address user
-  IFS=$'\t' read -r address user < <(jq -r --arg h "$host" '.outputs.hosts.value[]? | select("\(.provider)-\(.name)" == $h) | [(.public_ip // .private_ip // ""), (.ssh_user // "ubuntu")] | @tsv' "$(config_dir "$provider")/terraform.tfstate" 2>/dev/null) || true
+  local host="$1" address user
+  IFS=$'\t' read -r address user < <(host_ssh_info "$host") || true
   [[ -n "${address:-}" ]] || return 1
   ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1 || return 1
   ssh_options yes
@@ -3932,7 +3982,7 @@ up_move_routes() {
 cmd_up() {
   need_tf
   command -v jq >/dev/null || die "jq is required for 'up'"
-  local dry_run=0 move=0 a t list chosen="" tried=() skipped=() rc reason out host others=() tunnel verb=runs old_tunnels="" moving=0
+  local dry_run=0 move=0 a t list chosen="" tried=() skipped=() rc reason out host others=() tunnel verb=runs old_tunnels="" moving=0 move_data_from=""
   for a in "$@"; do
     case "$a" in
       --dry-run) dry_run=1 ;;
@@ -3975,10 +4025,10 @@ cmd_up() {
   done
   if [[ -n "$first" && ${#ahead[@]} -gt 0 ]] && up_keeps_data; then
     if [[ $move -eq 0 ]]; then
-      log "up: the app keeps data in a volume, which stays on $first, so ${ahead[*]} aren't tried (freelunch up --move leaves the data behind and tries them)"
+      log "up: the app keeps data in a volume, which stays on $first, so ${ahead[*]} aren't tried (freelunch up --move copies the data to the target it uses, and tries them)"
       targets=("$first")
     else
-      log "up: --move: the data in the app's volumes stays on $first"
+      move_data_from="$first"
     fi
   fi
 
@@ -4049,6 +4099,8 @@ cmd_up() {
   fi
   [[ "$chosen" != "oci" ]] || up_trust "$host"
   cmd_deploy
+  # --move takes the data along: after deploy made the volumes on the new host, before the routes go
+  [[ -z "$move_data_from" || "$chosen" == "$move_data_from" ]] || up_copy_data "$move_data_from" "$chosen"
   # cloudflared runs on the new host now: move the routes there and drop the old tunnel.
   if [[ $moving -eq 1 ]]; then up_wait_tunnel "$host"; up_move_routes "$old_tunnels"; rm -f "$(move_file)"; fi
   local urls=""
