@@ -41,6 +41,8 @@ if [[ -n "${FAKE_HOST_KEY:-}" ]] && ! ssh-keygen -F "${dest#*@}" -f "$known" >/d
   echo "${dest#*@} $FAKE_HOST_KEY" >> "$known"
 fi
 [[ "$last" == "true" ]] && exit 0
+# a command given on the line (freelunch volume), with stdin for the command itself
+if [[ "$last" == "S=''; "* ]]; then exec bash -c "${last//\/opt\/freelunch\/apps/$FAKE_ROOT/apps}"; fi
 sed "s#/opt/freelunch/apps#$FAKE_ROOT/apps#" | bash -s
 EOF
 cat > "$WORK/bin/docker" <<'EOF'
@@ -54,11 +56,21 @@ case "$1 ${2:-}" in
   # One container per app, stopped when the app is in FAKE_STOPPED.
   "compose ps")
     if [[ " ${FAKE_STOPPED:-} " == *" $(basename "$PWD") "* ]]; then echo "$(basename "$PWD")|exited|"; else echo "$(basename "$PWD")|running|healthy"; fi ;;
+  # volumes live in $FAKE_ROOT/volumes/<name>/_data, labelled by the app: <app>_<name>
+  "volume ls") app="${last#label=com.docker.compose.project=}"; ls "$FAKE_ROOT/volumes" 2>/dev/null | grep "^${app}_" || true ;;
+  "volume inspect") echo "$FAKE_ROOT/volumes/$last/_data" ;;
   "push "*)    echo "latest: digest: sha256:abc123def456 size: 1234" ;;
   "image inspect") echo "${last%%:*}@sha256:digest-of-$(basename "${last%%:*}")" ;;
 esac
 exit 0
 EOF
+# sudo -n <command>: the command, as the user running the tests
+cat > "$WORK/bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" != "-n" ]] || shift
+exec "$@"
+EOF
+chmod +x "$WORK/bin/sudo"
 cat > "$WORK/bin/nc" <<'EOF'
 #!/usr/bin/env bash
 # nc -z -w 5 <host> <port>: answers, unless host:port is in FAKE_TCP_DOWN
@@ -5850,6 +5862,52 @@ test_rollback_without_a_move_says_there_is_nothing_to_undo() {
   out="$(UP_CMD=rollback up_in "$p" 2>&1)" || rc=$?
   equals "$rc" 1
   contains "$out" "rollback: no move is recorded"
+}
+
+# freelunch volume pull and push: an app's Docker volumes out to tar files and back in.
+test_volume_pull_and_push_copy_an_apps_volumes() {
+  local p="$WORK/volume" out dir
+  up_project "$p" oci
+  FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1
+  mkdir -p "$p/host/volumes/api_data/_data/sub"
+  echo "one" > "$p/host/volumes/api_data/_data/a.txt"
+  echo "two" > "$p/host/volumes/api_data/_data/sub/b.txt"
+  mkdir -p "$p/host/volumes/other_data/_data"
+  : > "$p/fake.log"
+  dir="$p/saved"
+  out="$(UP_CMD=volume up_in "$p" pull api --out "$dir" 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "volume: 1 volume(s) of api pulled from oci-main into"
+  exists "$dir/api_data.tar.gz"
+  fails test -e "$dir/other_data.tar.gz"
+  tar tzf "$dir/api_data.tar.gz" | grep -q 'sub/b.txt'
+  # push into a changed volume: the files come back as they were, and the app was stopped and started
+  rm -rf "$p/host/volumes/api_data/_data"/* ; echo "stale" > "$p/host/volumes/api_data/_data/old.txt"
+  : > "$p/fake.log"
+  out="$(UP_CMD=volume up_in "$p" push api "$dir" 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "volume: api_data restored"
+  equals "$(cat "$p/host/volumes/api_data/_data/sub/b.txt")" two
+  fails test -e "$p/host/volumes/api_data/_data/old.txt"
+  grep -q 'docker compose --project-directory .*/apps/api stop' "$p/fake.log"
+  grep -q 'docker compose --project-directory .*/apps/api start' "$p/fake.log"
+  # the default folder is under backups/<app>/
+  out="$(UP_CMD=volume up_in "$p" pull api 2>&1)"
+  contains "$out" "backups/api/"
+}
+
+test_volume_says_what_is_wrong() {
+  local p="$WORK/volume-errors" out rc=0
+  up_project "$p" oci
+  FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1
+  out="$(UP_CMD=volume up_in "$p" pull nothing 2>&1)" || rc=$?
+  equals "$rc" 1
+  contains "$out" "volume: no host runs an app named nothing"
+  out="$(UP_CMD=volume up_in "$p" push api "$p/no-such-dir" 2>&1)" || true
+  contains "$out" "volume: push takes the folder of .tar.gz files a pull wrote"
+  mkdir -p "$p/empty"
+  out="$(UP_CMD=volume up_in "$p" push api "$p/empty" 2>&1)" || true
+  contains "$out" "no .tar.gz files in"
+  out="$(UP_CMD=volume up_in "$p" frobnicate 2>&1)" || true
+  contains "$out" "volume: pull <app>"
 }
 
 # Cloudflare keeps refusing: up says the app is on the new host and what finishes the move.
