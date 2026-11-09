@@ -35,12 +35,13 @@ locals {
   # `engine` says what makes the provider's resources (docs/engines.md); without it, `iac` does.
   # `engine_<kind>` overrides it for one kind of resource. `jobs` says which of provision, ci and
   # cd the provider supports, and `verified` whether anything but a test double has run it.
-  engines  = ["tofu", "api", "cli", "guided"]
+  engines  = ["tofu", "api", "cli", "guided", "dns"]
   jobs     = ["provision", "ci", "cd"]
   verified = ["fake-api", "live"]
 
   stack_dirs = toset([for f in fileset(local.providers_dir, "*/stack/*.tf") : dirname(dirname(f))])
   api_dirs   = toset([for f in fileset(local.providers_dir, "*/api.yaml") : dirname(f)])
+  dns_dirs   = toset([for f in fileset(local.providers_dir, "*/dns.sh") : dirname(f)])
 
   # The engine a provider resolves to, the same way `freelunch engine` does.
   resolved_engine = {
@@ -62,6 +63,7 @@ locals {
     # a ready provider (or one that says so) has what its engine runs on: tofu a stack, api an api.yaml
     no_stack        = [for k, p in local.providers : k if local.resolved_engine[k] == "tofu" && (try(p.engine, null) != null || try(p.status, "") == "ready") && !contains(local.stack_dirs, k)]
     no_api_yaml     = [for k, p in local.providers : k if local.resolved_engine[k] == "api" && !contains(local.api_dirs, k)]
+    no_dns_sh       = [for k, p in local.providers : k if local.resolved_engine[k] == "dns" && !contains(local.dns_dirs, k)]
     bad_terraform   = [for k, p in local.providers : k if(try(p.terraform_provider, null) == null) != (try(p.iac, "") == "none")]
     bad_recommended = [for k, p in local.providers : k if !(try(p.recommended, false) == true || try(p.recommended, false) == false) || (contains(local.recommended, k) && try(p.status, "") == "excluded")]
     two_recommended = [for c in local.category_keys : c if length([for k in local.recommended : k if try(local.providers[k].category, "") == c]) > 1]

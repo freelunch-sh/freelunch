@@ -2,14 +2,17 @@
 name: desec
 display_name: "deSEC"
 category: dns
-status: planned
+status: ready
 layer: glue
+engine: dns
+verified: fake-api
 terraform_provider: "Valodim/desec"
 iac: community
 free_tier_type: always-free
 free_tier: "Free DNS hosting with API and DNSSEC"
 card_required: "no"
 url: "https://desec.io/"
+secrets: "DESEC_TOKEN=deSEC API token"
 last_verified: "2026-10-18"
 notes: null
 sources:

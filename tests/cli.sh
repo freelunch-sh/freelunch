@@ -405,7 +405,7 @@ mkdir -p "$WORK/doh-bin"
 #   back has no mounts, as Northflank's reference doesn't list them.
 cat > "$WORK/bin/curl" <<'EOF'
 #!/usr/bin/env bash
-method=GET data="" headers="" out="" write="" auth="" basic="" url="" query=()
+method=GET data="" headers="" out="" write="" auth="" basic="" url="" query=() dtoken=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -X)      method="$2"; shift ;;
@@ -419,6 +419,11 @@ while [[ $# -gt 0 ]]; do
              [[ "$2" != "X-Auth-Token: "* ]] || auth="${2#X-Auth-Token: }"; shift ;;
     --data-urlencode) query+=("$2"); shift ;;
     --max-time) shift ;;
+    -K)      # a config file: header and url lines, as freelunch writes them to keep a token off the command line
+             while IFS= read -r cl; do
+               [[ "$cl" != 'header = "Authorization: Token '* ]] || { dtoken="${cl#header = \"Authorization: Token }"; dtoken="${dtoken%\"}"; }
+               [[ "$cl" != 'url = "'* ]] || { url="${cl#url = \"}"; url="${url%\"}"; }
+             done < "$2"; shift ;;
     -*)      ;;
     *)       url="$1" ;;
   esac
@@ -750,6 +755,31 @@ case "$url" in
       "DELETE /registrycredentials/"*) rm -f "$rd/creds/${path##*/}.json"; respond 204 '' ;;
       *) respond 404 '{"message":"no such route"}' ;;
     esac ;;
+  https://desec.io/api/v1/*)
+    # deSEC: one JSON file of rrsets per zone in $FAKE_DNS, the token FAKE_DESEC_TOKEN (default
+    # desec-token). A write is a bulk PATCH: records [] deletes. FAKE_DESEC_429 makes the first write wait.
+    path="${url#https://desec.io/api/v1}"; dns="${FAKE_DNS:?}"; mkdir -p "$dns"
+    echo "desec $method $path" >> "$FAKE_LOG"
+    if [[ "$dtoken" != "${FAKE_DESEC_TOKEN:-desec-token}" ]]; then respond 401 '{"detail":"Invalid token."}'; exit 0; fi
+    zone="${path#/domains/}"; zone="${zone%%/*}"
+    zf="$dns/desec-$zone.json"; [[ -f "$zf" ]] || echo '[]' > "$zf"
+    case "$method $path" in
+      "GET /domains/") respond 200 '[]' ;;
+      "GET /domains/"*/rrsets/*) respond 200 "$(jq -c 'map(. + {name: .subname, domain: "x"})' "$zf")" ;;
+      "PATCH /domains/"*/rrsets/)
+        if [[ -n "${FAKE_DESEC_429:-}" && ! -f "$dns/429" ]]; then
+          touch "$dns/429"; [[ -z "$headers" ]] || printf 'HTTP/2 429\r\nretry-after: 0\r\n\r\n' > "$headers"; respond 429 '{"detail":"Request was throttled."}'; exit 0
+        fi
+        printf '%s\n' "$data" >> "$dns/desec-sent.log"
+        jq -c --argjson c "$data" '. as $now | reduce $c[] as $x ($now; map(select((.subname == $x.subname and .type == $x.type) | not)) + (if $x.records == [] then [] else [$x] end))' "$zf" > "$zf.new" && mv "$zf.new" "$zf"
+        respond 200 "$(cat "$zf")" ;;
+      *) respond 404 '{"detail":"Not found."}' ;;
+    esac ;;
+  https://www.duckdns.org/update*)
+    # Duck DNS: logs the name, address and clear, never the token; the token is FAKE_DUCK_TOKEN (default duck-token)
+    q="${url#*\?}"; tk="$(sed -n 's/.*token=\([^&]*\).*/\1/p' <<< "$q")"
+    echo "duckdns $(sed -e 's/token=[^&]*&\{0,1\}//' <<< "$q")" >> "$FAKE_LOG"
+    if [[ "$tk" != "${FAKE_DUCK_TOKEN:-duck-token}" ]]; then respond 200 'KO'; else respond 200 'OK'; fi ;;
   https://artifactregistry.googleapis.com/v1/*)
     path="${url#https://artifactregistry.googleapis.com/v1}"
     cr="${FAKE_CR:?}"
@@ -3924,6 +3954,101 @@ test_journey_stops_at_the_first_broken_hop() {
   if out="$(FAKE_TCP_DOWN="ep-mock.eu-central-1.aws.neon.tech" journey_in "$p" web)"; then echo "journey should have failed"; return 1; fi
   contains "$out" "FAIL  api -> neon-main (direct): nothing answers at ep-mock.eu-central-1.aws.neon.tech:5432"
   lacks "$out" "mock-db-pass"
+}
+
+# --- the dns engine --------------------------------------------------------------------------
+
+# dns_in <dir> <args...>: freelunch with the fake deSEC and Duck DNS, and their tokens
+dns_in() {
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/bin:$PATH" FAKE_LOG="$dir/fake.log" FAKE_DNS="$dir/dns" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_ROOT="$dir/host" \
+    DESEC_TOKEN="${TEST_DESEC_TOKEN-desec-token}" DUCKDNS_TOKEN="${TEST_DUCK_TOKEN-duck-token}" "$CLI" "$@")
+}
+
+dns_project() { # dns_project <dir>: oci-main deployed (203.0.113.10), the example desec config
+  new_project "$1"
+  dns_in "$1" dns desec init >/dev/null 2>&1
+}
+
+# apply makes the A record and its ownership TXT in one bulk write, and again does nothing
+test_dns_desec_applies_and_is_idempotent() {
+  local p="$WORK/dns-desec" out
+  dns_project "$p"
+  out="$(dns_in "$p" dns desec apply --dry-run 2>&1)"
+  contains "$out" "dns: set A api.myapp.dedyn.io -> 203.0.113.10"
+  contains "$out" "dns: set TXT _freelunch-owner.api.myapp.dedyn.io"
+  lacks "$(cat "$p/fake.log" 2>/dev/null)" "desec PATCH"
+  dns_in "$p" dns desec apply >/dev/null 2>&1
+  equals "$(jq -c '[.[] | "\(.subname) \(.type) \(.records[0])"] | sort' "$p/dns/desec-myapp.dedyn.io.json")" '["_freelunch-owner.api TXT \"freelunch-owner=dns-desec\"","api A 203.0.113.10"]'
+  equals "$(grep -c 'desec PATCH' "$p/fake.log")" "1"
+  out="$(dns_in "$p" dns desec apply 2>&1)"
+  contains "$out" "is as the project wants it"
+  equals "$(grep -c 'desec PATCH' "$p/fake.log")" "1"
+  contains "$(dns_in "$p" dns desec status 2>&1)" "api  A 203.0.113.10  ok"
+  # the address changes: only the record is written
+  sed -i.bak 's/203.0.113.10/203.0.113.99/' "$p/.freelunch/oci/terraform.tfstate"
+  dns_in "$p" dns desec apply >/dev/null 2>&1
+  equals "$(jq -r '.[] | select(.subname == "api") | .records[0]' "$p/dns/desec-myapp.dedyn.io.json")" "203.0.113.99"
+  # the token never reaches the log
+  lacks "$(cat "$p/fake.log")" "desec-token"
+}
+
+# A name freelunch didn't make is never touched, by apply or destroy, and a throttled write waits
+test_dns_desec_leaves_other_peoples_records_alone() {
+  local p="$WORK/dns-foreign" out
+  dns_project "$p"
+  mkdir -p "$p/dns"
+  echo '[{"subname":"api","type":"A","ttl":3600,"records":["198.51.100.1"]}]' > "$p/dns/desec-myapp.dedyn.io.json"
+  if out="$(dns_in "$p" dns desec apply 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "api.myapp.dedyn.io already has records (A) and freelunch didn't make them"
+  equals "$(jq -r '.[0].records[0]' "$p/dns/desec-myapp.dedyn.io.json")" "198.51.100.1"
+  # another project's marker
+  echo '[{"subname":"api","type":"A","ttl":3600,"records":["198.51.100.1"]},{"subname":"_freelunch-owner.api","type":"TXT","ttl":3600,"records":["\"freelunch-owner=someone-else\""]}]' > "$p/dns/desec-myapp.dedyn.io.json"
+  if out="$(dns_in "$p" dns desec apply 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "is kept by another project"
+  # destroy removes ours (a second name) and leaves the others
+  sed -i.bak 's|^records = {|records = {\n  www = { value = "203.0.113.5" }|' "$p/.freelunch/desec/terraform.tfvars"
+  sed -i.bak 's|^  api = .*||' "$p/.freelunch/desec/terraform.tfvars"
+  out="$(FAKE_DESEC_429=1 dns_in "$p" dns desec apply 2>&1)" || { echo "$out"; return 1; }
+  contains "$out" "deSEC asks to wait 0s"
+  contains "$(jq -c '[.[].subname]' "$p/dns/desec-myapp.dedyn.io.json")" '"www"'
+  contains "$(cat "$p/fake.log")" "desec PATCH"
+  dns_in "$p" dns desec destroy >/dev/null 2>&1
+  equals "$(jq -c '[.[].subname] | sort' "$p/dns/desec-myapp.dedyn.io.json")" '["_freelunch-owner.api","api"]'
+}
+
+# The records are nodes: check says whether they are there and as wanted
+test_dns_records_are_checked_as_nodes() {
+  local p="$WORK/dns-node" out
+  dns_project "$p"
+  out="$(dns_in "$p" check --json 2>/dev/null || true)"
+  equals "$(jq -r '.[] | select(.node == "dns-desec-api") | "\(.exists) \(.healthy)"' <<< "$out")" "false false"
+  dns_in "$p" dns desec apply >/dev/null 2>&1
+  out="$(dns_in "$p" check --json 2>/dev/null)"
+  equals "$(jq -r '.[] | select(.node == "dns-desec-api") | "\(.exists) \(.healthy)"' <<< "$out")" "true true"
+  # the token is a CI secret
+  contains "$(dns_in "$p" ci init --print-secrets --no-first-run 2>&1)" "DESEC_TOKEN"
+  # a wrong token is said, not guessed at
+  if out="$(TEST_DESEC_TOKEN=nope dns_in "$p" dns desec check 2>&1)"; then echo "check should have failed"; return 1; fi
+  contains "$out" "doesn't take the token"
+  if out="$(TEST_DESEC_TOKEN='' dns_in "$p" dns desec apply 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "DESEC_TOKEN is not set"
+}
+
+# Duck DNS can't list: it sets the names listed, clears them on destroy, and keeps the token out of the log
+test_dns_duckdns_sets_and_clears_the_listed_names() {
+  local p="$WORK/dns-duck" out
+  new_project "$p"
+  dns_in "$p" dns duckdns init >/dev/null 2>&1
+  dns_in "$p" dns duckdns apply >/dev/null 2>&1
+  contains "$(cat "$p/fake.log")" "duckdns domains=myapp&verbose=true&ip=203.0.113.10"
+  lacks "$(cat "$p/fake.log")" "duck-token"
+  dns_in "$p" dns duckdns destroy >/dev/null 2>&1
+  contains "$(cat "$p/fake.log")" "duckdns domains=myapp&verbose=true&clear=true"
+  if out="$(TEST_DUCK_TOKEN=wrong dns_in "$p" dns duckdns apply 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "Duck DNS said KO for myapp"
+  contains "$(dns_in "$p" dns duckdns status 2>&1)" "can only be set, not read"
+  if out="$(dns_in "$p" dns desec status 2>&1)"; then echo "status should have failed"; return 1; fi
 }
 
 # A provider's engine is what its provider.yaml says, or what its iac implies.

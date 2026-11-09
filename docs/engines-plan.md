@@ -151,7 +151,7 @@ The same `needs` resolves to a different address depending on where the two node
 - [x] The mesh as a node: a network (Tailscale first) makes a join key, hosts join on first boot
   (extends the existing docker-bootstrap key), its outputs give each host's private address (`providers/tailscale`)
 - [x] Mesh addresses used for SSH and for edges (replaces hand-written `hosts.<name>.address`)
-- [ ] DNS as a node: a zone provider makes records for a route's hostname (see 9d; waits for the deSEC and DuckDNS providers)
+- [x] DNS as a node: a zone provider keeps records for a hostname (the `dns` engine, `freelunch dns`; `check` reports each record)
 - [x] Tests per row of the table, and the failure when no medium applies
 - [x] A hybrid example in `docs/graph.md`: frontend on one host, backend on another, a database
 
@@ -160,7 +160,8 @@ The same `needs` resolves to a different address depending on where the two node
 Each is a `tofu` stack or an `api`/`cli` definition, with a fake and the same tests as its
 neighbours. None can be `verified` without a live run.
 
-- [ ] DNS: deSEC and DuckDNS first (small HTTP APIs, `api` engine), then ClouDNS and Gcore (`tofu`)
+- [x] DNS: deSEC and DuckDNS (small HTTP APIs, on their own `dns` engine with an ownership TXT rule, since the `api` engine models apps)
+- [ ] DNS: ClouDNS and Gcore (`tofu`)
 - [ ] Mesh: Tailscale first, then NetBird and ZeroTier (same contract)
 - [ ] Ingress: ngrok, as another way a route can be reached
 - [ ] Deferred until the contracts above are settled: Namecheap (API needs an IP allow-list, awkward

@@ -1,0 +1,14 @@
+# Copy to .freelunch/desec/terraform.tfvars (freelunch dns desec init does). No secrets here.
+# The token goes in DESEC_TOKEN (.freelunch/.env).
+
+# The zone deSEC hosts: a domain you added there, or a free name like myapp.dedyn.io
+zone = "myapp.dedyn.io"
+
+# One entry per name under the zone. A host is an A record to its public IP; a value (and
+# a type: A, AAAA or CNAME) is a record you give. Next to each, freelunch writes a TXT
+# record _freelunch-owner.<name> marking it as its own: a name that has records without it is
+# never changed or deleted.
+records = {
+  api = { host = "oci-main" }
+  # www = { type = "CNAME", value = "api.myapp.dedyn.io" }
+}

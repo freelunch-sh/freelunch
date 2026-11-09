@@ -34,6 +34,7 @@ Every engine implements these verbs: `check`, `apply`, `outputs`, `deploy`, `sta
 | `api` | an HTTP or GraphQL API with create, list, delete | Deno Deploy, Phase 6 |
 | `cli` | the vendor CLI is the supported path | Turso, wrangler |
 | `guided` | no usable API: checks the token, prints the manual steps | Back4App, Leapcell |
+| `dns` | keeps DNS records in a zone, marking each as the project's own with a TXT record ([how](graph.md#dns-records)) | deSEC, Duck DNS |
 
 `engine:` in `provider.yaml` defaults from `iac` (official, partner, community means `tofu`; stale,
 none means `api`, `cli` or `guided`) and can be overridden per resource kind.

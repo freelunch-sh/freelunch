@@ -1,0 +1,11 @@
+# Copy to .freelunch/duckdns/terraform.tfvars (freelunch dns duckdns init does). No secrets here.
+# The token goes in DUCKDNS_TOKEN (.freelunch/.env).
+
+zone = "duckdns.org"
+
+# One entry per subdomain you own at duckdns.org (one label, no dots): myapp is myapp.duckdns.org.
+# Duck DNS can't list or mark names, so freelunch only sets the ones listed here, and
+# `freelunch dns duckdns destroy` clears them (clear=true removes all that name's records).
+records = {
+  myapp = { host = "oci-main" }
+}

@@ -1834,8 +1834,12 @@ cmd_lifecycle() { # plan|apply|destroy
       for a in ${services[@]+"${services[@]}"}; do apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; done
       [[ ${#hosts[@]} -eq 0 && ${#platforms[@]} -eq 0 ]] || cmd_hybrid
       for a in ${glue[@]+"${glue[@]}"}; do apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; done
+      # apply all also keeps the project's DNS records (after the hosts have their addresses)
+      if [[ " ${names[*]-} " == *" all "* ]]; then dns_all apply; fi
       next_steps ${hosts[@]+"${hosts[@]}"} ${platforms[@]+"${platforms[@]}"} ;;
     destroy)
+      # destroy all first removes the records the project made, while it still knows the hosts
+      if [[ " ${names[*]-} " == *" all "* ]]; then dns_all destroy; fi
       for a in ${hosts[@]+"${hosts[@]}"}; do ci_wait_guard "$a" ""; done
       for a in ${glue[@]+"${glue[@]}"} ${services[@]+"${services[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
       for a in ${platforms[@]+"${platforms[@]}"} ${hosts[@]+"${hosts[@]}"}; do engine_destroy "$a" ${extra[@]+"${extra[@]}"}; done
@@ -6994,6 +6998,241 @@ cmd_check() {
   if [[ $FAILS -eq 0 ]]; then echo "The config is complete."; else echo "$FAILS problem(s)."; return 1; fi
 }
 
+# --- the dns engine ------------------------------------------------------------------------------
+#
+# A DNS provider (engine: dns) keeps the records of a project's hostnames at a zone it hosts:
+# providers/<name>/dns.sh holds its hooks, the project's .freelunch/<name>/terraform.tfvars says
+# what to keep:
+#   zone    = "example.dedyn.io"
+#   records = { api = { host = "oci-main" }, www = { type = "CNAME", value = "api.example.dedyn.io" } }
+# A record with a host is an A record to the host's public IP. The hooks:
+#   dns_<p>_check                 does the token work (prints the reason when not)
+#   dns_<p>_list <zone>           the zone's rrsets, as JSON [{subname, type, ttl, records}]
+#   dns_<p>_write <zone> <file>   apply a JSON list of rrsets; records [] deletes one
+# OWNERSHIP: next to each record freelunch makes, it writes a TXT record at _freelunch-owner.<sub>
+# holding "freelunch-owner=<project>" (the way external-dns marks what it owns). A name that has
+# records and no such TXT of ours is never changed or deleted, and destroy removes only names
+# that have it. Some providers (DuckDNS) can't list a zone: they say dns_<p>_mode = update, and
+# freelunch only sets and clears the names the project lists.
+
+dns_fn() { echo "dns_${1//-/_}_$2"; }
+dns_load() { # dns_load <provider>: its hooks
+  [[ -f "$PROVIDERS_DIR/$1/dns.sh" ]] || die "dns: $1 has no dns.sh (providers/$1/)"
+  # shellcheck source=/dev/null
+  . "$PROVIDERS_DIR/$1/dns.sh"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  mkdir -p "$TMP/dns"
+}
+dns_has() { declare -F "$(dns_fn "$1" "$2")" >/dev/null; }
+
+# dns_owner: who the project is, in the ownership TXT
+dns_owner() {
+  local n; n="$(project_prefix "$PROJECT")"
+  [[ -n "$n" ]] || n="$(project_name "$(basename "$(dirname "$PROJECT")")")"
+  echo "$n"
+}
+dns_owner_sub() { echo "_freelunch-owner${1:+.$1}"; } # the subname of a name's ownership TXT
+dns_owner_rec() { printf '"freelunch-owner=%s"' "$(dns_owner)"; }
+
+# dns_host_ip <host>: a host's public IP, from its stack's state
+dns_host_ip() {
+  local p state
+  for p in $(all_providers); do
+    [[ "$(meta "$p" layer)" == "host" && -d "$(stack_dir "$p")" ]] && is_deployed "$p" || continue
+    state="$(config_dir "$p")/terraform.tfstate"
+    jq -r --arg h "$1" '.outputs.hosts.value[]? | select("\(.provider)-\(.name)" == $h) | .public_ip // empty' "$state" 2>/dev/null
+  done | head -1
+}
+
+# dns_desired <provider>: the rrsets the project's tfvars asks for
+dns_desired() {
+  local p="$1" file zone sub host type value ttl ip out='[]' rec
+  file="$(config_dir "$p")/terraform.tfvars"
+  [[ -f "$file" ]] || die "dns: missing $(rel "$file") (freelunch dns $p init writes an example)"
+  zone="$(tfvar "$file" zone)"
+  [[ -n "$zone" ]] || die "dns: $(rel "$file") needs zone = \"example.com\""
+  # fields split at \x1f, which unlike a tab keeps an empty host in its place
+  while IFS=$'\x1f' read -r sub host type value ttl; do
+    [[ -n "$sub" ]] || continue
+    [[ "$sub" =~ ^[a-z0-9_]([a-z0-9_.-]*[a-z0-9_])?$ ]] || die "dns: the record name '$sub' isn't a subdomain (lowercase letters, digits, - and .)"
+    [[ -n "$type" ]] || type=A
+    if [[ -n "$host" ]]; then
+      ip="$(dns_host_ip "$host")"
+      [[ -n "$ip" ]] || die "dns: $sub points at $host, which has no public IP here (apply its stack first, or give value = \"...\")"
+      value="$ip"
+    fi
+    [[ -n "$value" ]] || die "dns: $sub needs host = \"<provider>-<name>\" or value = \"...\""
+    [[ "$type" != CNAME || "$value" == *. ]] && rec="$value" || rec="$value."
+    out="$(jq -c --arg s "$sub" --arg t "$type" --argjson l "${ttl:-3600}" --arg r "$rec" '. + [{subname: $s, type: $t, ttl: $l, records: [$r]}]' <<< "$out")"
+  done < <(tfvars_map "$file" records host type value ttl | tr '\t' '\037')
+  echo "$out"
+}
+
+# dns_changes <provider> <zone> <desired> <list>: what to write, on stdout as JSON; refuses a
+# name someone else keeps
+dns_changes() {
+  local zone="$2" desired="$3" list="$4" d sub type owner_sub ours foreign here changes='[]' mine
+  mine="$(dns_owner_rec)"
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    sub="$(jq -r .subname <<< "$d")"; type="$(jq -r .type <<< "$d")"
+    owner_sub="$(dns_owner_sub "$sub")"
+    ours="$(jq -r --arg o "$owner_sub" --arg m "$mine" 'any(.[]; .subname == $o and .type == "TXT" and (.records | index($m)))' <<< "$list")"
+    foreign="$(jq -r --arg o "$owner_sub" --arg m "$mine" 'any(.[]; .subname == $o and .type == "TXT" and ((.records | index($m)) | not))' <<< "$list")"
+    here="$(jq -c --arg s "$sub" '[.[] | select(.subname == $s)]' <<< "$list")"
+    if [[ "$foreign" == true ]]; then
+      echo "freelunch: dns: $sub.$zone is kept by another project (its _freelunch-owner TXT names someone else); not touching it" >&2; return 1
+    fi
+    if [[ "$ours" != true && "$(jq 'length' <<< "$here")" -gt 0 ]]; then
+      echo "freelunch: dns: $sub.$zone already has records ($(jq -r '[.[].type] | join(", ")' <<< "$here")) and freelunch didn't make them. Not touching them: remove them at your DNS provider yourself, or pick another name" >&2; return 1
+    fi
+    # an address record of another type than the one wanted goes (a CNAME can't share a name)
+    changes="$(jq -c --argjson here "$here" --arg t "$type" '. + [$here[] | select(.type != $t and (.type | IN("A","AAAA","CNAME"))) | {subname, type, ttl, records: []}]' <<< "$changes")"
+    if ! jq -e --argjson d "$d" 'any(.[]; .subname == $d.subname and .type == $d.type and .ttl == $d.ttl and .records == $d.records)' <<< "$here" >/dev/null; then
+      changes="$(jq -c --argjson d "$d" '. + [$d]' <<< "$changes")"
+    fi
+    if [[ "$ours" != true ]]; then
+      changes="$(jq -c --arg o "$owner_sub" --arg m "$mine" --argjson l "$(jq -r .ttl <<< "$d")" '. + [{subname: $o, type: "TXT", ttl: $l, records: [$m]}]' <<< "$changes")"
+    fi
+  done < <(jq -c '.[]' <<< "$desired")
+  echo "$changes"
+}
+
+# dns_ours <list>: the names the project keeps in a zone (those with its ownership TXT)
+dns_ours() {
+  jq -r --arg m "$(dns_owner_rec)" '.[] | select(.type == "TXT" and (.subname | startswith("_freelunch-owner")) and (.records | index($m))) | .subname | sub("^_freelunch-owner\\.?"; "")' <<< "$1"
+}
+
+# dns_apply <provider> [dry]
+dns_apply() {
+  local p="$1" dry="${2:-0}" zone desired list changes
+  zone="$(tfvar "$(config_dir "$p")/terraform.tfvars" zone)"
+  desired="$(dns_desired "$p")"
+  if dns_has "$p" mode; then dns_apply_update "$p" "$zone" "$desired" "$dry"; return; fi
+  list="$("$(dns_fn "$p" list)" "$zone")" || die "dns: can't list $zone at $p"
+  changes="$(dns_changes "$p" "$zone" "$desired" "$list")" || return 1
+  if [[ "$(jq length <<< "$changes")" -eq 0 ]]; then log "dns: $zone at $p is as the project wants it"; return 0; fi
+  jq -r --arg z "$zone" '.[] | "dns: \(if .records == [] then "delete" else "set" end) \(.type) \(if .subname == "" then $z else .subname + "." + $z end)\(if .records == [] then "" else " -> " + (.records | join(" ")) end)"' <<< "$changes" >&2
+  [[ "$dry" == 1 ]] && return 0
+  printf '%s\n' "$changes" > "$TMP/dns/$p.changes.json"
+  "$(dns_fn "$p" write)" "$zone" "$TMP/dns/$p.changes.json" || die "dns: $p refused the change"
+  log "dns: $zone at $p updated"
+}
+
+# dns_destroy <provider> [dry]: remove what the project made, and nothing else
+dns_destroy() {
+  local p="$1" dry="${2:-0}" zone list changes='[]' sub
+  zone="$(tfvar "$(config_dir "$p")/terraform.tfvars" zone)"
+  if dns_has "$p" mode; then dns_destroy_update "$p" "$zone" "$(dns_desired "$p")" "$dry"; return; fi
+  list="$("$(dns_fn "$p" list)" "$zone")" || die "dns: can't list $zone at $p"
+  while IFS= read -r sub; do
+    changes="$(jq -c --arg s "$sub" --argjson l "$list" '. + [$l[] | select(.subname == $s and (.type | IN("A","AAAA","CNAME"))) | {subname, type, ttl, records: []}]' <<< "$changes")"
+    changes="$(jq -c --arg o "$(dns_owner_sub "$sub")" --argjson l "$list" '. + [$l[] | select(.subname == $o and .type == "TXT") | {subname, type, ttl, records: []}]' <<< "$changes")"
+  done < <(dns_ours "$list")
+  if [[ "$(jq length <<< "$changes")" -eq 0 ]]; then log "dns: nothing of the project's to delete at $zone"; return 0; fi
+  jq -r --arg z "$zone" '.[] | "dns: delete \(.type) \(if .subname == "" then $z else .subname + "." + $z end)"' <<< "$changes" >&2
+  [[ "$dry" == 1 ]] && return 0
+  printf '%s\n' "$changes" > "$TMP/dns/$p.changes.json"
+  "$(dns_fn "$p" write)" "$zone" "$TMP/dns/$p.changes.json" || die "dns: $p refused the change"
+  log "dns: deleted the project's records at $zone"
+}
+
+# update-only providers (no listing): set and clear the listed names
+dns_apply_update() { # <p> <zone> <desired> <dry>
+  local p="$1" zone="$2" d dry="$4"
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    log "dns: set $(jq -r '.subname' <<< "$d").$zone -> $(jq -r '.records[0]' <<< "$d")"
+    [[ "$dry" == 1 ]] || "$(dns_fn "$p" write)" "$zone" <(jq -c -n --argjson d "$d" '[$d]') || die "dns: $p refused $(jq -r .subname <<< "$d")"
+  done < <(jq -c '.[]' <<< "$3")
+}
+dns_destroy_update() { # <p> <zone> <desired> <dry>
+  local p="$1" zone="$2" d dry="$4"
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    log "dns: clear $(jq -r '.subname' <<< "$d").$zone"
+    [[ "$dry" == 1 ]] || "$(dns_fn "$p" write)" "$zone" <(jq -c -n --argjson d "$d" '[$d | .records = []]') || die "dns: $p refused $(jq -r .subname <<< "$d")"
+  done < <(jq -c '.[]' <<< "$3")
+}
+
+# dns_providers: the DNS providers this project has a folder with a tfvars for
+dns_providers() {
+  local p
+  [[ -n "$PROJECT" ]] || return 0
+  for p in $(all_providers); do
+    [[ "$(engine_of "$p")" == dns && -f "$PROJECT/$p/terraform.tfvars" ]] && echo "$p"
+  done
+  return 0
+}
+
+# dns_all apply|destroy: the action for each DNS provider the project has a config for
+dns_all() {
+  local p
+  for p in $(dns_providers); do
+    dns_load "$p"
+    if [[ "$1" == apply ]]; then dns_apply "$p"; else dns_destroy "$p"; fi
+  done
+}
+
+# cmd_dns <provider> init | check | status | apply | destroy [--dry-run]
+cmd_dns() {
+  local p="${1:-}" sub="${2:-}" dry=0 a zone desired list
+  [[ -n "$p" && -n "$sub" ]] || die "dns: freelunch dns <provider> init | check | status | apply | destroy [--dry-run]"
+  [[ "$(engine_of "$p")" == dns ]] || die "dns: $p isn't a DNS provider (engine: dns)"
+  shift 2
+  for a in "$@"; do [[ "$a" == --dry-run ]] && dry=1 || die "dns: unknown option $a"; done
+  [[ -n "$PROJECT" ]] || die "dns: run it in a project, where its .freelunch/ folder is"
+  dns_load "$p"
+  case "$sub" in
+    init)
+      mkdir -p "$PROJECT/$p"
+      write_new "$PROJECT/$p/terraform.tfvars" < "$PROVIDERS_DIR/$p/terraform.tfvars.example" ;;
+    check)   "$(dns_fn "$p" check)" || die "dns: $p doesn't take the token" ; log "dns: the token works" ;;
+    apply)   dns_apply "$p" "$dry" ;;
+    destroy) dns_destroy "$p" "$dry" ;;
+    status)
+      zone="$(tfvar "$(config_dir "$p")/terraform.tfvars" zone)"
+      desired="$(dns_desired "$p")"
+      echo "Records at $p ($zone)"
+      if dns_has "$p" mode; then
+        jq -r '.[] | "  \(.subname)  \(.records[0])  (this provider can only be set, not read)"' <<< "$desired"
+        return 0
+      fi
+      list="$("$(dns_fn "$p" list)" "$zone")" || die "dns: can't list $zone at $p"
+      jq -r --arg m "$(dns_owner_rec)" --argjson l "$list" '
+        .[] | . as $d
+        | ($l | any(.[]; .subname == ("_freelunch-owner." + $d.subname) and .type == "TXT" and (.records | index($m)))) as $ours
+        | ($l | map(select(.subname == $d.subname and .type == $d.type))[0]) as $now
+        | "  \($d.subname)  \($d.type) \($d.records[0])  " + (if $now == null then (if ($l | any(.[]; .subname == $d.subname)) then "taken by records freelunch did not make" else "not made yet (freelunch dns '"$p"' apply)" end)
+            elif $ours | not then "exists, not ours"
+            elif $now.records == $d.records then "ok" else "differs: \($now.records[0])" end)' <<< "$desired" ;;
+    *) die "dns: unknown command $sub (init, check, status, apply, destroy)" ;;
+  esac
+}
+
+# probe_dns: a node per record the project keeps: exists when its ownership TXT and record are
+# there, healthy when they hold what the tfvars say
+probe_dns() {
+  local p zone desired list d sub type row
+  for p in $(dns_providers); do
+    dns_load "$p"
+    dns_has "$p" mode && continue
+    zone="$(tfvar "$(config_dir "$p")/terraform.tfvars" zone)"
+    desired="$(dns_desired "$p" 2>/dev/null)" || { probe_row "dns-$p" dns null null null "its records can't be worked out from the tfvars"; continue; }
+    if ! list="$("$(dns_fn "$p" list)" "$zone" 2>/dev/null)"; then probe_row "dns-$p" dns null null null "not asked: can't list $zone (is the token set?)"; continue; fi
+    while IFS= read -r d; do
+      [[ -n "$d" ]] || continue
+      sub="$(jq -r .subname <<< "$d")"
+      row="dns-$p-$sub"
+      if ! jq -e --arg s "$sub" --arg t "$(jq -r .type <<< "$d")" 'any(.[]; .subname == $s and .type == $t)' <<< "$list" >/dev/null; then
+        probe_row "$row" dns false null false "$sub.$zone isn't there (freelunch dns $p apply)"
+      elif [[ -n "$(dns_changes "$p" "$zone" "[$d]" "$list" 2>/dev/null | jq -r 'if length == 0 then empty else "x" end' 2>/dev/null)" ]]; then
+        probe_row "$row" dns true true false "$sub.$zone isn't as the project wants it (freelunch dns $p apply)"
+      else probe_row "$row" dns true true true ""; fi
+    done < <(jq -c '.[]' <<< "$desired")
+  done
+}
+
 # --- node probes ----------------------------------------------------------------------------
 #
 # freelunch check <node> / --json: every node of the project (host, platform, app, database,
@@ -7118,7 +7357,7 @@ cmd_probe() {
   done
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   [[ -n "$PROJECT" ]] || die "check: run it in a project, where its .freelunch/ folder is"
-  rows="$( { probe_hosts_and_apps; probe_stack_nodes; probe_tunnels; } | jq -sc '.')"
+  rows="$( { probe_hosts_and_apps; probe_stack_nodes; probe_tunnels; probe_dns; } | jq -sc '.')"
   if [[ -n "$node" ]]; then
     jq -e --arg n "$node" 'any(.[]; .node == $n)' <<< "$rows" >/dev/null \
       || die "check: no node named $node. Nodes: $(jq -r '[.[].node] | join(", ")' <<< "$rows")"
@@ -7238,7 +7477,7 @@ cmd_journey() {
   done
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   [[ -n "$PROJECT" ]] || die "journey: run it in a project, where its .freelunch/ folder is"
-  rows="$( { probe_hosts_and_apps; probe_stack_nodes; probe_tunnels; } | jq -sc '.')"
+  rows="$( { probe_hosts_and_apps; probe_stack_nodes; probe_tunnels; probe_dns; } | jq -sc '.')"
   [[ -f "$TMP/graph.json" ]] || die "journey: there are no apps to follow (apps.tfvars)"
   JOURNEY_ROUTES='{}'
   if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then JOURNEY_ROUTES="$(jq -c '.outputs.routes.value // {}' "$(config_dir cloudflare)/terraform.tfstate")"; fi
@@ -8017,6 +8256,11 @@ ci_secret_names() {
     done < <(meta "$s" secrets | tr ';' '\n' | sed -e 's/^ *//' -e 's/ *$//')
     while IFS=$'\t' read -r var what; do [[ -z "$var" ]] || emit "$var" "$what"; done < <(engine_call "$s" secrets)
     [[ "$(meta "$s" layer)" != "host" ]] || emit FREELUNCH_SSH_PRIVATE_KEY "the private SSH key deploy signs in to the hosts with (without a passphrase)"
+  done
+  for s in $(dns_providers); do
+    while IFS= read -r entry; do
+      [[ -z "$entry" ]] || emit "${entry%%=*}" "${entry#*=}"
+    done < <(meta "$s" secrets | tr ';' '\n' | sed -e 's/^ *//' -e 's/ *$//')
   done
   for var in $(tfvars_map "$PROJECT/apps.tfvars" registries password_env | cut -f2); do
     emit "$var" "the read-only token for a private registry (apps.tfvars)"
@@ -9508,6 +9752,7 @@ main() {
     inventory)            cmd_inventory ;;
     output)               cmd_output "$@" ;;
     catalog)              cmd_catalog ;;
+    dns)                  resolve_state_refs; cmd_dns "$@" ;;
     api)                  resolve_state_refs; cmd_api "$@" ;;
     cli)                  resolve_state_refs; cmd_cli "$@" ;;
     guided)               resolve_state_refs; cmd_guided "$@" ;;

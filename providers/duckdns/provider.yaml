@@ -2,14 +2,17 @@
 name: duckdns
 display_name: "Duck DNS"
 category: dns
-status: planned
+status: ready
 layer: glue
+engine: dns
+verified: fake-api
 terraform_provider: null
 iac: none
 free_tier_type: always-free
 free_tier: "Free dynamic DNS, up to 5 subdomains"
 card_required: "no"
 url: "https://www.duckdns.org/"
+secrets: "DUCKDNS_TOKEN=Duck DNS token"
 last_verified: "2026-10-18"
 notes: "No Terraform provider; update records over its HTTP API."
 sources:

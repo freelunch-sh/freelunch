@@ -1,7 +1,7 @@
 # The graph: nodes, edges, journeys
 
 Plan: section 9 of [engines-plan.md](engines-plan.md). This page grows with each step; today it
-holds the node inventory and the health probe (9a) the `needs` format (9b), edge media and the mesh (9c), and journeys (9e).
+holds the node inventory and the health probe (9a) the `needs` format (9b), edge media and the mesh (9c), journeys (9e), and DNS records (9d).
 
 ## Nodes
 
@@ -166,3 +166,28 @@ exits 1 if any journey failed.
 
 `freelunch ci init` offers to run `freelunch journey` in Actions once the first deploy is there
 (`--journey` to say yes, `--no-journey` to say no); it asks first, like the first dry run.
+
+## DNS records
+
+DNS is a node too: a zone provider keeps the records of your hostnames. These providers use the
+`dns` engine (`engine: dns` in `provider.yaml`, hooks in `providers/<name>/dns.sh`), which is not
+the `api` engine: that one models apps, and a DNS record has no image, no port and no label to
+mark it as ours.
+
+```
+freelunch dns <provider> init | check | status | apply | destroy [--dry-run]
+```
+
+`.freelunch/<provider>/terraform.tfvars` says what to keep: `zone`, and `records`, one entry per
+name, either `host = "oci-main"` (an A record to its public IP) or `type` and `value`.
+`freelunch apply all` and `destroy all` also run it, and `freelunch check` reports each record as a
+node (`dns-desec-api`: there, and as the project wants it).
+
+**Ownership.** Next to each record, freelunch writes a TXT record `_freelunch-owner.<name>` with
+`freelunch-owner=<project>`. A name with records and no TXT of ours is refused, never overwritten
+or deleted; a name marked by another project is refused. `destroy` removes only the names that have
+our TXT. A provider that can't list a zone (Duck DNS) is update-only: it sets and clears exactly the
+names you list, and says so.
+
+[deSEC](../providers/desec/README.md) is the first; [Duck DNS](../providers/duckdns/README.md)
+the update-only one. Nothing here has run against a live account.
