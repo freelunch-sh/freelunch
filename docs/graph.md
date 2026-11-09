@@ -1,7 +1,7 @@
 # The graph: nodes, edges, journeys
 
 Plan: section 9 of [engines-plan.md](engines-plan.md). This page grows with each step; today it
-holds the node inventory and the health probe (9a).
+holds the node inventory and the health probe (9a) and the `needs` format (9b).
 
 ## Nodes
 
@@ -47,3 +47,36 @@ marked `verified` before it has run once:
 | `bucket` | same, for a Backblaze B2 or R2 bucket | `ok` |
 | `tunnel` | `CLOUDFLARE_API_TOKEN=... freelunch check --json` after a deploy with routes | `tunnel-<target>` healthy; stop `cloudflared`: `healthy: false`, `down` |
 | `platform` | `freelunch status` (the probe does not ask platforms yet) | the app listed as serving |
+
+## Edges: `needs`
+
+An app says what it depends on in `apps.tfvars`:
+
+```hcl
+apps = {
+  web = { host = "oci-main", compose = "../web.yaml", needs = ["api", "neon-main"] }
+  api = { host = "oci-main", compose = "../api.yaml", port = 8080, database = "neon-main" }
+}
+```
+
+- `needs` is a list of nodes: other apps, or a bucket or database a stack made (named
+  `<provider>-<name>`). `bucket` and `database` stay and mean the same as one entry in `needs`;
+  they keep their old environment names (`DATABASE_URL`, `S3_BUCKET`, `AWS_*`).
+- `port` is the port a dependant reaches the app on (9c uses it for the app's address).
+- A need puts the node's settings in the dependant's environment under the node's own name, from
+  one map in `deploy/main.tf` (`node_out`) that every edge type reads: `neon-main` gives
+  `NEON_MAIN_URL`; `backblaze-b2-results` gives `BACKBLAZE_B2_RESULTS_BUCKET`, `_ENDPOINT`,
+  `_REGION`, `_ACCESS_KEY_ID` and `_SECRET_ACCESS_KEY`. The values stay out of dry runs and logs.
+
+Checks, all before anything is sent:
+
+- A need on a node that doesn't exist stops the plan, naming the app and the node, and the known nodes.
+- Apps that need each other in a circle (an app that needs itself too) stop it:
+  `the apps need each other in a circle: api -> web -> api`.
+- `deploy` (and `up`, which deploys) puts what an app needs first, across hosts too; apps with
+  nothing between them keep their order. `apply` and `destroy` already follow the layers (hosts and
+  platforms, then services, then glue; destroy runs them in reverse), which is the order of
+  everything they make.
+- A database or bucket named in `needs` is probed (as in `freelunch check`) before the deploy
+  sends anything; if nothing answers there, the deploy stops and says so
+  (`FREELUNCH_CHECK_NEEDS=0` skips it). The old `bucket` and `database` fields are not probed.

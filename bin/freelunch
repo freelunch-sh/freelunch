@@ -2608,7 +2608,8 @@ storage_states() {
 }
 
 # apps_use_database <apps file>: whether any app in it names a database
-apps_use_database() { [[ -f "$1" ]] && tfvars_map "$1" apps database | cut -f2 | grep -q .; }
+# (an app's needs may name one too, and are not read here, so any needs count)
+apps_use_database() { [[ -f "$1" ]] && { tfvars_map "$1" apps database | cut -f2 | grep -q . || grep -Eq '(^|[^A-Za-z0-9_])needs[[:space:]]*=' "$1"; }; }
 
 # database_states <apps file>: the state files of deployed stacks that make databases, as a JSON
 # list; empty unless an app names a database
@@ -2659,13 +2660,83 @@ deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
   check_checkout_tfvars "$ROOT/deploy"
   TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" init -input=false >/dev/null || return 1
   TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" apply -input=false -auto-approve "${args[@]}" >/dev/null || return 1
-  for o in targets platforms registries tunnel_tokens app_env; do
+  for o in targets platforms registries tunnel_tokens app_env graph; do
     TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" output -state="$TMP/deploy.tfstate" -json "$o" > "$TMP/$o.json" || return 1
   done
+  graph_prepare || return 1
   # in GitHub Actions, keep what a bucket or a database hands an app out of the job's log
   if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
     jq -r '.[] | .[] | strings | select(length >= 8)' "$TMP/app_env.json" | while IFS= read -r value; do echo "::add-mask::$value"; done
   fi
+}
+
+# --- the graph: needs between nodes ------------------------------------------------------------
+#
+# An app's needs (and its bucket and database) are edges to other nodes (docs/graph.md). The
+# plan is checked for a circle of apps, and the apps are put in dependency order in
+# targets.json: what an app needs is deployed before it, on a host and across hosts.
+
+# graph_order: the apps, each after the apps it needs; alphabetical where nothing is between
+# them. Fails, saying the circle, when apps need each other.
+graph_order() {
+  local edges="$TMP/graph.edges" left placed=" " next app n ready progress path cur seen
+  jq -r 'to_entries[] | .key as $a | .value.needs[] | select(. as $n | $apps | index($n)) | "\($a) \(.)"' \
+    --argjson apps "$(jq -c 'keys' "$TMP/graph.json")" "$TMP/graph.json" > "$edges"
+  left="$(jq -r 'keys[]' "$TMP/graph.json")"
+  while [[ -n "$left" ]]; do
+    next=""; progress=0
+    for app in $left; do
+      ready=1
+      for n in $(awk -v a="$app" '$1 == a { print $2 }' "$edges"); do
+        [[ "$placed" == *" $n "* ]] || ready=0
+      done
+      if [[ $ready -eq 1 ]]; then placed="$placed$app "; echo "$app"; progress=1; else next="$next$app "; fi
+    done
+    if [[ $progress -eq 0 ]]; then
+      # everything left needs something left: follow the needs until an app comes round again
+      cur="${next%% *}"; path=""; seen=" "
+      while [[ "$seen" != *" $cur "* ]]; do
+        seen="$seen$cur "; path="$path$cur -> "
+        cur="$(awk -v a="$cur" '$1 == a { print $2 }' "$edges" | while read -r n; do [[ "$placed" == *" $n "* ]] || { echo "$n"; break; }; done)"
+      done
+      echo "freelunch: the apps need each other in a circle: ${path}${cur}. Remove one of the needs in apps.tfvars" >&2
+      return 1
+    fi
+    left="$next"
+  done
+}
+
+# graph_prepare: validate the graph and order the targets by it. Writes $TMP/order.txt.
+graph_prepare() {
+  local order
+  order="$(graph_order)" || return 1
+  printf '%s\n' "$order" > "$TMP/order.txt"
+  [[ -s "$TMP/graph.edges" ]] || return 0
+  # Hosts follow the apps they first hold in that order, then the rest as before.
+  jq --argjson order "$(jq -Rsc 'split("\n") | map(select(length > 0))' <<< "$order")" '
+    def pos($k): ($order | index($k)) // 1000000;
+    with_entries(.value.apps |= (to_entries | sort_by(pos(.key)) | from_entries))
+    | to_entries
+    | sort_by([ (.value.apps | keys | map(pos(.)) | min // 1000000), .key ])
+    | from_entries' "$TMP/targets.json" > "$TMP/targets.ordered.json" && mv "$TMP/targets.ordered.json" "$TMP/targets.json"
+}
+
+# graph_gate <hosts...>: an app is not deployed against a database or bucket it needs (in
+# `needs`) that does not answer. The old bucket and database fields are not asked.
+graph_gate() {
+  local rows host app n bad=""
+  [[ "${FREELUNCH_CHECK_NEEDS:-1}" == "1" ]] || return 0
+  rows="$(probe_stack_nodes | jq -sc '.')"
+  for host in "$@"; do
+    for app in $(jq -r --arg h "$host" '.[$h].apps | keys[]' "$TMP/targets.json"); do
+      for n in $(jq -r --arg a "$app" '.[$a].needs[]' "$TMP/graph.json"); do
+        jq -e --arg h "$host" --arg a "$app" --arg n "$n" '.[$h].apps[$a] | (.bucket == $n or .database == $n)' "$TMP/targets.json" >/dev/null && continue
+        jq -e --arg n "$n" 'any(.[]; .node == $n and .healthy == false)' <<< "$rows" >/dev/null || continue
+        bad="$bad$app needs $n: $(jq -r --arg n "$n" '.[] | select(.node == $n) | .reason' <<< "$rows"); "
+      done
+    done
+  done
+  [[ -z "$bad" ]] || die "deploy: ${bad%; }. Fix it, or FREELUNCH_CHECK_NEEDS=0 to deploy anyway"
 }
 
 # remote_script <host> <redact>: the script deploy pipes to `sudo bash -s` on a host.
@@ -2894,6 +2965,7 @@ cmd_deploy() {
 
   if [[ "${FREELUNCH_SSH_STRICT:-0}" == "1" ]]; then ssh_options yes; else ssh_options accept-new; fi
   token_reminders
+  [[ "$dry_run" == "1" ]] || graph_gate "${hosts[@]}"
   for h in "${hosts[@]}"; do
     if [[ "$(jq -r --arg h "$h" '.[$h].kind' "$TMP/targets.json")" == "platform" ]]; then engine_deploy "$h" "$dry_run"; else deploy_host "$h" "$dry_run"; fi
   done

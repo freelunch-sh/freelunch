@@ -55,8 +55,18 @@ locals {
       bucket   = a.bucket
       database = a.database
       plan     = a.plan
+      needs    = a.needs
+      port     = a.port
     }
   }
+
+  # The graph: an app's effective needs are its needs plus its bucket and database.
+  needs = { for name, a in var.apps : name => distinct(concat(a.needs, compact([a.bucket, a.database]))) }
+  # The nodes a need can name: other apps, buckets and databases.
+  need_nodes = setunion(keys(var.apps), keys(local.buckets), keys(local.databases))
+  unknown_needs = sort(flatten([
+    for name, ns in local.needs : [for n in ns : "${name} (needs ${n})" if !contains(local.need_nodes, n) && !(n == var.apps[name].bucket || n == var.apps[name].database)]
+  ]))
 
   buckets     = merge(concat([{}], [for s in data.terraform_remote_state.storage : { for b in try(s.outputs.buckets, []) : "${b.provider}-${b.name}" => b }])...)
   bucket_keys = merge(concat([{}], [for s in data.terraform_remote_state.storage : try(s.outputs.bucket_keys, {})])...)
@@ -76,28 +86,45 @@ locals {
     for name, a in var.apps : "${name} (database ${a.database})" if a.database != null && !(contains(keys(local.databases), coalesce(a.database, "-")) && contains(keys(local.database_credentials), coalesce(a.database, "-")))
   ])
 
-  # The S3 settings most SDKs and tools read on their own: the AWS SDKs, boto3, rclone with
-  # env_auth, the aws CLI. S3_BUCKET is the one name they don't share.
-  # A database's connection string is DATABASE_URL, the name most frameworks and ORMs read.
-  # try() gives {} for an app without a bucket or a database (or one no stack made, which the
-  # outputs' preconditions stop with a message).
-  bucket_env = {
-    for name, a in var.apps : name => try({
-      AWS_ACCESS_KEY_ID     = local.bucket_keys[a.bucket].access_key_id
-      AWS_SECRET_ACCESS_KEY = local.bucket_keys[a.bucket].secret_access_key
-      AWS_REGION            = local.buckets[a.bucket].region
-      AWS_ENDPOINT_URL_S3   = local.buckets[a.bucket].endpoint
-      S3_BUCKET             = local.buckets[a.bucket].bucket
-    }, {}) if a.bucket != null && !contains(local.unknown_buckets, "${name} (bucket ${a.bucket})")
+  # What a node hands the app that depends on it, once per node: a database its connection
+  # string, a bucket its S3 settings. Every edge type reads this one map.
+  node_out = merge(
+    { for n, b in local.buckets : n => try({
+      bucket            = b.bucket
+      endpoint          = b.endpoint
+      region            = b.region
+      access_key_id     = local.bucket_keys[n].access_key_id
+      secret_access_key = local.bucket_keys[n].secret_access_key
+    }, null) },
+    { for n, d in local.databases : n => try({ url = local.database_credentials[n].url }, null) },
+  )
+
+  # The names the fields bucket and database have always used: the S3 settings most SDKs and
+  # tools read on their own (the AWS SDKs, boto3, rclone with env_auth, the aws CLI;
+  # S3_BUCKET is the one name they don't share), and DATABASE_URL, the name most frameworks
+  # and ORMs read.
+  legacy_env = {
+    for n, o in local.node_out : n => o == null ? {} : (
+      contains(keys(o), "url") ? { DATABASE_URL = o.url } : {
+        AWS_ACCESS_KEY_ID                       = o.access_key_id
+        AWS_SECRET_ACCESS_KEY                   = o.secret_access_key
+        AWS_REGION                              = o.region
+        AWS_ENDPOINT_URL_S3                     = o.endpoint
+        S3_BUCKET                               = o.bucket
+    })
   }
-  database_env = {
-    for name, a in var.apps : name => try({
-      DATABASE_URL = local.database_credentials[a.database].url
-    }, {}) if a.database != null && !contains(local.unknown_databases, "${name} (database ${a.database})")
+  # What a need adds, under the node's own name: neon-main gives NEON_MAIN_URL.
+  need_env = {
+    for n, o in local.node_out : n => o == null ? {} : { for k, v in o : "${upper(replace(n, "-", "_"))}_${upper(k)}" => v }
   }
+
   app_env = {
-    for name, a in var.apps : name => merge(try(local.bucket_env[name], {}), try(local.database_env[name], {}))
-    if contains(keys(local.bucket_env), name) || contains(keys(local.database_env), name)
+    for name, a in var.apps : name => merge(concat(
+      [for n in compact([a.bucket, a.database]) : try(local.legacy_env[n], {})],
+      [for n in a.needs : try(local.need_env[n], {})],
+      [{}]
+    )...)
+    if length(compact([a.bucket, a.database])) > 0 || length(a.needs) > 0
   }
 
   app_hosts = distinct(values(local.app_host))

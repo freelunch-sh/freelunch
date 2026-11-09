@@ -3747,6 +3747,71 @@ test_check_reports_broken_nodes() {
   equals "$(jq -r '.[] | select(.node == "api") | .exists' <<< "$out")" "null"
 }
 
+# --- the graph: needs ------------------------------------------------------------------------
+
+# graph_project <dir> <apps block>: a project with the apps api and web on oci-main and the neon database
+graph_project() {
+  new_project "$1"
+  give_database "$1"
+  sed -i.bak 's|, database = "neon-main"||' "$1/.freelunch/apps.tfvars"
+  python3 - "$1/.freelunch/apps.tfvars" "$2" <<'PYEOF'
+import sys,re
+p,block=sys.argv[1],sys.argv[2]
+s=open(p).read()
+s=re.sub(r'apps = \{.*?\n\}\n','apps = {\n'+block+'\n}\n',s,count=1,flags=re.S)
+open(p,'w').write(s)
+PYEOF
+}
+
+# What an app needs is deployed before it, even when its name sorts first; apps with nothing
+# between them keep their order.
+test_deploy_follows_needs() {
+  local p="$WORK/graph-order" out order
+  graph_project "$p" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", needs = ["web"] }
+  web = { host = "oci-main", compose = "../compose.yaml", port = 8080 }'
+  GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  order="$(grep -o 'docker compose up .* @ [a-z]*' "$p/fake.log" | sed 's/.* @ //' | tr '\n' ' ')"
+  equals "$order" "web api cloudflared "
+  graph_project "$p-flat" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env" }
+  web = { host = "oci-main", compose = "../compose.yaml" }'
+  GHCR_TOKEN=x deploy_in "$p-flat" >/dev/null 2>&1
+  equals "$(grep -o 'docker compose up .* @ [a-z]*' "$p-flat/fake.log" | sed 's/.* @ //' | tr '\n' ' ')" "api web cloudflared "
+}
+
+test_deploy_refuses_a_circle_and_unknown_needs() {
+  local p="$WORK/graph-bad" out
+  graph_project "$p" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", needs = ["web"] }
+  web = { host = "oci-main", compose = "../compose.yaml", needs = ["api"] }'
+  if out="$(GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "the apps need each other in a circle: api -> web -> api"
+  lacks "$(cat "$p/fake.log" 2>/dev/null)" "docker compose up"
+  graph_project "$p-unknown" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", needs = ["nonesuch"] }'
+  if out="$(GHCR_TOKEN=x deploy_in "$p-unknown" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "Apps need nodes that don't exist: api (needs nonesuch)"
+  graph_project "$p-self" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", needs = ["api"] }'
+  if out="$(GHCR_TOKEN=x deploy_in "$p-self" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "circle: api -> api"
+}
+
+# A need on a database puts its settings in the environment under the node's name, keeps the
+# secret out of the dry run, and holds the deploy back while the database does not answer.
+test_deploy_checks_the_nodes_an_app_needs() {
+  local p="$WORK/graph-gate" out
+  graph_project "$p" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", needs = ["neon-main"] }'
+  out="$(GHCR_TOKEN=x deploy_in "$p" --dry-run 2>&1)" || { echo "$out"; return 1; }
+  lacks "$out" "mock-db-pass"
+  GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  contains "$(cat "$p/host/apps/api/.env")" "NEON_MAIN_URL=$DB_URL"
+  lacks "$(cat "$p/host/apps/api/.env")" "DATABASE_URL"
+  rm -r "$p/host"
+  if out="$(FAKE_TCP_DOWN="ep-mock.eu-central-1.aws.neon.tech" GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "api needs neon-main: nothing answers at ep-mock.eu-central-1.aws.neon.tech:5432"
+  lacks "$out" "mock-db-pass"
+  [[ ! -d "$p/host/apps/api" ]] || { echo "nothing should have been sent"; return 1; }
+  FREELUNCH_CHECK_NEEDS=0 FAKE_TCP_DOWN="ep-mock.eu-central-1.aws.neon.tech" GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  exists "$p/host/apps/api/.env"
+}
+
 # A provider's engine is what its provider.yaml says, or what its iac implies.
 test_engine_of_defaults_from_iac() {
   equals "$("$CLI" engine render)" tofu

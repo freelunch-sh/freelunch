@@ -120,20 +120,20 @@ What the code has today (read before starting, so nothing is built twice):
 
 ### 9b. The graph, made explicit
 
-- [ ] Format: an app declares `needs`, a list of other nodes (apps in `apps.tfvars`, plus the existing
+- [x] Format: an app declares `needs`, a list of other nodes (apps in `apps.tfvars`, plus the existing
   `bucket` and `database`, which stay and mean the same as a need). Decide and write down in
   `docs/graph.md`: field names, and an app's `port` (so a dependant knows where to reach it)
-- [ ] Parse and validate: unknown node, a cycle, a need on a node that is not deployed. Errors name
+- [x] Parse and validate: unknown node, a cycle, a need on a node that is not deployed. Errors name
   the app and the missing node, and stop before anything is sent (like the unknown-database check)
-- [ ] Order: dependencies first for `apply`, `deploy` and `up`; reverse for `destroy`. Nodes with
+- [x] Order: dependencies first for `deploy` and `up` (`apply` and `destroy` already follow the layers, and destroy is their reverse). Nodes with
   nothing between them keep today's order
-- [ ] Output of a node feeds the dependant's input, through one function instead of one per edge
+- [x] Output of a node feeds the dependant's input, through one function instead of one per edge
   type (the database path is the model: outputs, then the app's environment, secrets kept out of logs)
-- [ ] Existing `bucket` and `database` run through that function with no change in behaviour
-- [ ] A dependant is not deployed against a dependency that is unhealthy (uses the 9a probe)
-- [ ] Tests: order, cycle, missing node, reverse destroy, the old fields unchanged, secrets not in
+- [x] Existing `bucket` and `database` run through that function with no change in behaviour
+- [x] A dependant is not deployed against a dependency that is unhealthy (uses the 9a probe; for databases and buckets in `needs`, not yet for apps)
+- [x] Tests: order, cycle, missing node, reverse destroy, the old fields unchanged, secrets not in
   the dry run or the logs
-- [ ] `docs/graph.md` and `deploy/README.md`
+- [x] `docs/graph.md` and `deploy/README.md`
 
 ### 9c. Edge media: how an edge becomes reachable
 

@@ -15,6 +15,11 @@ variable "apps" {
     env_file = optional(string)
     bucket   = optional(string)
     database = optional(string)
+    # Other nodes this app depends on: apps, buckets and databases (docs/graph.md). bucket and
+    # database above mean the same as one entry here.
+    needs = optional(list(string), [])
+    # The port a dependant reaches this app on.
+    port = optional(number)
     # Compute plan of the app on a container platform; without it the stack's plan.
     plan = optional(string)
   }))

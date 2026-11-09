@@ -709,3 +709,41 @@ run "apps_need_a_database_a_stack_made" {
 
   expect_failures = [output.targets]
 }
+
+run "needs_name_other_nodes_and_feed_the_environment" {
+  command = plan
+
+  variables {
+    database_state_paths = ["tests/fixtures/database.tfstate"]
+    storage_state_paths  = ["tests/fixtures/storage.tfstate"]
+    apps = {
+      web = { host = "oci-main", compose = "compose.yaml", needs = ["api", "neon-main", "backblaze-b2-results"] }
+      api = { host = "oci-main", compose = "compose.yaml", port = 8080, database = "neon-main" }
+    }
+  }
+
+  assert {
+    condition     = output.graph.web.host == "oci-main" && output.graph.web.port == null && join(",", output.graph.web.needs) == "api,neon-main,backblaze-b2-results" && output.graph.api.port == 8080 && join(",", output.graph.api.needs) == "neon-main"
+    error_message = "The graph lists each app's host, port and effective needs; bucket and database count as needs."
+  }
+
+  assert {
+    condition     = nonsensitive(output.app_env.web.NEON_MAIN_URL) == "postgres://owner:mock-db-pass@ep-mock.eu-central-1.aws.neon.tech/neondb?sslmode=require" && nonsensitive(output.app_env.web.BACKBLAZE_B2_RESULTS_BUCKET) == "freelunch-results" && !contains(keys(output.app_env.web), "DATABASE_URL")
+    error_message = "A need gives the dependant the node's settings under the node's own name, and the old names stay for the old fields."
+  }
+
+  assert {
+    condition     = nonsensitive(output.app_env.api) == { DATABASE_URL = "postgres://owner:mock-db-pass@ep-mock.eu-central-1.aws.neon.tech/neondb?sslmode=require" }
+    error_message = "The database field still gives DATABASE_URL and nothing else."
+  }
+}
+
+run "a_need_on_nothing_is_refused" {
+  command = plan
+
+  variables {
+    apps = { web = { host = "oci-main", compose = "compose.yaml", needs = ["nonesuch"] } }
+  }
+
+  expect_failures = [output.graph]
+}
