@@ -11,6 +11,7 @@ free_tier: "5 free Starter clusters per organisation, each with 5 GiB row storag
 behavior: scale-to-zero
 card_required: "no"
 url: "https://www.pingcap.com/tidb-cloud-pricing/"
+secrets: "TIDBCLOUD_PUBLIC_KEY=TiDB Cloud public API key; TIDBCLOUD_PRIVATE_KEY=TiDB Cloud private API key"
 last_verified: "2026-11-08"
 notes: "A cluster that uses up its monthly quota refuses new connections until the month resets or a spending limit is set. A sixth cluster needs a card and a spending limit."
 sources:

@@ -22,8 +22,8 @@ Tick a box when the step is built, tested and committed. Design: [engines.md](en
 - [x] Move Northflank behind the interface
 - [x] Move Cloud Run behind the interface
 - [x] Move Scaleway behind the interface
-- [ ] `tofu` engine wraps the existing stack flow (done for platforms: `engine_apply`, `engine_destroy`; hosts such as OCI still call the stack flow directly)
-- [ ] Remove the per-provider `case` lists (status, up, destroy, deploy, doctor, setup, emit) (done for those verbs; left: the database providers' token names in `ci_secret_names`, which move to `provider.yaml` in section 4, and the arch and registry special cases)
+- [x] `tofu` engine wraps the existing stack flow (`engine_apply` and `engine_destroy` for hosts and platforms alike)
+- [x] Remove the per-provider `case` lists (token names are `secrets:` and image architecture is `arch:` in `provider.yaml`; the registry code is per-platform behaviour, not a list)
 - [x] Full CLI suite passes unchanged
 
 ## 3. `api` engine

@@ -11,6 +11,7 @@ free_tier: "New organisations (created on or after 2026-09-15) get a 30-day, $40
 behavior: scale-to-zero
 card_required: "unknown"
 url: "https://www.cockroachlabs.com/pricing/"
+secrets: "COCKROACH_API_KEY=CockroachDB Cloud API key"
 last_verified: "2026-11-09"
 notes: "Cockroach Continuum pricing (Standard and Mission Critical) applies to organisations created on or after 2026-09-15 and the pricing page lists no free plan; the docs page still describes the Basic allowance, so it is assumed to hold only for older organisations. This stack creates Basic clusters, which new organisations may not be able to create (unverified)."
 sources:

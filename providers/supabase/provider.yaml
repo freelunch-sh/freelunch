@@ -11,6 +11,7 @@ free_tier: "2 active projects, 500 MB database, 1 GB file storage; free projects
 behavior: pauses
 card_required: "no"
 url: "https://supabase.com/pricing"
+secrets: "SUPABASE_ACCESS_TOKEN=Supabase access token"
 last_verified: "2026-11-08"
 notes: "Free projects pause after 7 days of inactivity and need a manual restore; no automatic backups. Egress is reported as 5 GB or 2+2 GB depending on the source; check the pricing page."
 sources:

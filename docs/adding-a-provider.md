@@ -23,6 +23,7 @@ Schema (enforced by `catalog/`):
 | `free_tier_type` | `always-free`, `monthly-credit`, `trial`, `startup-credits`, `none` |
 | `card_required` | `"yes"`, `"no"`, `"unknown"` |
 | `free_tier`, `display_name`, `url`, `last_verified` | strings |
+| `secrets` | optional: the API tokens the stack reads from the environment, as `"NAME=what it is; NAME=what it is"` (no `#`, quotes or `;` in the text). `ci init` makes them GitHub secrets |
 | `behavior` | optional, for always-free tiers: `always-on`, `scale-to-zero`, `sleeps`, `pauses` or `capped`. The checklist shows it, so "free forever" and "free but asleep" are told apart |
 | `engine` | optional: `tofu`, `api`, `cli` or `guided` ([engines](engines.md)). Without it, `tofu`, or `guided` when `iac` is `stale` or `none`. `engine_<kind>` (say `engine_database: api`) overrides it for one kind of resource. A provider that is `ready` (or says `engine:`) with `tofu` needs a `stack/`; with `api`, an `api.yaml` ([api-adapter](api-adapter.md)). `bin/freelunch engine <name>` prints the result |
 | `jobs` | optional list of `provision`, `ci`, `cd`: what the provider supports in a workflow |

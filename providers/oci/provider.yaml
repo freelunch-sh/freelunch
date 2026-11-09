@@ -5,6 +5,7 @@ display_name: "Oracle Cloud (OCI)"
 category: hyperscalers
 status: ready
 layer: host
+arch: arm64
 terraform_provider: "oracle/oci"
 iac: partner
 free_tier_type: always-free

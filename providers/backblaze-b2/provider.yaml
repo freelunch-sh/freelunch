@@ -12,6 +12,7 @@ free_tier_type: always-free
 free_tier: "10 GB S3-compatible storage, always free; downloads free up to 3x the average stored"
 card_required: "no"
 url: "https://www.backblaze.com/cloud-storage/pricing"
+secrets: "B2_APPLICATION_KEY_ID=Backblaze key ID; B2_APPLICATION_KEY=Backblaze application key"
 last_verified: "2026-10-25"
 notes: "Buckets for apps: each one private, with a key that only reaches it, and its S3 settings in the app's environment on freelunch deploy."
 sources:

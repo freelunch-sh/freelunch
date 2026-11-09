@@ -4,6 +4,7 @@ display_name: "Google Cloud Run"
 category: containers
 status: ready
 layer: platform
+arch: amd64
 terraform_provider: "hashicorp/google"
 iac: official
 free_tier_type: always-free

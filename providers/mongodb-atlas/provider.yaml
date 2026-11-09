@@ -11,6 +11,7 @@ free_tier: "Free (M0) cluster: 512 MB storage, 500 connections, 100 ops/sec, 10 
 behavior: pauses
 card_required: "no"
 url: "https://www.mongodb.com/pricing"
+secrets: "MONGODB_ATLAS_PUBLIC_KEY=MongoDB Atlas public API key; MONGODB_ATLAS_PRIVATE_KEY=MongoDB Atlas private API key"
 last_verified: "2026-11-08"
 notes: null
 sources:

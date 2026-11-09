@@ -10,6 +10,7 @@ free_tier_type: always-free
 free_tier: "Free PostgreSQL and Valkey: one service of each type per organisation, single node, 1 CPU, 1 GB RAM, 1 GB disk (PostgreSQL, max_connections 20), powered off after inactivity"
 card_required: "no"
 url: "https://aiven.io/pricing"
+secrets: "AIVEN_TOKEN=Aiven API token"
 last_verified: "2026-11-08"
 notes: "Free MySQL is not on the free-plan page any more (MySQL is on the paid Developer tier). The Terraform plan slug free-1-1gb is unverified."
 sources:

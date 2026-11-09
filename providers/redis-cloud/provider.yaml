@@ -10,6 +10,7 @@ free_tier_type: always-free
 free_tier: "One free 30 MB database (Redis Cloud Essentials free plan), shared cloud, best-effort SLA, community support"
 card_required: "no"
 url: "https://redis.io/pricing/"
+secrets: "REDISCLOUD_ACCESS_KEY=Redis Cloud access key; REDISCLOUD_SECRET_KEY=Redis Cloud secret key"
 last_verified: "2026-11-08"
 notes: "Card requirement not stated on the pricing page (unverified)."
 sources:

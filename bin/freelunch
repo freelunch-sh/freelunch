@@ -1823,13 +1823,10 @@ cmd_lifecycle() { # plan|apply|destroy
         detach_wait "${hosts[0]}" "${child[@]}"
         return 0
       fi
-      for a in ${hosts[@]+"${hosts[@]}"}; do
-        ci_wait_guard "$a" "$plan_file"
-        if [[ $wait_for_capacity -eq 1 ]]; then apply_until_capacity "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; else apply_host "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; fi
-      done
-      # A platform stack declares the target; its API then makes it (the Northflank project).
-      for a in ${platforms[@]+"${platforms[@]}"}; do
-        engine_apply "$a" "$plan_file" ${extra[@]+"${extra[@]}"}
+      # Hosts and platforms go through the engine: a host stack applies (and may wait for
+      # capacity); a platform stack declares the target and its API then makes it.
+      for a in ${hosts[@]+"${hosts[@]}"} ${platforms[@]+"${platforms[@]}"}; do
+        ENGINE_WAIT=$wait_for_capacity engine_apply "$a" "$plan_file" ${extra[@]+"${extra[@]}"}
       done
       for a in ${services[@]+"${services[@]}"}; do apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; done
       [[ ${#hosts[@]} -eq 0 && ${#platforms[@]} -eq 0 ]] || cmd_hybrid
@@ -1838,8 +1835,7 @@ cmd_lifecycle() { # plan|apply|destroy
     destroy)
       for a in ${hosts[@]+"${hosts[@]}"}; do ci_wait_guard "$a" ""; done
       for a in ${glue[@]+"${glue[@]}"} ${services[@]+"${services[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
-      for a in ${platforms[@]+"${platforms[@]}"}; do engine_destroy "$a" ${extra[@]+"${extra[@]}"}; done
-      for a in ${hosts[@]+"${hosts[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
+      for a in ${platforms[@]+"${platforms[@]}"} ${hosts[@]+"${hosts[@]}"}; do engine_destroy "$a" ${extra[@]+"${extra[@]}"}; done
       [[ ${#hosts[@]} -eq 0 && ${#platforms[@]} -eq 0 ]] || cmd_hybrid ;;
   esac
 }
@@ -2131,9 +2127,9 @@ ready_stacks() {
 image_workflow() {
   local base="$1" s arm=0 x86=0 platforms; shift
   for s in "$@"; do
-    case "$s" in
-      oci) arm=1 ;;
-      gcp|aws|azure|northflank|cloud-run|scaleway|render) x86=1 ;;
+    case "$(meta "$s" arch)" in
+      arm64) arm=1 ;;
+      amd64) x86=1 ;;
     esac
   done
   if [[ $arm -eq $x86 ]]; then platforms="linux/amd64,linux/arm64"; elif [[ $arm -eq 1 ]]; then platforms="linux/arm64"; else platforms="linux/amd64"; fi
@@ -4380,7 +4376,13 @@ platform_field() {
 # target, then the provider's hook makes it (the Northflank project)
 engine_apply() {
   local p="$1" plan="$2"; shift 2
-  apply_once "$p" "$plan" "$@"
+  if [[ "$(meta "$p" layer)" == "host" ]]; then
+    # A host stack can wait for capacity (OCI), and is guarded against a wait running in CI.
+    ci_wait_guard "$p" "$plan"
+    if [[ "${ENGINE_WAIT:-0}" -eq 1 ]]; then apply_until_capacity "$p" "$plan" "$@"; else apply_host "$p" "$plan" "$@"; fi
+  else
+    apply_once "$p" "$plan" "$@"
+  fi
   engine_call "$p" apply
 }
 
@@ -7733,23 +7735,10 @@ ci_secret_names() {
     emit FREELUNCH_STATE_PASSPHRASE "the passphrase that encrypts the state (the line in .freelunch/.env)"
   fi
   for s in $(project_stacks); do
-    case "$s" in
-      cloudflare)   emit CLOUDFLARE_API_TOKEN "Cloudflare API token" ;;
-      neon)         emit NEON_API_KEY "Neon API key" ;;
-      supabase)     emit SUPABASE_ACCESS_TOKEN "Supabase access token" ;;
-      upstash)           emit UPSTASH_EMAIL "Upstash account email"; emit UPSTASH_API_KEY "Upstash API key" ;;
-      mongodb-atlas)     emit MONGODB_ATLAS_PUBLIC_KEY "MongoDB Atlas public API key"; emit MONGODB_ATLAS_PRIVATE_KEY "MongoDB Atlas private API key" ;;
-      cockroachdb)       emit COCKROACH_API_KEY "CockroachDB Cloud API key" ;;
-      tidb-cloud)        emit TIDBCLOUD_PUBLIC_KEY "TiDB Cloud public API key"; emit TIDBCLOUD_PRIVATE_KEY "TiDB Cloud private API key" ;;
-      aiven)             emit AIVEN_TOKEN "Aiven API token" ;;
-      redis-cloud)       emit REDISCLOUD_ACCESS_KEY "Redis Cloud access key"; emit REDISCLOUD_SECRET_KEY "Redis Cloud secret key" ;;
-      couchbase-capella) emit CAPELLA_AUTHENTICATION_TOKEN "Couchbase Capella API token" ;;
-      datastax-astra)    emit ASTRA_API_TOKEN "DataStax Astra token" ;;
-      yugabyte)          emit YBM_API_KEY "YugabyteDB Aeon API key" ;;
-      neo4j-aura)        emit AURA_CLIENT_ID "Neo4j Aura client ID"; emit AURA_CLIENT_SECRET "Neo4j Aura client secret" ;;
-      motherduck)        emit MOTHERDUCK_TOKEN "MotherDuck token"; emit MOTHERDUCK_ADMIN_TOKEN "MotherDuck admin token" ;;
-      backblaze-b2) emit B2_APPLICATION_KEY_ID "Backblaze key ID"; emit B2_APPLICATION_KEY "Backblaze application key" ;;
-    esac
+    # tokens a provider's stack needs: secrets: "NAME=what; NAME=what" in its provider.yaml
+    while IFS= read -r entry; do
+      [[ -z "$entry" ]] || emit "${entry%%=*}" "${entry#*=}"
+    done < <(meta "$s" secrets | tr ';' '\n' | sed -e 's/^ *//' -e 's/ *$//')
     while IFS=$'\t' read -r var what; do [[ -z "$var" ]] || emit "$var" "$what"; done < <(engine_call "$s" secrets)
     [[ "$(meta "$s" layer)" != "host" ]] || emit FREELUNCH_SSH_PRIVATE_KEY "the private SSH key deploy signs in to the hosts with (without a passphrase)"
   done
