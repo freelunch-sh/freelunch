@@ -1,0 +1,19 @@
+# A made-up tool whose resources are services: after create, freelunch asks for a key and keeps the
+# variables an app needs in the record (the service contract).
+tool: fakecli
+auth:
+  env: FAKECLI_TOKEN
+check: [fakecli, whoami]
+list: { command: [fakecli, list], format: lines, skip: 1 }
+create: [fakecli, create, "{name}"]
+delete: [fakecli, destroy, "{name}", --yes]
+gone: "not found"
+service:
+  kind: observability
+  host: "{name}.fakecli.test"
+  port: 443
+  capture:
+    key: [fakecli, key, "{name}"]
+  env:
+    MONITOR_URL: "https://hb.fakecli.test/{key}"
+    MONITOR_NAME: "{name}"

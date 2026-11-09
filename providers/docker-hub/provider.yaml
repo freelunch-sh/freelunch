@@ -2,16 +2,21 @@
 name: docker-hub
 display_name: "Docker Hub"
 category: iac-ci
-status: planned
+status: ready
 layer: service
+engine: registry
 terraform_provider: "docker/docker"
 iac: community
 free_tier_type: always-free
 free_tier: "1 private repository, unlimited public repositories"
 card_required: "no"
 url: "https://www.docker.com/pricing/"
+registry: "docker.io"
+registry_user: "DOCKERHUB_USERNAME"
+registry_token: "DOCKERHUB_TOKEN"
+registry_image: "docker.io/@USER@/@REPO@"
 last_verified: "2026-10-18"
-notes: null
+notes: "Images are pushed by the image workflow (freelunch init --image-workflow --registry docker-hub); freelunch makes no repository itself. A free account has one private repository, and pulls from Docker Hub are rate limited. Not yet run on a real account."
 sources:
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"

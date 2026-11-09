@@ -59,6 +59,15 @@ case "$1 ${2:-}" in
 esac
 exit 0
 EOF
+cat > "$WORK/bin/nc" <<'EOF'
+#!/usr/bin/env bash
+# nc -z -w 5 <host> <port>: answers, unless host:port is in FAKE_TCP_DOWN
+for a; do last="$a"; prev2="${prev:-}"; prev="$a"; done
+host="$prev2"
+echo "nc $*" >> "$FAKE_LOG"
+[[ " ${FAKE_TCP_DOWN:-} " != *" $host "* ]]
+EOF
+chmod +x "$WORK/bin/nc"
 ssh-keygen -q -t ed25519 -N '' -C fake-host -f "$WORK/hostkey"
 printf '#!/bin/sh\nexit 0\n' > "$WORK/bin/cloud-init"
 # Records the arguments a stack run gets instead of running tofu/terraform. Like them, init
@@ -396,7 +405,7 @@ mkdir -p "$WORK/doh-bin"
 #   back has no mounts, as Northflank's reference doesn't list them.
 cat > "$WORK/bin/curl" <<'EOF'
 #!/usr/bin/env bash
-method=GET data="" headers="" out="" write="" auth="" basic="" url="" query=()
+method=GET data="" headers="" out="" write="" auth="" basic="" url="" query=() dtoken=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -X)      method="$2"; shift ;;
@@ -410,6 +419,11 @@ while [[ $# -gt 0 ]]; do
              [[ "$2" != "X-Auth-Token: "* ]] || auth="${2#X-Auth-Token: }"; shift ;;
     --data-urlencode) query+=("$2"); shift ;;
     --max-time) shift ;;
+    -K)      # a config file: header and url lines, as freelunch writes them to keep a token off the command line
+             while IFS= read -r cl; do
+               [[ "$cl" != 'header = "Authorization: Token '* ]] || { dtoken="${cl#header = \"Authorization: Token }"; dtoken="${dtoken%\"}"; }
+               [[ "$cl" != 'url = "'* ]] || { url="${cl#url = \"}"; url="${url%\"}"; }
+             done < "$2"; shift ;;
     -*)      ;;
     *)       url="$1" ;;
   esac
@@ -741,6 +755,31 @@ case "$url" in
       "DELETE /registrycredentials/"*) rm -f "$rd/creds/${path##*/}.json"; respond 204 '' ;;
       *) respond 404 '{"message":"no such route"}' ;;
     esac ;;
+  https://desec.io/api/v1/*)
+    # deSEC: one JSON file of rrsets per zone in $FAKE_DNS, the token FAKE_DESEC_TOKEN (default
+    # desec-token). A write is a bulk PATCH: records [] deletes. FAKE_DESEC_429 makes the first write wait.
+    path="${url#https://desec.io/api/v1}"; dns="${FAKE_DNS:?}"; mkdir -p "$dns"
+    echo "desec $method $path" >> "$FAKE_LOG"
+    if [[ "$dtoken" != "${FAKE_DESEC_TOKEN:-desec-token}" ]]; then respond 401 '{"detail":"Invalid token."}'; exit 0; fi
+    zone="${path#/domains/}"; zone="${zone%%/*}"
+    zf="$dns/desec-$zone.json"; [[ -f "$zf" ]] || echo '[]' > "$zf"
+    case "$method $path" in
+      "GET /domains/") respond 200 '[]' ;;
+      "GET /domains/"*/rrsets/*) respond 200 "$(jq -c 'map(. + {name: .subname, domain: "x"})' "$zf")" ;;
+      "PATCH /domains/"*/rrsets/)
+        if [[ -n "${FAKE_DESEC_429:-}" && ! -f "$dns/429" ]]; then
+          touch "$dns/429"; [[ -z "$headers" ]] || printf 'HTTP/2 429\r\nretry-after: 0\r\n\r\n' > "$headers"; respond 429 '{"detail":"Request was throttled."}'; exit 0
+        fi
+        printf '%s\n' "$data" >> "$dns/desec-sent.log"
+        jq -c --argjson c "$data" '. as $now | reduce $c[] as $x ($now; map(select((.subname == $x.subname and .type == $x.type) | not)) + (if $x.records == [] then [] else [$x] end))' "$zf" > "$zf.new" && mv "$zf.new" "$zf"
+        respond 200 "$(cat "$zf")" ;;
+      *) respond 404 '{"detail":"Not found."}' ;;
+    esac ;;
+  https://www.duckdns.org/update*)
+    # Duck DNS: logs the name, address and clear, never the token; the token is FAKE_DUCK_TOKEN (default duck-token)
+    q="${url#*\?}"; tk="$(sed -n 's/.*token=\([^&]*\).*/\1/p' <<< "$q")"
+    echo "duckdns $(sed -e 's/token=[^&]*&\{0,1\}//' <<< "$q")" >> "$FAKE_LOG"
+    if [[ "$tk" != "${FAKE_DUCK_TOKEN:-duck-token}" ]]; then respond 200 'KO'; else respond 200 'OK'; fi ;;
   https://artifactregistry.googleapis.com/v1/*)
     path="${url#https://artifactregistry.googleapis.com/v1}"
     cr="${FAKE_CR:?}"
@@ -3406,10 +3445,31 @@ case "$1" in
   list) [[ -z "${FAKE_CLI_LIST_FAIL:-}" ]] || { echo "boom" >&2; exit 1; }; echo "NAME  REGION"; sed 's/$/  eu/' "$FAKE_CLI_DIR/dbs" ;;
   create) grep -qx "$2" "$FAKE_CLI_DIR/dbs" && { echo "$2 exists" >&2; exit 1; }; echo "$2" >> "$FAKE_CLI_DIR/dbs" ;;
   deploy) ;;
+  key) echo "k-$2" ;;
+  secret) echo "s-$2" ;;
   destroy) grep -qx "$2" "$FAKE_CLI_DIR/dbs" || { echo "database $2 not found" >&2; exit 1; }; grep -vx "$2" "$FAKE_CLI_DIR/dbs" > "$FAKE_CLI_DIR/dbs.new"; mv "$FAKE_CLI_DIR/dbs.new" "$FAKE_CLI_DIR/dbs" ;;
 esac
 EOF
 chmod +x "$WORK/cli-bin/fakecli"
+
+
+# A made-up turso: turso auth whoami | db list | db create <n> | db show <n> --url | db tokens create <n> |
+# db destroy <n> --yes. Its databases are the lines of $FAKE_TURSO_DIR/dbs, and it logs to $FAKE_TURSO_DIR/log.
+# Every token it makes is different (eyJ-mock-token-<n>); whoami fails without TURSO_API_TOKEN.
+cat > "$WORK/cli-bin/turso" <<'EOF'
+#!/usr/bin/env bash
+d="${FAKE_TURSO_DIR:?}"; mkdir -p "$d"; touch "$d/dbs"
+echo "turso $*" >> "$d/log"
+case "$1 $2" in
+  "auth whoami") [[ -n "${TURSO_API_TOKEN:-}" ]] || { echo "not signed in" >&2; exit 1; }; echo me ;;
+  "db list") echo "NAME GROUP URL"; while read -r n; do [[ -z "$n" ]] || echo "$n default libsql://$n-org.turso.io"; done < "$d/dbs" ;;
+  "db create") grep -qx "$3" "$d/dbs" && { echo "database $3 already exists" >&2; exit 1; }; echo "$3" >> "$d/dbs"; echo "Created database $3" ;;
+  "db show") grep -qx "$3" "$d/dbs" || { echo "database $3 not found" >&2; exit 1; }; echo "libsql://$3-org.turso.io" ;;
+  "db tokens") n=$(( $(cat "$d/tokens" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$d/tokens"; echo "eyJ-mock-token-$n" ;;
+  "db destroy") grep -qx "$3" "$d/dbs" || { echo "database $3 not found" >&2; exit 1; }; grep -vx "$3" "$d/dbs" > "$d/dbs.new"; mv "$d/dbs.new" "$d/dbs" ;;
+esac
+EOF
+chmod +x "$WORK/cli-bin/turso"
 
 # engine_checkout <dir> <name>: a copy of the CLI whose providers folder has that fixture's
 # provider files (its yaml and scripts, not its scenario)
@@ -3677,6 +3737,616 @@ test_deploy_reads_a_database_from_an_engine_record() {
   contains "$(cat "$p/host/apps/api/.env")" "DATABASE_URL=libsql://app-me.turso.io?authToken=mock-token"
   out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" --dry-run 2>&1)"
   lacks "$out" "mock-token"
+}
+
+# --- node probes -------------------------------------------------------------------------------
+
+# check_in <dir> [args]: freelunch check with the fakes (ssh, docker, nc)
+check_in() {
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" \
+    CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN:-}" "$CLI" check "$@")
+}
+
+# Every node answers exists, reachable and healthy, as JSON or as a table.
+test_check_probes_each_node_type() {
+  local p="$WORK/probe" out key
+  new_project "$p"
+  give_database "$p"
+  mkdir -p "$p/.freelunch/backblaze-b2"
+  cp "$ROOT/deploy/tests/fixtures/storage.tfstate" "$p/.freelunch/backblaze-b2/terraform.tfstate"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$p" >/dev/null 2>&1
+  out="$(check_in "$p" --json)"
+  equals "$(jq -r '.[] | select(.node == "oci-main") | "\(.type) \(.exists) \(.reachable) \(.healthy)"' <<< "$out")" "host true true true"
+  equals "$(jq -r '.[] | select(.node == "api") | "\(.type) \(.exists) \(.reachable) \(.healthy)"' <<< "$out")" "app true true true"
+  equals "$(jq -r '.[] | select(.node == "neon-main") | "\(.type) \(.healthy)"' <<< "$out")" "database true"
+  equals "$(jq -r '.[] | select(.node == "backblaze-b2-results") | "\(.type) \(.healthy)"' <<< "$out")" "bucket true"
+  equals "$(jq -r '.[] | select(.type == "tunnel") | "\(.node) \(.reachable) \(.reason)"' <<< "$out")" "tunnel-oci-main null not checked without CLOUDFLARE_API_TOKEN"
+  contains "$(cat "$p/fake.log")" "nc -z -w 5 ep-mock.eu-central-1.aws.neon.tech 5432"
+  contains "$(cat "$p/fake.log")" "nc -z -w 5 s3.us-west-004.backblazeb2.com 443"
+  # one node, as a table
+  out="$(check_in "$p" neon-main)"
+  contains "$out" "ok    database  neon-main"
+  lacks "$out" "oci-main"
+  # a node that isn't there is named, with the ones that are
+  if out="$(check_in "$p" nonesuch 2>&1)"; then echo "check should have failed"; return 1; fi
+  contains "$out" "no node named nonesuch. Nodes: "
+}
+
+# A broken node says what is wrong, and fails the command; a node that was not asked does not.
+test_check_reports_broken_nodes() {
+  local p="$WORK/probe-bad" out key
+  new_project "$p"
+  give_database "$p"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$p" >/dev/null 2>&1
+  if out="$(FAKE_TCP_DOWN="ep-mock.eu-central-1.aws.neon.tech" check_in "$p" --json)"; then echo "check should have failed"; return 1; fi
+  equals "$(jq -r '.[] | select(.node == "neon-main") | "\(.reachable) \(.healthy) \(.reason)"' <<< "$out")" "false false nothing answers at ep-mock.eu-central-1.aws.neon.tech:5432"
+  # a stopped container
+  if out="$(FAKE_STOPPED=api check_in "$p" --json)"; then echo "check should have failed"; return 1; fi
+  equals "$(jq -r '.[] | select(.node == "api") | "\(.exists) \(.healthy) \(.reason)"' <<< "$out")" "true false 1 of its containers on oci-main aren't running and healthy"
+  # an app that was never deployed
+  rm -r "$p/host/apps/api"
+  if out="$(check_in "$p" --json)"; then echo "check should have failed"; return 1; fi
+  equals "$(jq -r '.[] | select(.node == "api") | "\(.exists) \(.reason)"' <<< "$out")" "false not deployed on oci-main yet (freelunch deploy)"
+  # a host whose key isn't pinned is not asked, and that is not a failure
+  rm "$p/.freelunch/known_hosts"
+  sed -i.bak 's|, database = "neon-main"||' "$p/.freelunch/apps.tfvars"
+  out="$(check_in "$p" --json)"
+  equals "$(jq -r '.[] | select(.node == "oci-main") | "\(.healthy) \(.reason)"' <<< "$out")" "null its host key isn't pinned yet (freelunch trust oci-main)"
+  equals "$(jq -r '.[] | select(.node == "api") | .exists' <<< "$out")" "null"
+}
+
+# --- the graph: needs ------------------------------------------------------------------------
+
+# graph_project <dir> <apps block>: a project with the apps api and web on oci-main and the neon database
+graph_project() {
+  new_project "$1"
+  give_database "$1"
+  sed -i.bak 's|, database = "neon-main"||' "$1/.freelunch/apps.tfvars"
+  python3 - "$1/.freelunch/apps.tfvars" "$2" <<'PYEOF'
+import sys,re
+p,block=sys.argv[1],sys.argv[2]
+s=open(p).read()
+s=re.sub(r'apps = \{.*?\n\}\n','apps = {\n'+block+'\n}\n',s,count=1,flags=re.S)
+open(p,'w').write(s)
+PYEOF
+}
+
+# What an app needs is deployed before it, even when its name sorts first; apps with nothing
+# between them keep their order.
+test_deploy_follows_needs() {
+  local p="$WORK/graph-order" out order
+  graph_project "$p" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", needs = ["web"] }
+  web = { host = "oci-main", compose = "../compose.yaml", port = 8080 }'
+  GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  order="$(grep -o 'docker compose up .* @ [a-z]*' "$p/fake.log" | sed 's/.* @ //' | tr '\n' ' ')"
+  equals "$order" "web api cloudflared "
+  graph_project "$p-flat" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env" }
+  web = { host = "oci-main", compose = "../compose.yaml" }'
+  GHCR_TOKEN=x deploy_in "$p-flat" >/dev/null 2>&1
+  equals "$(grep -o 'docker compose up .* @ [a-z]*' "$p-flat/fake.log" | sed 's/.* @ //' | tr '\n' ' ')" "api web cloudflared "
+}
+
+test_deploy_refuses_a_circle_and_unknown_needs() {
+  local p="$WORK/graph-bad" out
+  graph_project "$p" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", needs = ["web"] }
+  web = { host = "oci-main", compose = "../compose.yaml", needs = ["api"] }'
+  if out="$(GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "the apps need each other in a circle: api -> web -> api"
+  lacks "$(cat "$p/fake.log" 2>/dev/null)" "docker compose up"
+  graph_project "$p-unknown" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", needs = ["nonesuch"] }'
+  if out="$(GHCR_TOKEN=x deploy_in "$p-unknown" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "Apps need nodes that don't exist: api (needs nonesuch)"
+  graph_project "$p-self" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", needs = ["api"] }'
+  if out="$(GHCR_TOKEN=x deploy_in "$p-self" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "circle: api -> api"
+}
+
+# A need on a database puts its settings in the environment under the node's name, keeps the
+# secret out of the dry run, and holds the deploy back while the database does not answer.
+test_deploy_checks_the_nodes_an_app_needs() {
+  local p="$WORK/graph-gate" out
+  graph_project "$p" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", needs = ["neon-main"] }'
+  out="$(GHCR_TOKEN=x deploy_in "$p" --dry-run 2>&1)" || { echo "$out"; return 1; }
+  lacks "$out" "mock-db-pass"
+  GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  contains "$(cat "$p/host/apps/api/.env")" "NEON_MAIN_URL=$DB_URL"
+  lacks "$(cat "$p/host/apps/api/.env")" "DATABASE_URL"
+  rm -r "$p/host"
+  if out="$(FAKE_TCP_DOWN="ep-mock.eu-central-1.aws.neon.tech" GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "api needs neon-main: nothing answers at ep-mock.eu-central-1.aws.neon.tech:5432"
+  lacks "$out" "mock-db-pass"
+  [[ ! -d "$p/host/apps/api" ]] || { echo "nothing should have been sent"; return 1; }
+  FREELUNCH_CHECK_NEEDS=0 FAKE_TCP_DOWN="ep-mock.eu-central-1.aws.neon.tech" GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  exists "$p/host/apps/api/.env"
+}
+
+# --- edge media ------------------------------------------------------------------------------
+
+# A mesh stack "applied" from a fixture: the tailscale stack with the mesh output of two hosts
+give_mesh() { # give_mesh <project> <ssh true|false>
+  mkdir -p "$1/.freelunch/tailscale"
+  jq -n --argjson ssh "$2" '{version: 4, serial: 1, lineage: "x", outputs: {mesh: {value: {
+      "oci-main": {address: "100.64.0.7", ssh: $ssh}, "oci-edge-1": {address: "100.64.0.8", ssh: $ssh}},
+      type: "dynamic"}}, resources: []}' > "$1/.freelunch/tailscale/terraform.tfstate"
+}
+
+# web (on oci-edge-1 unless said) needs api (oci-main, port 8080): the medium follows where they are.
+test_edges_pick_a_medium_by_where_the_nodes_are() {
+  local p="$WORK/edge" out
+  # same host: the Docker network, by name
+  graph_project "$p" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", port = 8080 }
+  web = { host = "oci-main", compose = "../compose.yaml", needs = ["api"] }'
+  out="$(GHCR_TOKEN=x deploy_in "$p" 2>&1)"
+  contains "$out" "web needs api: compose network (http://api:8080)"
+  contains "$(cat "$p/host/apps/web/.env")" "API_URL=http://api:8080"
+  contains "$(cat "$p/fake.log")" "docker network create freelunch"
+  # different hosts, a Cloudflare route to the app: public
+  graph_project "$p-pub" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", port = 8080 }
+  web = { host = "oci-edge-1", compose = "../compose.yaml", needs = ["api"] }'
+  out="$(GHCR_TOKEN=x deploy_in "$p-pub" 2>&1)"
+  contains "$out" "web needs api: cloudflare route (https://api.example.com)"
+  contains "$(cat "$p-pub/host/apps/web/.env")" "API_URL=https://api.example.com"
+  # a mesh beats the public route: private
+  give_mesh "$p-pub" false
+  out="$(GHCR_TOKEN=x deploy_in "$p-pub" 2>&1)"
+  contains "$out" "web needs api: mesh (http://100.64.0.7:8080)"
+  contains "$(cat "$p-pub/host/apps/web/.env")" "API_URL=http://100.64.0.7:8080"
+  # with ssh on, deploy goes to the mesh address
+  give_mesh "$p-pub" true
+  GHCR_TOKEN=x deploy_in "$p-pub" >/dev/null 2>&1
+  contains "$(cat "$p-pub/fake.log")" "ubuntu@100.64.0.7"
+  # different hosts, no route and no mesh: stopped, with what is missing
+  graph_project "$p-none" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", port = 8080 }
+  web = { host = "oci-edge-1", compose = "../compose.yaml", needs = ["api"] }'
+  rm -r "$p-none/.freelunch/cloudflare"
+  if out="$(GHCR_TOKEN=x deploy_in "$p-none" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "web (on oci-edge-1) needs api (on oci-main), and nothing connects them"
+  # a dependency without a port can't be reached
+  graph_project "$p-noport" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env" }
+  web = { host = "oci-main", compose = "../compose.yaml", needs = ["api"] }'
+  if out="$(GHCR_TOKEN=x deploy_in "$p-noport" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "api has no port in apps.tfvars"
+}
+
+# A hybrid project: a frontend on one host, a backend on another, and a database.
+test_edges_hybrid_frontend_backend_database() {
+  local p="$WORK/edge-hybrid" out
+  graph_project "$p" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", port = 8080, needs = ["neon-main"] }
+  web = { host = "oci-edge-1", compose = "../compose.yaml", needs = ["api"] }'
+  give_mesh "$p" false
+  GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  contains "$(cat "$p/host/apps/web/.env")" "API_URL=http://100.64.0.7:8080"
+  contains "$(cat "$p/host/apps/api/.env")" "NEON_MAIN_URL=$DB_URL"
+  lacks "$(cat "$p/host/apps/web/.env")" "mock-db-pass"
+  equals "$(grep -o 'docker compose up .* @ [a-z]*' "$p/fake.log" | sed 's/.* @ //' | tr '\n' ' ')" "api cloudflared web "
+}
+
+# --- journeys --------------------------------------------------------------------------------
+
+# journey_in <dir> [args]: freelunch journey with the fakes
+journey_in() {
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" \
+    FREELUNCH_VERIFY_INTERVAL=0 FREELUNCH_VERIFY_TIMEOUT=0 CLOUDFLARE_API_TOKEN="${TEST_CF_TOKEN:-}" "$CLI" journey "$@" 2>/dev/null)
+}
+
+# a deployed project: web (no route) needs api (route api.example.com) needs the neon database
+journey_project() {
+  local key
+  graph_project "$1" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", port = 8080, needs = ["neon-main"] }
+  web = { host = "oci-edge-1", compose = "../compose.yaml", needs = ["api"] }'
+  give_mesh "$1" false
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$1" >/dev/null 2>&1
+}
+
+test_journey_follows_each_path() {
+  local p="$WORK/journey-all" out
+  journey_project "$p"
+  out="$(journey_in "$p")"
+  contains "$out" "api.example.com"
+  contains "$out" "ok    user -> api.example.com (https)"
+  contains "$out" "api.example.com -> tunnel-oci-main (cloudflare): not checked without CLOUDFLARE_API_TOKEN"
+  contains "$out" "tunnel-oci-main -> api (route)"
+  contains "$out" "ok    api -> neon-main (direct)"
+  # a path with no route starts at the app, and goes through the edge's medium
+  contains "$out" "$(printf 'web\n  ok    (no route) -> web (-)')"
+  contains "$out" "ok    web -> api (mesh)"
+  # one journey, as JSON
+  out="$(journey_in "$p" api.example.com --json)"
+  equals "$(jq -r '.[0] | "\(.ok) \([.hops[].to] | join(","))"' <<< "$out")" "true api.example.com,tunnel-oci-main,api,neon-main"
+  if out="$(journey_in "$p" nonesuch)"; then echo "journey should have failed"; return 1; fi
+}
+
+# A broken hop in each position stops the journey there and says which edge and why.
+test_journey_stops_at_the_first_broken_hop() {
+  local p="$WORK/journey-bad" out
+  journey_project "$p"
+  # the user's hop: the hostname gives 503
+  if out="$(FAKE_APP_CODE=503 journey_in "$p" api.example.com --json)"; then echo "journey should have failed"; return 1; fi
+  equals "$(jq -r '.[0] | "\(.ok) \(.hops | length) \(.hops[-1].from)->\(.hops[-1].to) \(.hops[-1].reason)"' <<< "$out")" "false 1 user->api.example.com nothing answers at https://api.example.com"
+  # the app: its container is stopped, so the hop after it is never asked
+  if out="$(FAKE_STOPPED=api journey_in "$p" api.example.com --json)"; then echo "journey should have failed"; return 1; fi
+  equals "$(jq -r '.[0] | "\(.hops | length) \(.hops[-1].to) \(.hops[-1].ok)"' <<< "$out")" "3 api false"
+  # the database at the end
+  if out="$(FAKE_TCP_DOWN="ep-mock.eu-central-1.aws.neon.tech" journey_in "$p" web)"; then echo "journey should have failed"; return 1; fi
+  contains "$out" "FAIL  api -> neon-main (direct): nothing answers at ep-mock.eu-central-1.aws.neon.tech:5432"
+  lacks "$out" "mock-db-pass"
+}
+
+# --- the dns engine --------------------------------------------------------------------------
+
+# dns_in <dir> <args...>: freelunch with the fake deSEC and Duck DNS, and their tokens
+dns_in() {
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/bin:$PATH" FAKE_LOG="$dir/fake.log" FAKE_DNS="$dir/dns" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_ROOT="$dir/host" \
+    DESEC_TOKEN="${TEST_DESEC_TOKEN-desec-token}" DUCKDNS_TOKEN="${TEST_DUCK_TOKEN-duck-token}" "$CLI" "$@")
+}
+
+dns_project() { # dns_project <dir>: oci-main deployed (203.0.113.10), the example desec config
+  new_project "$1"
+  dns_in "$1" dns desec init >/dev/null 2>&1
+}
+
+# apply makes the A record and its ownership TXT in one bulk write, and again does nothing
+test_dns_desec_applies_and_is_idempotent() {
+  local p="$WORK/dns-desec" out
+  dns_project "$p"
+  out="$(dns_in "$p" dns desec apply --dry-run 2>&1)"
+  contains "$out" "dns: set A api.myapp.dedyn.io -> 203.0.113.10"
+  contains "$out" "dns: set TXT _freelunch-owner.api.myapp.dedyn.io"
+  lacks "$(cat "$p/fake.log" 2>/dev/null)" "desec PATCH"
+  dns_in "$p" dns desec apply >/dev/null 2>&1
+  equals "$(jq -c '[.[] | "\(.subname) \(.type) \(.records[0])"] | sort' "$p/dns/desec-myapp.dedyn.io.json")" '["_freelunch-owner.api TXT \"freelunch-owner=dns-desec\"","api A 203.0.113.10"]'
+  equals "$(grep -c 'desec PATCH' "$p/fake.log")" "1"
+  out="$(dns_in "$p" dns desec apply 2>&1)"
+  contains "$out" "is as the project wants it"
+  equals "$(grep -c 'desec PATCH' "$p/fake.log")" "1"
+  contains "$(dns_in "$p" dns desec status 2>&1)" "api  A 203.0.113.10  ok"
+  # the address changes: only the record is written
+  sed -i.bak 's/203.0.113.10/203.0.113.99/' "$p/.freelunch/oci/terraform.tfstate"
+  dns_in "$p" dns desec apply >/dev/null 2>&1
+  equals "$(jq -r '.[] | select(.subname == "api") | .records[0]' "$p/dns/desec-myapp.dedyn.io.json")" "203.0.113.99"
+  # the token never reaches the log
+  lacks "$(cat "$p/fake.log")" "desec-token"
+}
+
+# A name freelunch didn't make is never touched, by apply or destroy, and a throttled write waits
+test_dns_desec_leaves_other_peoples_records_alone() {
+  local p="$WORK/dns-foreign" out
+  dns_project "$p"
+  mkdir -p "$p/dns"
+  echo '[{"subname":"api","type":"A","ttl":3600,"records":["198.51.100.1"]}]' > "$p/dns/desec-myapp.dedyn.io.json"
+  if out="$(dns_in "$p" dns desec apply 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "api.myapp.dedyn.io already has records (A) and freelunch didn't make them"
+  equals "$(jq -r '.[0].records[0]' "$p/dns/desec-myapp.dedyn.io.json")" "198.51.100.1"
+  # another project's marker
+  echo '[{"subname":"api","type":"A","ttl":3600,"records":["198.51.100.1"]},{"subname":"_freelunch-owner.api","type":"TXT","ttl":3600,"records":["\"freelunch-owner=someone-else\""]}]' > "$p/dns/desec-myapp.dedyn.io.json"
+  if out="$(dns_in "$p" dns desec apply 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "is kept by another project"
+  # destroy removes ours (a second name) and leaves the others
+  sed -i.bak 's|^records = {|records = {\n  www = { value = "203.0.113.5" }|' "$p/.freelunch/desec/terraform.tfvars"
+  sed -i.bak 's|^  api = .*||' "$p/.freelunch/desec/terraform.tfvars"
+  out="$(FAKE_DESEC_429=1 dns_in "$p" dns desec apply 2>&1)" || { echo "$out"; return 1; }
+  contains "$out" "deSEC asks to wait 0s"
+  contains "$(jq -c '[.[].subname]' "$p/dns/desec-myapp.dedyn.io.json")" '"www"'
+  contains "$(cat "$p/fake.log")" "desec PATCH"
+  dns_in "$p" dns desec destroy >/dev/null 2>&1
+  equals "$(jq -c '[.[].subname] | sort' "$p/dns/desec-myapp.dedyn.io.json")" '["_freelunch-owner.api","api"]'
+}
+
+# The records are nodes: check says whether they are there and as wanted
+test_dns_records_are_checked_as_nodes() {
+  local p="$WORK/dns-node" out
+  dns_project "$p"
+  out="$(dns_in "$p" check --json 2>/dev/null || true)"
+  equals "$(jq -r '.[] | select(.node == "dns-desec-api") | "\(.exists) \(.healthy)"' <<< "$out")" "false false"
+  dns_in "$p" dns desec apply >/dev/null 2>&1
+  out="$(dns_in "$p" check --json 2>/dev/null)"
+  equals "$(jq -r '.[] | select(.node == "dns-desec-api") | "\(.exists) \(.healthy)"' <<< "$out")" "true true"
+  # the token is a CI secret
+  contains "$(dns_in "$p" ci init --print-secrets --no-first-run 2>&1)" "DESEC_TOKEN"
+  # a wrong token is said, not guessed at
+  if out="$(TEST_DESEC_TOKEN=nope dns_in "$p" dns desec check 2>&1)"; then echo "check should have failed"; return 1; fi
+  contains "$out" "doesn't take the token"
+  if out="$(TEST_DESEC_TOKEN='' dns_in "$p" dns desec apply 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "DESEC_TOKEN is not set"
+}
+
+# Duck DNS can't list: it sets the names listed, clears them on destroy, and keeps the token out of the log
+test_dns_duckdns_sets_and_clears_the_listed_names() {
+  local p="$WORK/dns-duck" out
+  new_project "$p"
+  dns_in "$p" dns duckdns init >/dev/null 2>&1
+  dns_in "$p" dns duckdns apply >/dev/null 2>&1
+  contains "$(cat "$p/fake.log")" "duckdns domains=myapp&verbose=true&ip=203.0.113.10"
+  lacks "$(cat "$p/fake.log")" "duck-token"
+  dns_in "$p" dns duckdns destroy >/dev/null 2>&1
+  contains "$(cat "$p/fake.log")" "duckdns domains=myapp&verbose=true&clear=true"
+  if out="$(TEST_DUCK_TOKEN=wrong dns_in "$p" dns duckdns apply 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "Duck DNS said KO for myapp"
+  contains "$(dns_in "$p" dns duckdns status 2>&1)" "can only be set, not read"
+  if out="$(dns_in "$p" dns desec status 2>&1)"; then echo "status should have failed"; return 1; fi
+}
+
+# --- services (secrets, observability, messaging) -----------------------------------------------
+
+# give_service <project>: the axiom stack "applied" from a fixture
+give_service() {
+  mkdir -p "$1/.freelunch/axiom"
+  cp "$ROOT/deploy/tests/fixtures/service.tfstate" "$1/.freelunch/axiom/terraform.tfstate"
+}
+
+# An app that needs a service gets the variables the service names, as they are; the secret stays
+# out of the dry run; the service is a node that check asks and that holds the deploy back.
+test_a_service_in_needs_reaches_the_app() {
+  local p="$WORK/svc" out
+  graph_project "$p" '  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", needs = ["axiom-logs"] }'
+  give_service "$p"
+  out="$(GHCR_TOKEN=x deploy_in "$p" --dry-run 2>&1)"
+  lacks "$out" "xaat-mock-service-token"
+  GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  contains "$(cat "$p/host/apps/api/.env")" "AXIOM_TOKEN=xaat-mock-service-token"
+  contains "$(cat "$p/host/apps/api/.env")" "AXIOM_DATASET=shop-logs"
+  out="$(check_in "$p" --json)"
+  equals "$(jq -r '.[] | select(.node == "axiom-logs") | "\(.type) \(.healthy)"' <<< "$out")" "service true"
+  contains "$(cat "$p/fake.log")" "nc -z -w 5 api.axiom.co 443"
+  # a service that doesn't answer holds the deploy back, before anything is sent
+  rm -r "$p/host"
+  if out="$(FAKE_TCP_DOWN="api.axiom.co" GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "api needs axiom-logs: nothing answers at api.axiom.co:443"
+  lacks "$out" "xaat-mock-service-token"
+  # a service no stack made is named, with the nodes there are
+  sed -i.bak 's|axiom-logs|axiom-nonesuch|' "$p/.freelunch/apps.tfvars"
+  if out="$(GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "api (needs axiom-nonesuch)"
+  contains "$out" "axiom-logs"
+}
+
+# --- CI providers (the ci engine) --------------------------------------------------------------
+
+# ci init <provider> writes the provider's pipeline from its template: valid YAML, the runner image,
+# the bundle restored then the command run, no secret in the file, and where to put the secret said.
+test_ci_init_writes_a_pipeline_for_each_ci_provider() {
+  local p="$WORK/ci-prov" q c file out
+  new_project "$p"
+  for c in circleci:.circleci/config.yml bitbucket:bitbucket-pipelines.yml buildkite:.buildkite/pipeline.yml azure-devops:azure-pipelines.yml codeberg:.forgejo/workflows/freelunch.yml; do
+    q="$p-${c%%:*}"; file="${c#*:}"
+    new_project "$q"
+    out="$(ci_in "$q" ci init "${c%%:*}" --no-first-run 2>&1)"
+    exists "$q/$file"
+    contains "$(cat "$q/$file")" "ghcr.io/freelunch-sh/freelunch:1"
+    contains "$(cat "$q/$file")" "/opt/freelunch/bin/freelunch ci restore"
+    lacks "$(cat "$q/$file")" "@IMAGE@"
+    contains "$out" "FREELUNCH_BUNDLE"
+    contains "$out" "commit and push the pipeline, then run it:"
+    if python3 -c 'import yaml' 2>/dev/null; then python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" "$q/$file"; fi
+    # nothing of GitHub's or GitLab's is written, and an existing pipeline is kept
+    [[ ! -d "$q/.github" && ! -f "$q/.gitlab-ci.yml" ]] || { echo "${c%%:*}: wrote another CI's files"; return 1; }
+    printf '# mine\n' > "$q/$file"
+    ci_in "$q" ci init "${c%%:*}" --no-first-run >/dev/null 2>&1
+    equals "$(cat "$q/$file")" "# mine"
+  done
+  # a CI the project doesn't know is named, with the ones there are
+  if out="$(ci_in "$p" ci init nonesuch 2>&1)"; then echo "ci init should have failed"; return 1; fi
+  contains "$out" "github, gitlab or a CI provider with a pipeline (azure-devops bitbucket buildkite circleci codeberg"
+  # a pin shows in the image
+  mkdir -p "$p/.freelunch" && echo v1.2.3 > "$p/.freelunch/version"
+  rm -f "$p/.circleci/config.yml"
+  ci_in "$p" ci init circleci --no-first-run >/dev/null 2>&1
+  contains "$(cat "$p/.circleci/config.yml")" "ghcr.io/freelunch-sh/freelunch:1.2.3"
+}
+
+# The image workflow pushes to GitHub's registry by default, or to another registry's provider.
+test_image_workflow_pushes_to_the_registry_asked_for() {
+  local p="$WORK/img-reg" out wf
+  mkdir -p "$p"
+  (cd "$p" && "$CLI" init --image-workflow oci cloudflare) >/dev/null 2>&1
+  wf="$p/.github/workflows/image.yml"
+  contains "$(cat "$wf")" "registry: ghcr.io"
+  contains "$(cat "$wf")" "packages: write"
+  # Docker Hub: its secrets, and the image under the user
+  rm -r "$p/.github"
+  out="$(cd "$p" && "$CLI" init --image-workflow --registry docker-hub 2>&1)"
+  contains "$(cat "$wf")" "registry: docker.io"
+  contains "$(cat "$wf")" 'username: ${{ secrets.DOCKERHUB_USERNAME }}'
+  contains "$(cat "$wf")" 'password: ${{ secrets.DOCKERHUB_TOKEN }}'
+  contains "$(cat "$wf")" 'images: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}'
+  lacks "$(cat "$wf")" "packages: write"
+  contains "$out" 'password_env = "DOCKERHUB_TOKEN"'
+  if command -v actionlint >/dev/null; then actionlint "$wf"; fi
+  # an explicit repository
+  rm -r "$p/.github"
+  (cd "$p" && "$CLI" init --image-workflow --registry docker-hub --registry-image docker.io/acme/shop) >/dev/null 2>&1
+  contains "$(cat "$wf")" "images: docker.io/acme/shop"
+  # Codeberg's has no default repository
+  rm -r "$p/.github"
+  if out="$(cd "$p" && "$CLI" init --image-workflow --registry codeberg 2>&1)"; then echo "init should have failed"; return 1; fi
+  contains "$out" "codeberg needs --registry-image <codeberg.org/owner/name>"
+  (cd "$p" && "$CLI" init --image-workflow --registry codeberg --registry-image codeberg.org/acme/shop) >/dev/null 2>&1
+  contains "$(cat "$wf")" "registry: codeberg.org"
+  # a provider with no registry
+  rm -r "$p/.github"
+  if out="$(cd "$p" && "$CLI" init --image-workflow --registry neon 2>&1)"; then echo "init should have failed"; return 1; fi
+  contains "$out" "neon has no container registry freelunch can push to (--registry takes: codeberg docker-hub"
+}
+
+# --- a database from the cli engine (Turso) ---------------------------------------------------
+
+turso_in() { # turso_in <dir> <args...>: freelunch with the fake turso, its token and its databases in <dir>/turso
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/cli-bin:$WORK/bin:$PATH" FAKE_TURSO_DIR="$dir/turso" TURSO_API_TOKEN="${TURSO_API_TOKEN-tursotok}" \
+    FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" FREELUNCH_SSH="$WORK/bin/ssh" "$CLI" "$@")
+}
+
+# A database the cli engine makes is in the database contract through the provider's record: deploy
+# gives the app its connection string, check asks its address, the token is made once and never
+# printed, and destroy takes it out of the record.
+test_cli_engine_makes_a_database_for_deploy() {
+  local p="$WORK/turso" out before url="libsql://freelunch-main-org.turso.io?authToken=eyJ-mock-token-1"
+  new_project "$p"
+  state_store "$p"
+  mkdir -p "$p/.freelunch/turso"
+  sed -i.bak 's|env_file = "api.env" }|env_file = "api.env", database = "turso-main" }|' "$p/.freelunch/apps.tfvars"
+  contains "$(turso_in "$p" cli turso check 2>&1)" "turso signs in"
+  # a dry run says what it would ask, and asks nothing
+  before="$(wc -l < "$p/turso/log")"
+  out="$(turso_in "$p" cli turso deploy main --dry-run 2>&1)"
+  contains "$out" "create: turso db create freelunch-main"
+  contains "$out" "database.token: turso db tokens create freelunch-main"
+  equals "$(wc -l < "$p/turso/log")" "$before"
+  out="$(turso_in "$p" cli turso deploy main 2>&1)"
+  contains "$out" "turso: freelunch-main: made"
+  contains "$out" 'an app says database = "turso-main"'
+  lacks "$out" "eyJ-mock-token"
+  # the app gets it
+  GHCR_TOKEN=x turso_in "$p" deploy >/dev/null 2>&1
+  contains "$(cat "$p/host/apps/api/.env")" "DATABASE_URL=$url"
+  lacks "$(cat "$p/fake.log")" "eyJ-mock-token"
+  # a repeat makes no second token, and the node is asked
+  turso_in "$p" cli turso deploy main >/dev/null 2>&1
+  equals "$(grep -c 'tokens create' "$p/turso/log")" "1"
+  out="$(turso_in "$p" check --json 2>/dev/null)"
+  equals "$(jq -r '.[] | select(.node == "turso-main") | "\(.type) \(.healthy)"' <<< "$out")" "database true"
+  contains "$(cat "$p/fake.log")" "nc -z -w 5 freelunch-main-org.turso.io 443"
+  # destroy deletes it and takes it out of the record: the app can't name it any more
+  turso_in "$p" cli turso destroy >/dev/null 2>&1
+  fails grep -qx "freelunch-main" "$p/turso/dbs"
+  if out="$(GHCR_TOKEN=x turso_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "api (database turso-main)"
+}
+
+# With no state store there is nowhere to keep the connection string, so nothing is made
+test_cli_engine_database_needs_a_state_store() {
+  local p="$WORK/turso-nostore" out
+  new_project "$p"
+  if out="$(turso_in "$p" cli turso deploy main 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "the connection string is kept in the provider's record in the state store"
+}
+
+# --- services and buckets from the cli and api engines, through their records -----------------
+
+# A cli.yaml with service: or bucket: keeps what an app needs in the record; the secrets are never
+# printed; destroy takes them out.
+test_cli_engine_makes_a_service_and_a_bucket_for_the_record() {
+  local co p out rec
+  for kind in service bucket; do
+    co="$WORK/cli-co-$kind"; p="$WORK/cli-proj-$kind"
+    engine_checkout "$co" "sample-cli-$kind"
+    mkdir -p "$p/.freelunch"; state_store "$p"
+    out="$(cli_in "$co" "$p" cli "sample-cli-$kind" deploy hb 2>&1)"
+    contains "$out" "sample-cli-$kind: freelunch-hb: made"
+    contains "$out" "is in the record"
+    lacks "$out" "k-freelunch-hb"
+    rec="$(cli_in "$co" "$p" state record pull "sample-cli-$kind")"
+    if [[ $kind == service ]]; then
+      equals "$(jq -c '.outputs.services' <<< "$rec")" '[{"provider":"sample-cli-service","name":"hb","kind":"observability","host":"freelunch-hb.fakecli.test","port":443}]'
+      equals "$(jq -cS '.outputs.service_credentials["sample-cli-service-hb"].env' <<< "$rec")" '{"MONITOR_NAME":"freelunch-hb","MONITOR_URL":"https://hb.fakecli.test/k-freelunch-hb"}'
+    else
+      equals "$(jq -c '.outputs.buckets[0] | [.name, .bucket, .endpoint, .region] ' <<< "$rec")" '["hb","freelunch-hb","https://s3.fakecli.test","us-east-1"]'
+      equals "$(jq -c '.outputs.bucket_keys["sample-cli-bucket-hb"]' <<< "$rec")" '{"access_key_id":"k-freelunch-hb","secret_access_key":"s-freelunch-hb"}'
+    fi
+    cli_in "$co" "$p" cli "sample-cli-$kind" destroy >/dev/null 2>&1
+    rec="$(cli_in "$co" "$p" state record pull "sample-cli-$kind")"
+    equals "$(jq -c '[.outputs.services, .outputs.buckets] | map(. // [] | length) | add' <<< "$rec")" "0"
+  done
+}
+
+# An api.yaml with outputs: turns the create answer into the contract's entry and credentials
+test_api_engine_keeps_what_the_create_answer_gives() {
+  local dir="$WORK/api-outputs" p="$WORK/api-outputs-proj" out rec
+  api_checkout "$dir" sample-api-outputs
+  mkdir -p "$p/.freelunch"; state_store "$p"
+  printf 'X=1\n' > "$WORK/api-outputs.env"
+  out="$(API_CWD="$p" api_run "$dir" sample-api-outputs create deploy hb --image img:1 --env-file "$WORK/api-outputs.env" 2>&1)" || { echo "$out"; return 1; }
+  contains "$out" "freelunch-hb: made"
+  contains "$out" 'what an app needs of it is in the record: an app says needs = "sample-api-outputs-hb"'
+  lacks "$out" "hb-key-123"
+  rec="$(cd "$p" && "$dir/bin/freelunch" state record pull sample-api-outputs)"
+  equals "$(jq -c '.outputs.services' <<< "$rec")" '[{"kind":"observability","host":"freelunch-hb.sample.test","port":443,"provider":"sample-api-outputs","name":"hb"}]'
+  equals "$(jq -c '.outputs.service_credentials["sample-api-outputs-hb"]' <<< "$rec")" '{"env":{"SAMPLE_PUSH_URL":"https://push.sample.test/hb-key-123"}}'
+  # destroy takes them out
+  API_CWD="$p" api_run "$dir" sample-api-outputs destroy destroy >/dev/null 2>&1
+  rec="$(cd "$p" && "$dir/bin/freelunch" state record pull sample-api-outputs)"
+  equals "$(jq -c '.outputs.services | length' <<< "$rec")" "0"
+}
+
+# deploy gives an app what services and buckets from records hold, as it does for databases
+test_deploy_reads_services_and_buckets_from_engine_records() {
+  local p="$WORK/rec-svc" out
+  new_project "$p"
+  state_store "$p"
+  mkdir -p "$p/.freelunch/deno-deploy"
+  sed -i.bak 's|env_file = "api.env" }|env_file = "api.env", bucket = "filebase-assets", needs = ["uptimerobot-hb"] }|' "$p/.freelunch/apps.tfvars"
+  jq -n '{engine: "api", resources: [], outputs: {
+      services: [{provider: "uptimerobot", name: "hb", kind: "observability", host: "heartbeat.uptimerobot.com", port: 443}],
+      service_credentials: {"uptimerobot-hb": {env: {HEARTBEAT_URL: "https://heartbeat.uptimerobot.com/m-mock-key"}}},
+      buckets: [{provider: "filebase", name: "assets", bucket: "freelunch-assets", endpoint: "https://s3.filebase.com", region: "us-east-1"}],
+      bucket_keys: {"filebase-assets": {access_key_id: "FBKEY", secret_access_key: "mock-fb-secret"}}}}' > "$p/rec.json"
+  in_dir "$p" "$CLI" state record push deno-deploy "$p/rec.json" >/dev/null 2>&1
+  out="$(GHCR_TOKEN=x deploy_in "$p" --dry-run 2>&1)"
+  lacks "$out" "m-mock-key"; lacks "$out" "mock-fb-secret"
+  GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  contains "$(cat "$p/host/apps/api/.env")" "HEARTBEAT_URL=https://heartbeat.uptimerobot.com/m-mock-key"
+  contains "$(cat "$p/host/apps/api/.env")" "S3_BUCKET=freelunch-assets"
+  contains "$(cat "$p/host/apps/api/.env")" "AWS_SECRET_ACCESS_KEY=mock-fb-secret"
+  # the nodes are asked where they say they answer
+  out="$(check_in "$p" --json 2>/dev/null)"
+  equals "$(jq -r '.[] | select(.node == "uptimerobot-hb") | "\(.type) \(.healthy)"' <<< "$out")" "service true"
+  equals "$(jq -r '.[] | select(.node == "filebase-assets") | "\(.type) \(.healthy)"' <<< "$out")" "bucket true"
+  contains "$(cat "$p/fake.log")" "nc -z -w 5 s3.filebase.com 443"
+  # one that doesn't answer holds the deploy back
+  rm -r "$p/host"
+  if out="$(FAKE_TCP_DOWN="heartbeat.uptimerobot.com" GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "api needs uptimerobot-hb: nothing answers at heartbeat.uptimerobot.com:443"
+}
+
+# StatusCake: form-encoded requests, a second call for the push URL, the tag as the marker
+test_api_engine_sends_forms_and_reads_the_push_url() {
+  local dir="$WORK/api-statuscake" p="$WORK/api-statuscake-proj" out rec
+  api_checkout "$dir" statuscake
+  mkdir -p "$p/.freelunch"; state_store "$p"
+  contains "$(api_run "$dir" statuscake check check 2>&1)" "the token works"
+  out="$(API_CWD="$p" api_run "$dir" statuscake create deploy hb 2>&1)" || { echo "$out"; return 1; }
+  contains "$out" "freelunch-hb: made"
+  lacks "$out" "pk-mock-key"
+  # the body is a form, an array is key[]=, and the token is in a header, not in the arguments
+  equals "$(grep -v '^$' "$dir/fake/bodies")" "name=freelunch-hb&period=3600&tags%5B%5D=freelunch"
+  contains "$(cat "$dir/fake/headers")" "Content-Type: application/x-www-form-urlencoded"
+  lacks "$(cat "$dir/fake/argv")" "sc-token-9876"
+  contains "$(cat "$dir/fake/log")" "GET /v1/heartbeat/7"
+  rec="$(cd "$p" && "$dir/bin/freelunch" state record pull statuscake)"
+  equals "$(jq -c '.outputs.service_credentials["statuscake-hb"].env' <<< "$rec")" '{"STATUSCAKE_PUSH_URL":"https://push.statuscake.com/?PK=pk-mock-key&TestID=7&time=0"}'
+  equals "$(jq -c '.outputs.services[0] | [.provider, .name, .kind, .host, .port]' <<< "$rec")" '["statuscake","hb","observability","push.statuscake.com",443]'
+  # destroy deletes ours (tag = prefix) and leaves a monitor with another tag
+  out="$(API_CWD="$p" api_run "$dir" statuscake destroy destroy 2>&1)"
+  contains "$out" "deleted freelunch-hb"
+  contains "$out" "left alone"
+  contains "$(cat "$dir/fake/log")" "DELETE /v1/heartbeat/7"
+  lacks "$(cat "$dir/fake/log")" "DELETE /v1/heartbeat/8"
+}
+
+# UptimeRobot: JSON with a bearer token; the heartbeat URL is in the create answer and never printed
+test_api_engine_keeps_the_heartbeat_url_of_a_monitor() {
+  local dir="$WORK/api-uptimerobot" p="$WORK/api-uptimerobot-proj" out rec
+  api_checkout "$dir" uptimerobot
+  mkdir -p "$p/.freelunch"; state_store "$p"
+  contains "$(api_run "$dir" uptimerobot check check 2>&1)" "the token works"
+  out="$(API_CWD="$p" api_run "$dir" uptimerobot create deploy hb 2>&1)" || { echo "$out"; return 1; }
+  contains "$out" "freelunch-hb: made"
+  lacks "$out" "m4711-mock-key"
+  equals "$(jq -c . "$dir/fake/bodies")" '{"type":"HEARTBEAT","friendlyName":"freelunch-hb","interval":3600,"gracePeriod":300,"tagNames":["freelunch"]}'
+  contains "$(cat "$dir/fake/headers")" "Content-Type: application/json"
+  lacks "$(cat "$dir/fake/argv")" "ur-key-5432"
+  rec="$(cd "$p" && "$dir/bin/freelunch" state record pull uptimerobot)"
+  equals "$(jq -c '.outputs.service_credentials["uptimerobot-hb"].env' <<< "$rec")" '{"UPTIMEROBOT_HEARTBEAT_URL":"https://heartbeat.uptimerobot.com/m4711-mock-key"}'
+  out="$(API_CWD="$p" api_run "$dir" uptimerobot destroy destroy 2>&1)"
+  contains "$out" "deleted freelunch-hb"
+  contains "$(cat "$dir/fake/log")" "DELETE /v3/monitors/4711"
+  lacks "$(cat "$dir/fake/log")" "DELETE /v3/monitors/4712"
 }
 
 # A provider's engine is what its provider.yaml says, or what its iac implies.
@@ -4253,6 +4923,17 @@ test_ci_init_guides_the_secrets_and_the_first_run() {
   fails grep -q '^gh workflow run' "$p/fake.log"
   rm -r "$p/.github"
   FAKE_WORKFLOWS="freelunch-provision" ci_in "$p" ci init --print-secrets --no-first-run >/dev/null 2>&1
+  fails grep -q '^gh workflow run' "$p/fake.log"
+  # the journey after a deploy: only when asked, and only when GitHub has the freelunch workflow
+  rm -r "$p/.github"
+  out="$(ci_in "$p" ci init --print-secrets --no-first-run --journey 2>&1)"
+  contains "$out" "GitHub doesn't have the freelunch workflow yet"
+  fails grep -q '^gh workflow run' "$p/fake.log"
+  rm -r "$p/.github"
+  FAKE_WORKFLOWS="freelunch" ci_in "$p" ci init --print-secrets --no-first-run --journey >/dev/null 2>&1
+  grep -qx 'gh workflow run freelunch.yml --repo me/shop -f run=journey' "$p/fake.log"
+  : > "$p/fake.log"; rm -r "$p/.github"
+  FAKE_WORKFLOWS="freelunch" ci_in "$p" ci init --print-secrets --no-first-run >/dev/null 2>&1
   fails grep -q '^gh workflow run' "$p/fake.log"
 }
 

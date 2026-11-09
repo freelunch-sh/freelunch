@@ -1,0 +1,17 @@
+# Turso through its command line tool (https://docs.turso.tech/cli). Written from its documentation,
+# not yet run against a live account (verified: fake-api). The Terraform provider is stale, the
+# CLI is what Turso supports.
+tool: turso
+install: "brew install tursodatabase/tap/turso (or: curl -sSfL https://get.tur.so/install.sh | bash)"
+auth:
+  env: TURSO_API_TOKEN
+check: [turso, auth, whoami]
+list: { command: [turso, db, list], format: lines, skip: 1 }
+create: [turso, db, create, "{name}"]
+delete: [turso, db, destroy, "{name}", --yes]
+gone: "not found"
+database:
+  engine: libsql
+  url: [turso, db, show, "{name}", --url]
+  token: [turso, db, tokens, create, "{name}"]
+  connection: "{url}?authToken={token}"

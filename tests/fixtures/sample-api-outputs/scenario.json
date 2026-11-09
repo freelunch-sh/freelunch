@@ -1,0 +1,80 @@
+{
+  "token": "sample-token-1234",
+  "create": [
+    {
+      "match": "GET /v1/services",
+      "status": 200,
+      "body": []
+    },
+    {
+      "match": "POST /v1/services",
+      "status": 201,
+      "body": {
+        "id": "s1",
+        "key": "hb-key-123"
+      }
+    },
+    {
+      "match": "POST /v1/services/s1/deploys",
+      "status": 201,
+      "body": {
+        "id": "d1"
+      }
+    },
+    {
+      "match": "GET /v1/services/s1/deploys/d1",
+      "status": 200,
+      "body": {
+        "status": "building"
+      }
+    },
+    {
+      "match": "GET /v1/services/s1/deploys/d1",
+      "status": 200,
+      "body": {
+        "status": "live"
+      }
+    },
+    {
+      "match": "GET /v1/services",
+      "status": 200,
+      "body": [
+        {
+          "id": "s1",
+          "name": "freelunch-web",
+          "url": "web.sample.test",
+          "labels": {
+            "freelunch": "freelunch"
+          }
+        }
+      ]
+    }
+  ],
+  "generic": false,
+  "destroy": [
+    {
+      "match": "GET /v1/services",
+      "status": 200,
+      "body": [
+        {
+          "id": "s1",
+          "name": "freelunch-hb",
+          "url": "hb.sample.test",
+          "labels": {
+            "freelunch": "freelunch"
+          }
+        }
+      ]
+    },
+    {
+      "match": "DELETE /v1/services/s1",
+      "status": 204,
+      "body": null
+    },
+    {
+      "match": "GET /v1/services",
+      "status": 200,
+      "body": []
+    }
+  ]
+}

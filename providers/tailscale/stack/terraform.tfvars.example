@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export TAILSCALE_API_KEY (or put it in .freelunch/.env). Make one in the
+# Tailscale admin console under Settings > Keys > Generate API access token.
+
+# tailnet = "-"                 # the tailnet of the API key
+# name_prefix = "freelunch"     # the project's name_prefix: hosts register as <prefix>-<provider>-<name>
+# tags = ["tag:freelunch"]      # must be in tagOwners in the tailnet policy
+# ssh = true                    # deploy over the tailnet (this machine and CI must be on it)

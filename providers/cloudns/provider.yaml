@@ -2,7 +2,7 @@
 name: cloudns
 display_name: "ClouDNS"
 category: dns
-status: planned
+status: ready
 layer: glue
 terraform_provider: "ClouDNS/cloudns"
 iac: community
@@ -10,8 +10,9 @@ free_tier_type: always-free
 free_tier: "1 domain with 50 records"
 card_required: "no"
 url: "https://www.cloudns.net/premium/"
+secrets: "CLOUDNS_AUTH_ID=ClouDNS API auth-id; CLOUDNS_PASSWORD=ClouDNS API password"
 last_verified: "2026-10-18"
-notes: null
+notes: "Keeps DNS records for your hosts in a ClouDNS zone (the free plan has one zone with 50 records). Not yet run against a real account."
 sources:
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"

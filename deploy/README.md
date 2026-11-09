@@ -98,3 +98,10 @@ cd deploy && tofu test     # or: bin/freelunch test
 The SSH side is covered by [`tests/cli.sh`](../tests/cli.sh), which runs the generated
 deploy script against a fake ssh and docker, and the platform side against a fake
 Northflank API.
+
+## needs and port
+
+`needs = ["api", "neon-main"]` lists the nodes (apps, buckets, databases) an app depends on, and
+`port` is the port other apps reach it on. `deploy` puts dependencies first and refuses a circle or
+a node that doesn't exist. See [docs/graph.md](../docs/graph.md#edges-needs). The output `graph`
+lists each app's host, port and effective needs.

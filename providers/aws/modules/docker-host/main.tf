@@ -19,6 +19,8 @@ module "bootstrap" {
   swap_size_gb           = each.value.swap_size_gb
   tailscale_auth_key     = var.tailscale_auth_key
   tailscale_hostname     = "${var.name_prefix}-aws-${each.key}"
+  netbird_setup_key      = var.netbird_setup_key
+  netbird_hostname       = "${var.name_prefix}-aws-${each.key}"
   max_encoded_size_bytes = 21848 # base64 size of EC2's 16 KB user data limit
 }
 

@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export ABLY_ACCOUNT_TOKEN (or put it in .freelunch/.env): an account token from the Ably
+# dashboard (account > Control API tokens) that can create apps and keys.
+
+# One app per entry. The free plan: 6M messages a month, 200 connections, 200 channels.
+apps = {
+  main = { capabilities = { "*" = ["publish", "subscribe"] } }
+  # chat = { capabilities = { "chat:*" = ["publish", "subscribe", "presence"] } }
+}

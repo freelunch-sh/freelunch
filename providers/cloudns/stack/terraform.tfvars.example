@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export CLOUDNS_AUTH_ID and CLOUDNS_PASSWORD (or put them in .freelunch/.env).
+# Make an API user in the ClouDNS panel under API: auth-id and a password for it. The free
+# plan has one zone with 50 records.
+
+zone = "example.com"
+
+# create_zone = false     # the zone already exists at ClouDNS
+
+records = {
+  api = { host = "oci-main" }
+  # www = { type = "CNAME", value = "api.example.com" }
+}

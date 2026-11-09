@@ -10,6 +10,7 @@ free_tier_type: always-free
 free_tier: "AuraDB Free: 1 database, 200k nodes, 400k relationships, 1 GB storage; pauses after 72 h idle, deleted after 30 days paused"
 card_required: "no"
 url: "https://neo4j.com/pricing/"
+secrets: "AURA_CLIENT_ID=Neo4j Aura client ID; AURA_CLIENT_SECRET=Neo4j Aura client secret"
 last_verified: "2026-11-08"
 notes: "Free instances auto-pause when inactive and have no backups. The Terraform provider is a Neo4j Labs project (unsupported). The provider schema accepts type free-db, but creating a Free instance through it is unverified. Whether Free is limited to one instance per account is unverified."
 sources:

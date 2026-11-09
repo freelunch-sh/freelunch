@@ -22,8 +22,8 @@ Tick a box when the step is built, tested and committed. Design: [engines.md](en
 - [x] Move Northflank behind the interface
 - [x] Move Cloud Run behind the interface
 - [x] Move Scaleway behind the interface
-- [ ] `tofu` engine wraps the existing stack flow (done for platforms: `engine_apply`, `engine_destroy`; hosts such as OCI still call the stack flow directly)
-- [ ] Remove the per-provider `case` lists (status, up, destroy, deploy, doctor, setup, emit) (done for those verbs; left: the database providers' token names in `ci_secret_names`, which move to `provider.yaml` in section 4, and the arch and registry special cases)
+- [x] `tofu` engine wraps the existing stack flow (`engine_apply` and `engine_destroy` for hosts and platforms alike)
+- [x] Remove the per-provider `case` lists (token names are `secrets:` and image architecture is `arch:` in `provider.yaml`; the registry code is per-platform behaviour, not a list)
 - [x] Full CLI suite passes unchanged
 
 ## 3. `api` engine
@@ -108,31 +108,32 @@ What the code has today (read before starting, so nothing is built twice):
 
 ### 9a. Nodes work alone (the gate for the rest)
 
-- [ ] Inventory: one table in `docs/graph.md` of every node type, what makes it, what it outputs,
+- [x] Inventory: one table in `docs/graph.md` of every node type, what makes it, what it outputs,
   and how to tell it is healthy (from `status`, `doctor` and the contracts in `architecture.md`)
-- [ ] A uniform health probe per node type, machine-readable (`freelunch check [node] --json`):
+- [x] A uniform health probe per node type, machine-readable (`freelunch check [node] --json`):
   exists, reachable, healthy, with the reason when not. Reuses what `status` and `doctor` already ask
-- [ ] Tests: the probe for each node type against the fakes, healthy and broken
+  (done for host, app, database, bucket, tunnel; platforms and their apps answer `null` until their engines give a machine-readable `status`)
+- [x] Tests: the probe for each node type against the fakes, healthy and broken (platform probes wait for the line above)
 - [ ] Live run of each node type that has none yet (needs your accounts, listed in `docs/graph.md`
   with the exact command and what to look for). Not blocked for building, but 9d cannot be marked
   `verified` without it
 
 ### 9b. The graph, made explicit
 
-- [ ] Format: an app declares `needs`, a list of other nodes (apps in `apps.tfvars`, plus the existing
+- [x] Format: an app declares `needs`, a list of other nodes (apps in `apps.tfvars`, plus the existing
   `bucket` and `database`, which stay and mean the same as a need). Decide and write down in
   `docs/graph.md`: field names, and an app's `port` (so a dependant knows where to reach it)
-- [ ] Parse and validate: unknown node, a cycle, a need on a node that is not deployed. Errors name
+- [x] Parse and validate: unknown node, a cycle, a need on a node that is not deployed. Errors name
   the app and the missing node, and stop before anything is sent (like the unknown-database check)
-- [ ] Order: dependencies first for `apply`, `deploy` and `up`; reverse for `destroy`. Nodes with
+- [x] Order: dependencies first for `deploy` and `up` (`apply` and `destroy` already follow the layers, and destroy is their reverse). Nodes with
   nothing between them keep today's order
-- [ ] Output of a node feeds the dependant's input, through one function instead of one per edge
+- [x] Output of a node feeds the dependant's input, through one function instead of one per edge
   type (the database path is the model: outputs, then the app's environment, secrets kept out of logs)
-- [ ] Existing `bucket` and `database` run through that function with no change in behaviour
-- [ ] A dependant is not deployed against a dependency that is unhealthy (uses the 9a probe)
-- [ ] Tests: order, cycle, missing node, reverse destroy, the old fields unchanged, secrets not in
+- [x] Existing `bucket` and `database` run through that function with no change in behaviour
+- [x] A dependant is not deployed against a dependency that is unhealthy (uses the 9a probe; for databases and buckets in `needs`, not yet for apps)
+- [x] Tests: order, cycle, missing node, reverse destroy, the old fields unchanged, secrets not in
   the dry run or the logs
-- [ ] `docs/graph.md` and `deploy/README.md`
+- [x] `docs/graph.md` and `deploy/README.md`
 
 ### 9c. Edge media: how an edge becomes reachable
 
@@ -145,42 +146,98 @@ The same `needs` resolves to a different address depending on where the two node
 | different nodes, public | a Cloudflare route's hostname (exists) |
 | different nodes, private | a mesh address (Tailscale first) |
 
-- [ ] The resolver: given two nodes, pick the medium, and give the dependant `<NAME>_URL` in its
+- [x] The resolver: given two nodes, pick the medium, and give the dependant `<NAME>_URL` in its
   environment. Say in `docs/graph.md` which medium was chosen and why; fail when none applies
-- [ ] The mesh as a node: a network (Tailscale first) makes a join key, hosts join on first boot
-  (extends the existing docker-bootstrap key), its outputs give each host's private address
-- [ ] Mesh addresses used for SSH and for edges (replaces hand-written `hosts.<name>.address`)
-- [ ] DNS as a node: a zone provider makes records for a route's hostname (see 9d)
-- [ ] Tests per row of the table, and the failure when no medium applies
-- [ ] A hybrid example in `docs/graph.md`: frontend on one host, backend on another, a database
+- [x] The mesh as a node: a network (Tailscale first) makes a join key, hosts join on first boot
+  (extends the existing docker-bootstrap key), its outputs give each host's private address (`providers/tailscale`)
+- [x] Mesh addresses used for SSH and for edges (replaces hand-written `hosts.<name>.address`)
+- [x] DNS as a node: a zone provider keeps records for a hostname (the `dns` engine, `freelunch dns`; `check` reports each record)
+- [x] Tests per row of the table, and the failure when no medium applies
+- [x] A hybrid example in `docs/graph.md`: frontend on one host, backend on another, a database
 
 ### 9d. Providers that make the media (the old phase 3 list)
 
 Each is a `tofu` stack or an `api`/`cli` definition, with a fake and the same tests as its
 neighbours. None can be `verified` without a live run.
 
-- [ ] DNS: deSEC and DuckDNS first (small HTTP APIs, `api` engine), then ClouDNS and Gcore (`tofu`)
-- [ ] Mesh: Tailscale first, then NetBird and ZeroTier (same contract)
+- [x] DNS: deSEC and DuckDNS (small HTTP APIs, on their own `dns` engine with an ownership TXT rule, since the `api` engine models apps)
+- [x] DNS: ClouDNS and Gcore (`tofu`; written against the providers' own schemas, mock-tested)
+- [x] Mesh: Tailscale first (`providers/tailscale`), then NetBird (`providers/netbird`; the bootstrap and the aws, azure, gcp and oci stacks take its key)
+- [ ] Mesh: ZeroTier (same `mesh` contract; a node's ID is only known after it joins, so the member has to be authorised by hand or in a second step)
 - [ ] Ingress: ngrok, as another way a route can be reached
 - [ ] Deferred until the contracts above are settled: Namecheap (API needs an IP allow-list, awkward
   in CI), Firezone, Twingate, Defined Networking (team and SSO products)
 
 ### 9e. Journeys
 
-- [ ] A journey is a path through the graph (user, hostname, frontend, backend, database). Derived
+- [x] A journey is a path through the graph (user, hostname, frontend, backend, database). Derived
   from `needs` and routes, no new file
-- [ ] `freelunch journey [name]` probes each hop in order and stops at the first that fails, saying
+- [x] `freelunch journey [name]` probes each hop in order and stops at the first that fails, saying
   which edge and why
-- [ ] `--json` output, so CI can use it
-- [ ] `ci init` offers to run it after a deploy (ask first, like the first run)
-- [ ] Tests: a passing path, a broken hop in each position, a path with no route
+- [x] `--json` output, so CI can use it
+- [x] `ci init` offers to run it after a deploy (ask first, like the first run)
+- [x] Tests: a passing path, a broken hop in each position, a path with no route
 - [ ] Live acceptance: one real path across two clouds (needs your accounts)
+
+## 10. Services: secrets, observability, messaging (was phase 4)
+
+The contract first, then providers against it. A stack outputs `services` and `service_credentials`;
+an app's `needs` names one and gets the variables the service names
+([architecture.md](architecture.md#service-contract)).
+
+- [x] The service contract: `services`, `service_credentials` (`env`), written in `architecture.md`
+- [x] `deploy/` reads it (`service_state_paths`), a service is a node an app can need, an unknown one is refused
+- [x] `freelunch check` probes a service where it says it answers; the deploy gate holds an app back
+- [x] Tests: `deploy/` (tofu), and an app that needs a service through the CLI, with the secret out of the dry run
+- [x] Axiom (observability), Healthchecks.io (observability), CloudAMQP (messaging), Doppler (secrets)
+- [x] Sentry, Better Stack, New Relic (observability), Ably (messaging): written against the providers' schemas, mock-tested
+- [ ] The other secrets providers: Infisical (its machine-identity role shape and auth variables are not clear from the provider's schema), Akeyless, Bitwarden Secrets, Phase
+- [ ] The other observability providers: Grafana Cloud, Datadog, Honeycomb (its API-key resource needs a management key, and the free plan's access to one is not clear), Checkly, PagerDuty (its provider docs could not be read: token variable and integration key attribute unconfirmed), Site24x7, Netdata
+- [ ] The other messaging providers: Synadia, Confluent (trial credit only), Redpanda (trial credit only)
+- [x] A service from an `api` or `cli` engine, through its record (`service:` in `cli.yaml`, `outputs:` in `api.yaml`; `deploy` and `check` read it)
+- [ ] Live-account run for each
+
+## 11. CI systems, registries and IaC platforms (was phase 5)
+
+Two contracts, written in [ci.md](ci.md) and [adding-a-provider.md](adding-a-provider.md): a **CI provider**
+(`engine: ci`) ships a `pipeline.tpl` and names its `ci_file`, and `freelunch ci init <provider>` writes
+it; a **registry** (`engine: registry`, or any provider with a `registry:` host) is somewhere
+`freelunch init --image-workflow --registry <provider>` can push the project's image.
+
+- [x] The `ci` engine: `pipeline.tpl` with `@IMAGE@`, `ci_file`/`ci_secret`/`ci_run`; `ci init` writes it, keeps an existing file, says where the secret goes
+- [x] CircleCI, Bitbucket Pipelines, Buildkite, Azure DevOps, Codeberg (Forgejo Actions): valid YAML, tested; none has run on a real account, and the vendor-specific lines (Buildkite's docker plugin version, Codeberg's runner label and checkout action, CircleCI's `trigger_source`) are from memory of their docs
+- [x] The `registry` engine and `--registry`: Docker Hub, Codeberg (needs `--registry-image`); GHCR stays the default
+- [x] Catalog checks for both engines (a `ci` provider has a template, a `registry` one a host)
+- [x] GitLab as a provider: `engine: ci` with `ci_builtin` (its pipeline, state kind and registry are in the CLI)
+- [x] GitHub as a provider: `engine: ci` with `ci_builtin` (its workflows, GHCR and git-branch state are in the CLI)
+- [ ] HCP Terraform, Spacelift, Scalr: **not built on purpose.** They run the plans themselves, on their runners, which is the opposite of freelunch running them where you are with your credentials and its capacity wait; and as a state backend they would replace the store freelunch already offers (git, OCI, R2, B2, GitLab). A project that wants one can use its own backend config in a stack
+- [ ] Live-account run for each pipeline
+
+## 12. Providers with no Terraform provider, or a stale one (was phase 6)
+
+The `api` and `cli` engines exist; what a database from them lacked was a way into the database
+contract. A `cli.yaml` with a `database:` block now writes it into the provider's record
+([engines.md](engines.md#the-cli-engine)), and `deploy` and `check` read it.
+
+- [x] Contract outputs from the `cli` engine: `database:` (engine, url, token, connection) written to the record's outputs; removed on destroy; the token made once and never printed; needs the state store
+- [x] Records are nodes: `freelunch check` asks the databases in the records
+- [x] Turso (`cli`): `providers/turso/cli.yaml`, fake `turso` in the tests, README (CLI flags and `TURSO_API_TOKEN` from its docs, not run)
+- [x] Back4App, Leapcell, SnapDeploy (`guided`) and Deno Deploy (`api`) were done in sections 6 and 7
+- [x] The same for the `api` engine: `outputs:` (database, service or bucket) in `api.yaml`, tested with a made-up provider
+- [x] Services and buckets from a record: `deploy/` and the CLI read `outputs.services`/`service_credentials` and `outputs.buckets`/`bucket_keys`, `check` and the deploy gate ask them
+- [x] `body_format: form` and `outputs.fetch` in the `api` engine
+- [x] StatusCake (form bodies, push URL by a second read) and UptimeRobot (v3, JSON): calls read from their docs/OpenAPI, fixtures and tests, not run live; their free-plan allowance for heartbeats is not in their API docs
+- [ ] Phase (secrets): its CLI is not checked yet
+- [ ] Filebase (storage): its keys come from its console, not an API, so nothing for an engine to make
+- [ ] Databases whose tool or API is not checked yet: Tinybird, Nile, Prisma Postgres, InfluxDB Cloud, CrateDB Cloud
+- [ ] GPU providers (Modal, Vast.ai, Paperspace): no contract for them yet (a GPU is a host that is rented by the hour); out of scope until there is one
+- [ ] Live-account run for each
 
 ## Later phases (from the rollout)
 
-- [ ] Phase 3: networking and DNS glue: now section 9 above
-- [ ] Phase 4: secrets, observability, messaging
-- [ ] Phase 5: IaC state, CI, registries
-- [ ] Phase 6: no-provider and stale-provider cases (uses the `api` and `cli` engines)
+- [ ] Phase 3: networking and DNS glue: now section 9 above (built except the 9d providers still unchecked there, and the live runs)
+- [ ] Phase 4: secrets, observability, messaging: now section 10 above (contract and four providers built)
+- [ ] Phase 5: IaC state, CI, registries: now section 11 above (CI systems and Docker Hub built; the IaC platforms left out on purpose)
+- [ ] Phase 6: no-provider and stale-provider cases: now section 12 above (the cli engine's database outputs and Turso built; the rest waits on checkable APIs or a contract)
 - [ ] SingleStore: unblocked only if a provider can create a free workspace
 - [ ] Live-account run for each `fake-api` provider

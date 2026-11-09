@@ -2,16 +2,21 @@
 name: github
 display_name: "GitHub"
 category: iac-ci
-status: planned
+status: ready
 layer: service
+engine: ci
+ci_builtin: true
 terraform_provider: "integrations/github"
 iac: partner
 free_tier_type: always-free
 free_tier: "Pages (1 GB site, 100 GB/month soft bandwidth, public repos on Free), Actions minutes, GHCR for public images"
 card_required: "no"
 url: "https://github.com/pricing"
+ci_file: ".github/workflows/"
+ci_secret: "Settings > Secrets and variables > Actions (freelunch ci init --set-secrets does it with gh)"
+ci_run: "the Actions tab > freelunch > Run workflow (or gh workflow run)"
 last_verified: "2026-10-18"
-notes: null
+notes: "freelunch's own CI support for this system is built into the CLI (freelunch ci init), not a template: see docs/ci.md. Not run on a real account by the tests."
 sources:
   - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
   - "registry.terraform.io (checked 2026-10-18)"

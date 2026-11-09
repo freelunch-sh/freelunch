@@ -10,6 +10,7 @@ free_tier_type: always-free
 free_tier: "Sandbox cluster: 1 per account, single node up to 2 vCPUs / 4 GB RAM / 10 GB, 15 connections, 500 tables or 12.5M rows, no backups; paused after 10 days idle, deleted after 15"
 card_required: "unknown"
 url: "https://www.yugabyte.com/pricing/"
+secrets: "YBM_API_KEY=YugabyteDB Aeon API key"
 last_verified: "2026-11-08"
 notes: "Docs contradict themselves on whether a Sandbox can be paused by hand. Whether a card is needed to sign up is unverified. A Sandbox is reachable only through an IP allow list."
 sources:

@@ -2,16 +2,20 @@
 name: circleci
 display_name: "CircleCI"
 category: iac-ci
-status: planned
+status: ready
 layer: service
+engine: ci
 terraform_provider: "CircleCI-Public/circleci"
 iac: community
 free_tier_type: always-free
 free_tier: "30,000 credits/month (about 6,000 small Docker minutes), 5 active users, 30 concurrent jobs, 2 GB storage"
 card_required: "no"
 url: "https://circleci.com/pricing/"
+ci_file: ".circleci/config.yml"
+ci_secret: "Project Settings > Environment Variables: FREELUNCH_BUNDLE"
+ci_run: "Trigger Pipeline (or the API) with the parameter freelunch-run"
 last_verified: "2026-10-19"
-notes: "Credits expire monthly. The default medium resource class uses credits twice as fast as small."
+notes: "Credits expire monthly. The default medium resource class uses credits twice as fast as small. The pipeline is written from a template (freelunch ci init, docs/ci.md#other-ci-systems) and has not run on a real account."
 sources:
   - "circleci.com/pricing (2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"

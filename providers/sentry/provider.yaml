@@ -2,7 +2,7 @@
 name: sentry
 display_name: "Sentry"
 category: observability
-status: planned
+status: ready
 layer: service
 terraform_provider: "jianyuan/sentry"
 iac: community
@@ -10,8 +10,9 @@ free_tier_type: always-free
 free_tier: "5k errors/month, 1 user"
 card_required: "no"
 url: "https://sentry.io/pricing/"
+secrets: "SENTRY_AUTH_TOKEN=Sentry auth token that can create projects"
 last_verified: "2026-10-18"
-notes: null
+notes: "Makes projects with a client key each; an app that needs one gets SENTRY_DSN (docs/architecture.md#service-contract). The team must exist already. Not yet run against a real account."
 sources:
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"

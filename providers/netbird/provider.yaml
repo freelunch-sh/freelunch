@@ -2,7 +2,7 @@
 name: netbird
 display_name: "NetBird"
 category: networking
-status: planned
+status: ready
 layer: glue
 terraform_provider: "netbirdio/netbird"
 iac: community
@@ -10,8 +10,9 @@ free_tier_type: always-free
 free_tier: "Free cloud plan for small teams"
 card_required: "no"
 url: "https://netbird.io/pricing"
+secrets: "NB_PAT=NetBird personal access token"
 last_verified: "2026-10-18"
-notes: "Limits not verified during research."
+notes: "Makes the setup key hosts join with on first boot (netbird_setup_key in the host stacks) and reports each host's NetBird address as the mesh contract (docs/graph.md#the-mesh). Free-plan limits are not verified. The apt signing key in the bootstrap is the one pkgs.netbird.io serves, with a fingerprint NetBird does not publish: check it. Not yet run against a real account."
 sources:
   - "registry.terraform.io (checked 2026-10-18)"
 inspire: []

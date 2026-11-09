@@ -1,0 +1,16 @@
+{
+  "generic": false,
+  "token": "ur-key-5432",
+  "check": [
+    {"match": "GET /v3/user/me", "status": 200, "body": {"email": "me@example.com"}}
+  ],
+  "create": [
+    {"match": "GET /v3/monitors", "status": 200, "body": {"data": [], "nextLink": null}},
+    {"match": "POST /v3/monitors", "status": 201, "body": {"id": 4711, "friendlyName": "freelunch-hb", "type": "HEARTBEAT", "heartbeatUrl": "https://heartbeat.uptimerobot.com/m4711-mock-key", "tags": [{"id": 1, "name": "freelunch", "color": "#fff", "monitors": []}]}},
+    {"match": "GET /v3/monitors", "status": 200, "body": {"data": [{"id": 4711, "friendlyName": "freelunch-hb", "type": "HEARTBEAT", "heartbeatUrl": "https://heartbeat.uptimerobot.com/m4711-mock-key", "tags": [{"id": 1, "name": "freelunch", "color": "#fff", "monitors": []}]}], "nextLink": null}}
+  ],
+  "destroy": [
+    {"match": "GET /v3/monitors", "status": 200, "body": {"data": [{"id": 4711, "friendlyName": "freelunch-hb", "tags": [{"id": 1, "name": "freelunch"}]}, {"id": 4712, "friendlyName": "freelunch-mine", "tags": []}], "nextLink": null}},
+    {"match": "DELETE /v3/monitors/4711", "status": 200, "body": null}
+  ]
+}

@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export HEALTHCHECKSIO_API_KEY (or put it in .freelunch/.env). Use the project's
+# read-write API key (healthchecks.io > Project Settings > API Access).
+
+# One check per entry; the free plan has 20. An app curls HEALTHCHECK_URL when its job runs.
+checks = {
+  heartbeat = { timeout = 86400, grace = 3600 }
+  # backup = { schedule = "0 3 * * *", timezone = "Europe/Berlin" }
+}

@@ -296,6 +296,13 @@ the job signs in to it with its job token.
 
 ## Other CI systems
 
+freelunch writes a pipeline for these (`freelunch ci init <name>`): [CircleCI](../providers/circleci/README.md),
+[Bitbucket Pipelines](../providers/bitbucket/README.md), [Buildkite](../providers/buildkite/README.md),
+[Azure DevOps](../providers/azure-devops/README.md) and [Codeberg](../providers/codeberg/README.md)
+(Forgejo Actions), besides [GitLab](#gitlab-ci). Each is a template, `providers/<name>/pipeline.tpl`, that runs the
+runner image, restores the bundle and runs a command you choose; it never runs on a push. They have
+not run on a real account yet. For any other CI:
+
 Any CI that runs a container can run the runner image the same way: the project's checkout
 as the working directory, `FREELUNCH_BUNDLE` from the CI's secrets in the environment, then
 
@@ -404,3 +411,20 @@ Then, by hand: move each secret to that environment (Settings > Environments > p
 turn on the ruleset that requires code-owner review for `main`. `freelunch check`, which pull
 requests run, fails a workflow that uses `pull_request_target` or `permissions: write-all` and
 warns about third-party actions named by a tag instead of a commit.
+
+## Registries
+
+`freelunch init --image-workflow` writes a GitHub Actions workflow that builds the project's image and
+pushes it. By default that is GitHub's registry (`ghcr.io/<owner>/<repo>`, signed in with the job's own
+token). `--registry <provider>` pushes to another instead; a provider is one when its `provider.yaml`
+has a `registry:` host and the names of the secrets that sign in (`registry_user`, `registry_token`):
+
+| Provider | Registry | Secrets (in the repository's Actions secrets) | Image |
+|---|---|---|---|
+| (default) | `ghcr.io` | none: the job's token | `ghcr.io/<owner>/<repo>` |
+| `docker-hub` | `docker.io` | `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` | `docker.io/<you>/<repo>` |
+| `codeberg` | `codeberg.org` | `CODEBERG_USERNAME`, `CODEBERG_TOKEN` | give `--registry-image codeberg.org/<owner>/<name>` |
+
+The workflow's log line says what to add under `registries` in `apps.tfvars` so deploy can pull a
+private image (a read-only token of its own). The workflow still runs on GitHub: a project on Codeberg
+or GitLab that wants its own runner pushes from its own CI.

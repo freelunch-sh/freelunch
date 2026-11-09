@@ -1,0 +1,30 @@
+# UptimeRobot heartbeat monitors, read from its v3 OpenAPI spec (cdn.uptimerobot.com/api/openapi.yaml)
+# and not yet run against a live account (verified: fake-api). JSON with a bearer token.
+#
+# A monitor is made with the friendly name <name_prefix>-<app> and the tag <name_prefix> (tagNames),
+# which marks it as ours; the answer to creating it carries the heartbeat URL the app pings.
+base_url: https://api.uptimerobot.com/v3
+auth:
+  env: UPTIMEROBOT_API_KEY
+  header: "Authorization: Bearer {token}"
+check:
+  request: GET /user/me
+  ok: [200]
+list:
+  request: GET /monitors?limit=200
+  items: ".data[]"
+  fields: { id: ".id", name: ".friendlyName", marker: ".tags[0].name" }
+create:
+  request: POST /monitors
+  body: |
+    { type: "HEARTBEAT", friendlyName: $name, interval: 3600, gracePeriod: 300, tagNames: [$prefix] }
+  id: ".id"
+delete:
+  request: DELETE /monitors/{id}
+  ok: [200, 204, 404]
+outputs:
+  kind: service
+  entry: |
+    { kind: "observability", host: "heartbeat.uptimerobot.com", port: 443 }
+  credentials: |
+    { env: { UPTIMEROBOT_HEARTBEAT_URL: ($item.heartbeatUrl // error("UptimeRobot gave no heartbeatUrl for " + $name)) } }

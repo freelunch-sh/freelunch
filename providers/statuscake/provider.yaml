@@ -2,16 +2,19 @@
 name: statuscake
 display_name: "StatusCake"
 category: observability
-status: planned
+status: ready
 layer: service
+engine: api
+verified: fake-api
 terraform_provider: "StatusCakeDev/statuscake"
 iac: stale
 free_tier_type: always-free
 free_tier: "10 uptime monitors at 5-min intervals, 1 page speed, 1 domain and 1 SSL monitor"
 card_required: "unknown"
 url: "https://www.statuscake.com/pricing/"
+secrets: "STATUSCAKE_API_TOKEN=StatusCake API token"
 last_verified: "2026-10-19"
-notes: "The Terraform provider's last release was 2.2.2 in October 2023."
+notes: "A heartbeat (push) monitor per app, through the api engine (form-encoded requests, then a read for the push URL). The Terraform provider's last release was 2.2.2 in October 2023. The free plan's push-monitor allowance is not in the API reference: check it. Not yet run against a real account."
 sources:
   - "statuscake.com/pricing (2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"

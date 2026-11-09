@@ -110,6 +110,24 @@ run "tofu_engine_needs_a_stack" {
   expect_failures = [output.checklist, output.stub_readmes]
 }
 
+run "dns_engine_needs_a_dns_sh" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/no-dns-sh" }
+  expect_failures = [output.checklist, output.stub_readmes]
+}
+
+run "ci_engine_needs_a_pipeline_template" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/no-pipeline-tpl" }
+  expect_failures = [output.checklist, output.stub_readmes]
+}
+
+run "registry_engine_needs_a_registry" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/no-registry" }
+  expect_failures = [output.checklist, output.stub_readmes]
+}
+
 run "api_engine_needs_an_api_yaml" {
   command = plan
   variables { providers_dir = "tests/fixtures/no-api-yaml" }
@@ -121,7 +139,7 @@ run "api_and_guided_engines_render" {
   variables { providers_dir = "tests/fixtures/engines" }
 
   assert {
-    condition     = strcontains(output.checklist, "⚙️ `api`") && strcontains(output.checklist, "⚙️ `guided`")
+    condition     = strcontains(output.checklist, "⚙️ `api`") && strcontains(output.checklist, "⚙️ `guided`") && strcontains(output.checklist, "⚙️ `dns`") && strcontains(output.checklist, "⚙️ `ci`")
     error_message = "Implemented providers should show their engines, api with an api.yaml and guided with neither file."
   }
 }

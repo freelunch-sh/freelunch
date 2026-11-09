@@ -39,6 +39,8 @@ module "bootstrap" {
   extra_runcmd           = local.host_firewall_runcmd
   tailscale_auth_key     = var.tailscale_auth_key
   tailscale_hostname     = "${var.name_prefix}-oci-${each.key}"
+  netbird_setup_key      = var.netbird_setup_key
+  netbird_hostname       = "${var.name_prefix}-oci-${each.key}"
   max_encoded_size_bytes = 30000 # OCI caps instance metadata at 32,000 bytes; leave room for SSH keys
 }
 

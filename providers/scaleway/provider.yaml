@@ -4,6 +4,7 @@ display_name: "Scaleway"
 category: containers
 status: ready
 layer: platform
+arch: amd64
 terraform_provider: null
 iac: none
 free_tier_type: always-free

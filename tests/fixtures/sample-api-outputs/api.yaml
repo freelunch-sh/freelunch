@@ -1,0 +1,39 @@
+# A made-up provider whose resources are services: the create answer carries a key, kept in the record (outputs:).
+base_url: https://api.sample.test/v1
+auth:
+  env: SAMPLE_TOKEN
+  header: "Authorization: Bearer {token}"
+check:
+  request: GET /me
+  ok: [200]
+list:
+  request: GET /services
+  items: ".[]"
+  fields: { id: ".id", name: ".name", url: ".url", marker: ".labels.freelunch" }
+create:
+  request: POST /services
+  body: |
+    { name: $name, image: $image, port: $port, env: $env,
+      labels: { freelunch: $prefix } }
+  id: ".id"
+update:
+  request: PATCH /services/{id}
+  body: "{ image: $image, env: $env }"
+deploy:
+  request: POST /services/{id}/deploys
+  id: ".id"
+wait:
+  request: GET /services/{id}/deploys/{deploy_id}
+  status: ".status"
+  done: [live]
+  failed: [failed, canceled]
+delete:
+  request: DELETE /services/{id}
+  ok: [200, 204, 404]
+url: "https://{url}"
+outputs:
+  kind: service
+  entry: |
+    { kind: "observability", host: ($name + ".sample.test"), port: 443 }
+  credentials: |
+    { env: { SAMPLE_PUSH_URL: ("https://push.sample.test/" + $item.key) } }

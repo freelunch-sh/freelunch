@@ -101,6 +101,13 @@ variable "tailscale_auth_key" {
   sensitive   = true
 }
 
+variable "netbird_setup_key" {
+  description = "Optional NetBird setup key; hosts join your NetBird network on first boot."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
 variable "reserved_block_storage_gb" {
   description = "Block storage already used elsewhere in the tenancy, counted against the 200 GB cap."
   type        = number

@@ -55,12 +55,12 @@ usage() {
 Usage: freelunch <command> [args] [-- extra tofu/terraform args]
 
 Project:
-  init [--name <name>] [--image-workflow] [stack...]
+  init [--name <name>] [--image-workflow [--registry <p> [--registry-image <ref>]]] [stack...]
                           Create .freelunch/ in the current directory (default stacks: oci
                           cloudflare). Resources are named after the project: --name, the
                           name its other stacks have, or the folder's name. --image-workflow
                           adds a GitHub Actions workflow that builds the image for the hosts
-                          and pushes it to ghcr.io
+                          and pushes it to ghcr.io, or to --registry (docker-hub, codeberg)
   up [--dry-run] [--move] Deploy wherever there is room: take the first target (targets in
                           apps.tfvars, or every configured host and platform stack) that runs
                           the project or can make it, skipping one that is out of capacity or
@@ -105,7 +105,7 @@ Project:
                           in. The copies are encrypted with FREELUNCH_STATE_PASSPHRASE
 
 CI:
-  ci init [github|gitlab] Write the CI workflows: one that waits for capacity on a schedule, and
+  ci init [github|gitlab|<ci>] Write the CI workflows: one that waits for capacity on a schedule, and
                           one that runs deploy after a new image, or any command you start
                           Then the secrets they pass on: --set-secrets runs gh secret set for each,
                           --print-secrets only prints what to run; without either it asks (and
@@ -158,8 +158,13 @@ Infrastructure:
                           the branch deploys from, and CODEOWNERS for workflows and .freelunch/
   verify [--path /x] [--timeout s] <url>...
                           Wait until the app answers at its address; fails with what it saw
-  check                   Check the config in git without any secret: complete, real targets,
+  check [node] [--json]   With a node name or --json: ask every node (or that one) whether it
+                          exists, answers and is healthy. Without: check the config in git
+                          without any secret: complete, real targets,
                           no secret in a file. What a pull request runs
+  journey [name] [--json] Follow each path from a hostname through the apps it needs to the
+                          database, hop by hop; stops at the first that fails and says which
+                          edge and why. Without a name: every path
   logs <app> [--lines n]  The last lines an app (or cloudflared) logged on Northflank
   doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in and
                           what the tenancy's limits leave, the Northflank token, SSH keys,
@@ -1821,23 +1826,23 @@ cmd_lifecycle() { # plan|apply|destroy
         detach_wait "${hosts[0]}" "${child[@]}"
         return 0
       fi
-      for a in ${hosts[@]+"${hosts[@]}"}; do
-        ci_wait_guard "$a" "$plan_file"
-        if [[ $wait_for_capacity -eq 1 ]]; then apply_until_capacity "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; else apply_host "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; fi
-      done
-      # A platform stack declares the target; its API then makes it (the Northflank project).
-      for a in ${platforms[@]+"${platforms[@]}"}; do
-        engine_apply "$a" "$plan_file" ${extra[@]+"${extra[@]}"}
+      # Hosts and platforms go through the engine: a host stack applies (and may wait for
+      # capacity); a platform stack declares the target and its API then makes it.
+      for a in ${hosts[@]+"${hosts[@]}"} ${platforms[@]+"${platforms[@]}"}; do
+        ENGINE_WAIT=$wait_for_capacity engine_apply "$a" "$plan_file" ${extra[@]+"${extra[@]}"}
       done
       for a in ${services[@]+"${services[@]}"}; do apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; done
       [[ ${#hosts[@]} -eq 0 && ${#platforms[@]} -eq 0 ]] || cmd_hybrid
       for a in ${glue[@]+"${glue[@]}"}; do apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; done
+      # apply all also keeps the project's DNS records (after the hosts have their addresses)
+      if [[ " ${names[*]-} " == *" all "* ]]; then dns_all apply; fi
       next_steps ${hosts[@]+"${hosts[@]}"} ${platforms[@]+"${platforms[@]}"} ;;
     destroy)
+      # destroy all first removes the records the project made, while it still knows the hosts
+      if [[ " ${names[*]-} " == *" all "* ]]; then dns_all destroy; fi
       for a in ${hosts[@]+"${hosts[@]}"}; do ci_wait_guard "$a" ""; done
       for a in ${glue[@]+"${glue[@]}"} ${services[@]+"${services[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
-      for a in ${platforms[@]+"${platforms[@]}"}; do engine_destroy "$a" ${extra[@]+"${extra[@]}"}; done
-      for a in ${hosts[@]+"${hosts[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
+      for a in ${platforms[@]+"${platforms[@]}"} ${hosts[@]+"${hosts[@]}"}; do engine_destroy "$a" ${extra[@]+"${extra[@]}"}; done
       [[ ${#hosts[@]} -eq 0 && ${#platforms[@]} -eq 0 ]] || cmd_hybrid ;;
   esac
 }
@@ -2123,22 +2128,52 @@ ready_stacks() {
   return 0
 }
 
+# The container registry the image workflow pushes to: a provider with a registry: in its
+# provider.yaml (docker-hub, codeberg...), and the repository to push to when it can't be worked out
+IMAGE_REGISTRY="" IMAGE_REGISTRY_IMAGE=""
+
+# registry_providers: the providers with a container registry
+registry_providers() {
+  local p
+  for p in $(all_providers); do [[ -z "$(meta "$p" registry)" ]] || echo "$p"; done
+  return 0
+}
+
 # image_workflow <project folder> <stacks...>: a GitHub Actions workflow that builds the
 # project's image for the hosts of those stacks and pushes it to GitHub's registry. An
 # Oracle A1 VM is Arm; the default hosts of the other clouds are x86.
 image_workflow() {
   local base="$1" s arm=0 x86=0 platforms; shift
   for s in "$@"; do
-    case "$s" in
-      oci) arm=1 ;;
-      gcp|aws|azure|northflank|cloud-run|scaleway|render) x86=1 ;;
+    case "$(meta "$s" arch)" in
+      arm64) arm=1 ;;
+      amd64) x86=1 ;;
     esac
   done
   if [[ $arm -eq $x86 ]]; then platforms="linux/amd64,linux/arm64"; elif [[ $arm -eq 1 ]]; then platforms="linux/arm64"; else platforms="linux/amd64"; fi
   mkdir -p "$base/.github/workflows"
+  local reg_host=ghcr.io reg_user reg_pass reg_image reg_perm="  packages: write" reg_name="GitHub's container registry" reg_hint
+  # shellcheck disable=SC2016 # GitHub expressions, not ours
+  reg_user='${{ github.actor }}'; reg_pass='${{ secrets.GITHUB_TOKEN }}'; reg_image='ghcr.io/${{ github.repository }}'
+  reg_hint="a package of a private repository is private: give deploy a read:packages token under registries in apps.tfvars"
+  if [[ -n "$IMAGE_REGISTRY" ]]; then
+    reg_host="$(meta "$IMAGE_REGISTRY" registry)"; reg_perm=""; reg_name="$(meta "$IMAGE_REGISTRY" display_name)'s registry ($reg_host)"
+    # shellcheck disable=SC2016 # GitHub expressions, not ours
+    reg_user='${{ secrets.'"$(meta "$IMAGE_REGISTRY" registry_user)"' }}'
+    # shellcheck disable=SC2016 # GitHub expressions, not ours
+    reg_pass='${{ secrets.'"$(meta "$IMAGE_REGISTRY" registry_token)"' }}'
+    if [[ -n "$IMAGE_REGISTRY_IMAGE" ]]; then reg_image="$IMAGE_REGISTRY_IMAGE"
+    elif [[ -n "$(meta "$IMAGE_REGISTRY" registry_image)" ]]; then
+      local open='${{' close='}}'
+      reg_image="$(meta "$IMAGE_REGISTRY" registry_image)"
+      reg_image="${reg_image//@USER@/$open secrets.$(meta "$IMAGE_REGISTRY" registry_user) $close}"
+      reg_image="${reg_image//@REPO@/$open github.event.repository.name $close}"
+    else die "init: $IMAGE_REGISTRY needs --registry-image <$reg_host/owner/name>, the repository the image goes to"; fi
+    reg_hint="give deploy a read token under registries in apps.tfvars: \"$reg_host\" = { username = \"<you>\", password_env = \"$(meta "$IMAGE_REGISTRY" registry_token)\" }, and put the secrets $(meta "$IMAGE_REGISTRY" registry_user) and $(meta "$IMAGE_REGISTRY" registry_token) in this repository's Actions secrets"
+  fi
   write_new "$base/.github/workflows/image.yml" <<EOF
 # Written by freelunch init --image-workflow. Builds the image from the Dockerfile and
-# pushes it to GitHub's container registry as ghcr.io/<owner>/<repo>: :main and
+# pushes it to $reg_name as ${reg_image}: :main and
 # :sha-<commit> for each push to main, :<version> for tags like v1.2.3. Use one of them
 # as the image in your Compose file.
 #
@@ -2155,8 +2190,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  packages: write
+  contents: read${reg_perm:+
+$reg_perm}
 
 jobs:
   image:
@@ -2167,13 +2202,13 @@ jobs:
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
-          registry: ghcr.io
-          username: \${{ github.actor }}
-          password: \${{ secrets.GITHUB_TOKEN }}
+          registry: $reg_host
+          username: $reg_user
+          password: $reg_pass
       - id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/\${{ github.repository }}
+          images: $reg_image
           tags: |
             type=ref,event=branch
             type=sha
@@ -2189,7 +2224,7 @@ jobs:
           cache-to: type=gha,mode=max
 EOF
   [[ -f "$base/Dockerfile" ]] || log "there is no Dockerfile yet; the image workflow builds ./Dockerfile"
-  log "the image workflow builds for $platforms. A package of a private repository is private: give deploy a read:packages token under registries in apps.tfvars"
+  log "the image workflow builds for $platforms and pushes to $reg_name; $reg_hint"
 }
 
 # project_prefix <.freelunch folder>: the name an earlier init gave the project's stacks, or
@@ -2266,6 +2301,8 @@ cmd_init() {
       --name)   [[ $# -gt 1 ]] || die "init: --name takes a name"; name="$2"; shift ;;
       --name=*) name="${1#--name=}" ;;
       --image-workflow) workflow=1 ;;
+      --registry)       [[ $# -gt 1 ]] || die "init: --registry takes a provider (docker-hub, codeberg...)"; IMAGE_REGISTRY="$2"; shift ;;
+      --registry-image) [[ $# -gt 1 ]] || die "init: --registry-image takes the image's repository (docker.io/me/shop)"; IMAGE_REGISTRY_IMAGE="$2"; shift ;;
       -*)       die "init: unknown option $1" ;;
       *)        stacks+=("$1") ;;
     esac
@@ -2413,6 +2450,7 @@ EOF
   } | write_new "$cfg/.env.example"
 
   log "project name: $name (name_prefix in each stack's tfvars)"
+  [[ -z "$IMAGE_REGISTRY" ]] || [[ -n "$(meta "$IMAGE_REGISTRY" registry)" ]] || die "init: $IMAGE_REGISTRY has no container registry freelunch can push to (--registry takes: $(registry_providers | tr '\n' ' '))"
   [[ $workflow -eq 0 ]] || image_workflow "$base" "${stacks[@]}"
   # apps.tfvars may be one init kept, whose apps are somewhere else.
   local entry path full
@@ -2610,7 +2648,8 @@ storage_states() {
 }
 
 # apps_use_database <apps file>: whether any app in it names a database
-apps_use_database() { [[ -f "$1" ]] && tfvars_map "$1" apps database | cut -f2 | grep -q .; }
+# (an app's needs may name one too, and are not read here, so any needs count)
+apps_use_database() { [[ -f "$1" ]] && { tfvars_map "$1" apps database | cut -f2 | grep -q . || grep -Eq '(^|[^A-Za-z0-9_])needs[[:space:]]*=' "$1"; }; }
 
 # database_states <apps file>: the state files of deployed stacks that make databases, as a JSON
 # list; empty unless an app names a database
@@ -2624,21 +2663,38 @@ database_states() {
   done | jq -Rsc 'split("\n") | map(select(length > 0))'
 }
 
-# database_records <apps file> <var file>: databases that engines without a state file (api, cli)
-# made, from the outputs of their records in the state store, as a var file for deploy/ (so
-# the credentials are never on a command line). A record holds them as
-# "outputs": { "databases": [...], "database_credentials": { "<provider>-<name>": { "url": ... } } }.
-# Writes nothing, and returns 1, when there are none.
+# service_states <apps file>: the state files of deployed stacks that make services (secrets,
+# observability, messaging), as a JSON list; empty unless an app names a node
+service_states() {
+  local p state
+  apps_use_database "$1" || { echo '[]'; return 0; }
+  for p in $(all_providers); do
+    if [[ ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
+    state="$(config_dir "$p")/terraform.tfstate"
+    if jq -e '.outputs.services' "$state" >/dev/null 2>&1; then echo "$state"; fi
+  done | jq -Rsc 'split("\n") | map(select(length > 0))'
+}
+
+# database_records <apps file> <var file>: what engines without a state file (api, cli) made, from the
+# outputs of their records in the state store, as a var file for deploy/ (so the credentials are
+# never on a command line): databases, services and buckets, each with the credentials of its
+# contract. A record holds them as "outputs": { "databases": [...], "database_credentials": {...},
+# "services": [...], "service_credentials": {...}, "buckets": [...], "bucket_keys": {...} }.
+# Writes nothing, and returns 1, when there are none. (The name is from when it was only databases.)
 database_records() {
-  local p rec out='{"extra_databases":[],"extra_database_credentials":{}}' found=0
+  local p rec out found=0
+  out='{"extra_databases":[],"extra_database_credentials":{},"extra_services":[],"extra_service_credentials":{},"extra_buckets":[],"extra_bucket_keys":{}}'
   apps_use_database "$1" || return 1
   [[ -n "$(state_config)" && $STATE_ON -eq 1 ]] || return 1
   for p in $(cd "$PROVIDERS_DIR" && ls -d -- */ 2>/dev/null | sed 's|/$||' | grep -v '^_'); do
     [[ -d "$PROJECT/$p" ]] || continue
     [[ -f "$PROVIDERS_DIR/$p/api.yaml" || -f "$PROVIDERS_DIR/$p/cli.yaml" || -f "$PROVIDERS_DIR/$p/guided.yaml" ]] || continue
     rec="$(record_pull "$p")"
-    [[ -n "$rec" ]] && jq -e '.outputs.databases' <<< "$rec" >/dev/null 2>&1 || continue
-    out="$(jq -c --argjson r "$rec" '.extra_databases += ($r.outputs.databases // []) | .extra_database_credentials += ($r.outputs.database_credentials // {})' <<< "$out")"
+    [[ -n "$rec" ]] && jq -e '.outputs | (.databases // .services // .buckets) != null' <<< "$rec" >/dev/null 2>&1 || continue
+    out="$(jq -c --argjson r "$rec" '
+      .extra_databases += ($r.outputs.databases // []) | .extra_database_credentials += ($r.outputs.database_credentials // {})
+      | .extra_services += ($r.outputs.services // []) | .extra_service_credentials += ($r.outputs.service_credentials // {})
+      | .extra_buckets += ($r.outputs.buckets // []) | .extra_bucket_keys += ($r.outputs.bucket_keys // {})' <<< "$out")"
     found=1
   done
   [[ $found -eq 1 ]] || return 1
@@ -2654,26 +2710,165 @@ deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
   if [[ -f "$apps_file" ]]; then args+=(-var-file="$apps_file"); fi
   if [[ -n "$tunnel_state" ]]; then args+=(-var "tunnel_state_path=$tunnel_state"); fi
   args+=(-var "storage_state_paths=$(storage_states)")
+  args+=(-var "mesh=$(mesh_nodes)")
   args+=(-var "database_state_paths=$(database_states "$apps_file")")
+  args+=(-var "service_state_paths=$(service_states "$apps_file")")
   if database_records "$apps_file" "$TMP/databases.tfvars.json"; then args+=(-var-file="$TMP/databases.tfvars.json"); fi
   default="$(default_host)"
   if [[ -n "$default" ]]; then args+=(-var "default_host=$default"); fi
   check_checkout_tfvars "$ROOT/deploy"
   TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" init -input=false >/dev/null || return 1
   TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" apply -input=false -auto-approve "${args[@]}" >/dev/null || return 1
-  for o in targets platforms registries tunnel_tokens app_env; do
+  for o in targets platforms registries tunnel_tokens app_env graph; do
     TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" output -state="$TMP/deploy.tfstate" -json "$o" > "$TMP/$o.json" || return 1
   done
+  graph_prepare || return 1
+  graph_edges || return 1
   # in GitHub Actions, keep what a bucket or a database hands an app out of the job's log
   if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
     jq -r '.[] | .[] | strings | select(length >= 8)' "$TMP/app_env.json" | while IFS= read -r value; do echo "::add-mask::$value"; done
   fi
 }
 
+# --- the graph: needs between nodes ------------------------------------------------------------
+#
+# An app's needs (and its bucket and database) are edges to other nodes (docs/graph.md). The
+# plan is checked for a circle of apps, and the apps are put in dependency order in
+# targets.json: what an app needs is deployed before it, on a host and across hosts.
+
+# graph_order: the apps, each after the apps it needs; alphabetical where nothing is between
+# them. Fails, saying the circle, when apps need each other.
+graph_order() {
+  local edges="$TMP/graph.edges" left placed=" " next app n ready progress path cur seen
+  jq -r 'to_entries[] | .key as $a | .value.needs[] | select(. as $n | $apps | index($n)) | "\($a) \(.)"' \
+    --argjson apps "$(jq -c 'keys' "$TMP/graph.json")" "$TMP/graph.json" > "$edges"
+  left="$(jq -r 'keys[]' "$TMP/graph.json")"
+  while [[ -n "$left" ]]; do
+    next=""; progress=0
+    for app in $left; do
+      ready=1
+      for n in $(awk -v a="$app" '$1 == a { print $2 }' "$edges"); do
+        [[ "$placed" == *" $n "* ]] || ready=0
+      done
+      if [[ $ready -eq 1 ]]; then placed="$placed$app "; echo "$app"; progress=1; else next="$next$app "; fi
+    done
+    if [[ $progress -eq 0 ]]; then
+      # everything left needs something left: follow the needs until an app comes round again
+      cur="${next%% *}"; path=""; seen=" "
+      while [[ "$seen" != *" $cur "* ]]; do
+        seen="$seen$cur "; path="$path$cur -> "
+        cur="$(awk -v a="$cur" '$1 == a { print $2 }' "$edges" | while read -r n; do [[ "$placed" == *" $n "* ]] || { echo "$n"; break; }; done)"
+      done
+      echo "freelunch: the apps need each other in a circle: ${path}${cur}. Remove one of the needs in apps.tfvars" >&2
+      return 1
+    fi
+    left="$next"
+  done
+}
+
+# graph_prepare: validate the graph and order the targets by it. Writes $TMP/order.txt.
+graph_prepare() {
+  local order
+  order="$(graph_order)" || return 1
+  printf '%s\n' "$order" > "$TMP/order.txt"
+  [[ -s "$TMP/graph.edges" ]] || return 0
+  # Hosts follow the apps they first hold in that order, then the rest as before.
+  jq --argjson order "$(jq -Rsc 'split("\n") | map(select(length > 0))' <<< "$order")" '
+    def pos($k): ($order | index($k)) // 1000000;
+    with_entries(.value.apps |= (to_entries | sort_by(pos(.key)) | from_entries))
+    | to_entries
+    | sort_by([ (.value.apps | keys | map(pos(.)) | min // 1000000), .key ])
+    | from_entries' "$TMP/targets.json" > "$TMP/targets.ordered.json" && mv "$TMP/targets.ordered.json" "$TMP/targets.json"
+}
+
+# --- edge media: how a need becomes reachable ----------------------------------------------------
+#
+# A need on another app resolves to an address, by where the two nodes are:
+#   same host            the shared Docker network "freelunch", by app name
+#   same platform        the platform's service name
+#   different, private   a mesh address, when the dependency's host is on a mesh
+#   different, public    the hostname of a Cloudflare route to the dependency
+# The dependant gets it as <APP>_URL (api -> API_URL). Private beats public where both exist:
+# it stays off the internet. When none applies the deploy stops, saying what is missing.
+
+# mesh_nodes: host -> {address, ssh} of every mesh a deployed stack outputs (`mesh`), as JSON
+mesh_nodes() {
+  local p state out='{}'
+  for p in $(all_providers); do
+    [[ -d "$(stack_dir "$p")" ]] && is_deployed "$p" || continue
+    state="$(config_dir "$p")/terraform.tfstate"
+    jq -e '.outputs.mesh' "$state" >/dev/null 2>&1 || continue
+    out="$(jq -c --slurpfile s "$state" '. + $s[0].outputs.mesh.value' <<< "$out")"
+  done
+  echo "$out"
+}
+
+# edge_resolve <dependant> <dependency>: "medium<TAB>url<TAB>why", or nothing and a message
+edge_resolve() {
+  local from="$1" dep="$2" from_host dep_host port kind route mesh
+  from_host="$(jq -r --arg a "$from" '.[$a].host' "$TMP/graph.json")"
+  dep_host="$(jq -r --arg a "$dep" '.[$a].host' "$TMP/graph.json")"
+  port="$(jq -r --arg a "$dep" '.[$a].port // empty' "$TMP/graph.json")"
+  if [[ -z "$port" ]]; then
+    echo "freelunch: $from needs $dep, but $dep has no port in apps.tfvars (port = 8080): a dependant can't reach it without one" >&2; return 1
+  fi
+  kind="$(jq -r --arg h "$dep_host" '.[$h].kind // "host"' "$TMP/targets.json")"
+  if [[ "$from_host" == "$dep_host" ]]; then
+    if [[ "$kind" == platform ]]; then printf 'platform service\thttp://%s:%s\tboth run on %s, which reaches a service by its name\n' "$dep" "$port" "$dep_host"
+    else printf 'compose network\thttp://%s:%s\tboth run on %s: put both in the Docker network freelunch\n' "$dep" "$port" "$dep_host"; fi
+    return 0
+  fi
+  mesh="$(jq -r --arg h "$dep_host" '.[$h].address // empty' "$TMP/mesh.json")"
+  if [[ -n "$mesh" ]]; then printf 'mesh\thttp://%s:%s\t%s is on a mesh (private), as %s\n' "$mesh" "$port" "$dep_host" "$mesh"; return 0; fi
+  route=""
+  if [[ -n "${CF_ROUTES:-}" ]]; then
+    route="$(jq -r --arg a "$dep" --arg h "$dep_host" --argjson p "$port" 'to_entries[] | select(.value.app == $a or (.value.host == $h and (.value.service | test(":" + ($p | tostring) + "$")))) | .key' <<< "$CF_ROUTES" | head -1)"
+  fi
+  if [[ -n "$route" ]]; then printf 'cloudflare route\thttps://%s\t%s and %s are on different nodes, and a Cloudflare route reaches %s publicly\n' "$route" "$from_host" "$dep_host" "$dep"; return 0; fi
+  echo "freelunch: $from (on $from_host) needs $dep (on $dep_host), and nothing connects them: $dep_host is on no mesh and no Cloudflare route goes to $dep. Add a route (cloudflare routes in terraform.tfvars) or a mesh (freelunch apply tailscale)" >&2
+  return 1
+}
+
+# graph_edges: resolve every need on an app, put <APP>_URL in the dependant's environment
+# (app_env.json), and say which medium each got. Writes $TMP/edges.json.
+graph_edges() {
+  local from dep line medium url why state edges='[]'
+  mesh_nodes > "$TMP/mesh.json"
+  CF_ROUTES=""
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then CF_ROUTES="$(jq -c '.outputs.routes.value // {}' "$(config_dir cloudflare)/terraform.tfstate")"; fi
+  while IFS=' ' read -r from dep; do
+    [[ -n "$from" ]] || continue
+    line="$(edge_resolve "$from" "$dep")" || return 1
+    IFS=$'\t' read -r medium url why <<< "$line"
+    log "$from needs $dep: $medium ($url)"
+    edges="$(jq -c --arg f "$from" --arg t "$dep" --arg m "$medium" --arg u "$url" --arg w "$why" '. + [{from: $f, to: $t, medium: $m, url: $u, why: $w}]' <<< "$edges")"
+  done < "$TMP/graph.edges"
+  printf '%s\n' "$edges" > "$TMP/edges.json"
+  jq --argjson e "$edges" '. as $env | reduce $e[] as $x ($env; .[$x.from] = ((.[$x.from] // {}) + {(($x.to | ascii_upcase | gsub("-"; "_")) + "_URL"): $x.url}))' "$TMP/app_env.json" > "$TMP/app_env.new" && mv "$TMP/app_env.new" "$TMP/app_env.json"
+}
+
+# graph_gate <hosts...>: an app is not deployed against a database or bucket it needs (in
+# `needs`) that does not answer. The old bucket and database fields are not asked.
+graph_gate() {
+  local rows host app n bad=""
+  [[ "${FREELUNCH_CHECK_NEEDS:-1}" == "1" ]] || return 0
+  rows="$( { probe_stack_nodes; probe_record_nodes; } | jq -sc '.')"
+  for host in "$@"; do
+    for app in $(jq -r --arg h "$host" '.[$h].apps | keys[]' "$TMP/targets.json"); do
+      for n in $(jq -r --arg a "$app" '.[$a].needs[]' "$TMP/graph.json"); do
+        jq -e --arg h "$host" --arg a "$app" --arg n "$n" '.[$h].apps[$a] | (.bucket == $n or .database == $n)' "$TMP/targets.json" >/dev/null && continue
+        jq -e --arg n "$n" 'any(.[]; .node == $n and .healthy == false)' <<< "$rows" >/dev/null || continue
+        bad="$bad$app needs $n: $(jq -r --arg n "$n" '.[] | select(.node == $n) | .reason' <<< "$rows"); "
+      done
+    done
+  done
+  [[ -z "$bad" ]] || die "deploy: ${bad%; }. Fix it, or FREELUNCH_CHECK_NEEDS=0 to deploy anyway"
+}
+
 # remote_script <host> <redact>: the script deploy pipes to `sudo bash -s` on a host.
 # Files travel as base64 heredocs; with redact=1 (dry run) contents and secrets are left out.
 remote_script() {
-  local host="$1" redact="$2" name compose env_file server username var token what
+  local host="$1" redact="$2" name compose env_file server username var token what needs_env
   local targets="$TMP/targets.json"
 
   cat <<EOF
@@ -2721,6 +2916,8 @@ trap 'for r in ${registries[@]+"${registries[@]}"}; do docker logout "$r" >/dev/
 if command -v cloud-init >/dev/null 2>&1; then timeout 900 cloud-init status --wait >/dev/null 2>&1 || true; fi
 docker compose version >/dev/null 2>&1 || { echo "!! docker compose is not installed on this host" >&2; exit 1; }
 install -d -m 0750 "$apps"
+# apps that need each other on this host reach one another by name in this network
+docker network create freelunch >/dev/null 2>&1 || true
 EOF
 
   while IFS=$'\t' read -r server username var; do
@@ -2737,12 +2934,15 @@ EOF
     if [[ "$redact" == 1 ]]; then echo "<$compose>"; else b64 < "$compose"; fi
     echo "FREELUNCH_EOF"
     # The bucket's settings and the database's URL come first, so the env_file can override them.
-    if [[ -n "$env_file$bucket$database" ]]; then
+    needs_env=""
+    jq -e --arg a "$name" 'has($a)' "$TMP/app_env.json" >/dev/null && needs_env=1
+    if [[ -n "$env_file$bucket$database$needs_env" ]]; then
       echo "put \"\$apps/$name/.env\" 0600 <<'FREELUNCH_EOF'"
       if [[ "$redact" == 1 ]]; then
         what=""
         [[ -z "$bucket" ]] || what="the S3 settings of $bucket"
         [[ -z "$database" ]] || what="${what:+$what, }DATABASE_URL of $database"
+        [[ "$needs_env" != 1 || -n "$bucket$database" ]] || what="what its needs give it"
         [[ -z "$env_file" ]] || what="${what:+$what, then }$env_file"
         echo "<$what, redacted>"
       else
@@ -2896,6 +3096,7 @@ cmd_deploy() {
 
   if [[ "${FREELUNCH_SSH_STRICT:-0}" == "1" ]]; then ssh_options yes; else ssh_options accept-new; fi
   token_reminders
+  [[ "$dry_run" == "1" ]] || graph_gate "${hosts[@]}"
   for h in "${hosts[@]}"; do
     if [[ "$(jq -r --arg h "$h" '.[$h].kind' "$TMP/targets.json")" == "platform" ]]; then engine_deploy "$h" "$dry_run"; else deploy_host "$h" "$dry_run"; fi
   done
@@ -3757,10 +3958,17 @@ api_call() {
   header="$(api_cfg "$p" .auth.header)"
   header="${header//\{token\}/$token}"
   cfg="$TMP/api/$p.curl"
+  local ctype="application/json"
+  # body_format: form sends the body's keys as application/x-www-form-urlencoded fields; an array
+  # is repeated as key[]=...
+  if [[ -n "$body" && "$(api_cfg "$p" .body_format)" == form ]]; then
+    jq -r 'to_entries[] | select(.value != null) | .key as $k | (.value | if type == "array" then .[] | [($k + "[]"), tostring] else [$k, tostring] end) | map(@uri) | join("=")' "$body" | paste -sd'&' - | tr -d '\n' > "$body.form"
+    body="$body.form"; ctype="application/x-www-form-urlencoded"
+  fi
   (umask 077; {
     printf 'header = "%s"\n' "$(printf '%s' "$header" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
     printf 'header = "Accept: application/json"\n'
-    [[ -z "$body" ]] || printf 'header = "Content-Type: application/json"\n'
+    [[ -z "$body" ]] || printf 'header = "Content-Type: %s"\n' "$ctype"
   } > "$cfg")
   [[ -z "$body" ]] || args=(--data-binary "@$body")
   code="$(curl -sS --max-time 60 -o "$TMP/api/$p.out" -w '%{http_code}' -X "$method" -K "$cfg" ${args[@]+"${args[@]}"} "$(api_cfg "$p" .base_url)$path")" || code=000
@@ -3900,6 +4108,34 @@ api_wait() {
   done
 }
 
+# api_outputs <provider> <app> <name>: for a provider whose resources are databases, services or
+# buckets (outputs: in api.yaml), turn the answer to the create call into the contract's entry and
+# credentials with the two jq programs the file gives, and keep them in the provider's record.
+# Their input is $item (the create answer, or the fetch: answer when there is one), $created (the create answer), $app, $name and $prefix. Nothing secret is printed.
+api_outputs() {
+  local p="$1" app="$2" name="$3" kind entry cred pre
+  api_has "$p" .outputs.kind || return 0
+  kind="$(api_cfg "$p" .outputs.kind)"
+  [[ "$kind" =~ ^(database|service|bucket)$ ]] || die "api: providers/$p/api.yaml: outputs.kind is database, service or bucket"
+  [[ -n "$(state_config)" ]] || die "api: $p makes ${kind}s, and what an app needs of one is kept in the provider's record in the state store, which this project doesn't have yet (freelunch state init)"
+  pre="$(jq -r .prefix "$TMP/api/$p.vars")"
+  [[ -s "$TMP/api/$p.out" ]] || echo '{}' > "$TMP/api/$p.out"
+  # outputs.fetch: when the create answer has only an id, one more call (with {id}) reads the rest;
+  # its answer is $item, and the create answer stays as $created
+  cp "$TMP/api/$p.out" "$TMP/api/$p.created"
+  if api_has "$p" .outputs.fetch; then
+    local code
+    code="$(api_call "$p" "$(api_cfg "$p" .outputs.fetch)" "$TMP/api/$p.vars" "")"
+    [[ "$code" == 2?? ]] || die "api: can't read $name from $p after making it ($code): $(api_error "$p")"
+  fi
+  entry="$(jq -nc --argjson item "$(cat "$TMP/api/$p.out")" --argjson created "$(cat "$TMP/api/$p.created")" --arg app "$app" --arg name "$name" --arg prefix "$pre" "($(api_cfg "$p" .outputs.entry)) + {provider: \"$p\", name: \$app}" 2>"$TMP/api/$p.out.err")" \
+    || die "api: the outputs.entry in providers/$p/api.yaml doesn't render: $(head -c 300 "$TMP/api/$p.out.err")"
+  cred="$(jq -nc --argjson item "$(cat "$TMP/api/$p.out")" --argjson created "$(cat "$TMP/api/$p.created")" --arg app "$app" --arg name "$name" --arg prefix "$pre" "$(api_cfg "$p" .outputs.credentials)" 2>"$TMP/api/$p.out.err")" \
+    || die "api: the outputs.credentials in providers/$p/api.yaml don't render: $(head -c 300 "$TMP/api/$p.out.err")"
+  record_outputs "$p" set "$kind" "$app" "$entry" "$cred"
+  log "$p: $name: what an app needs of it is in the record: an app says $([[ $kind == database ]] && echo database || echo needs) = \"$p-$app\""
+}
+
 # api_deploy <provider> <app> <image> <port> <env file> <dry run 0|1> [source folder]: find
 # <prefix>-<app>; create it when it isn't there, update it when freelunch made it, stop when
 # somebody else did. A provider that deploys source, not an image, gets the folder in the vars
@@ -3955,6 +4191,7 @@ api_deploy() {
     fi
     api_record "$p" add "$id" "$name"
     log "$p: $name: made"
+    api_outputs "$p" "$app" "$name"
   fi
   if api_step "$p" deploy "$vars"; then :
   elif api_has "$p" .deploy.request; then
@@ -3969,7 +4206,8 @@ api_deploy() {
   api_list "$p"
   url="$(jq -r --arg n "$name" 'map(select(.name == $n)) | first | .url // empty' "$TMP/api/$p.items.json")"
   [[ -n "$url" ]] || url="$(cat "$TMP/api/$p.waiturl" 2>/dev/null || true)"
-  if [[ -n "$url" ]]; then
+  # a provider with outputs: makes things whose address can hold a key; it is in the record, not in the log
+  if [[ -n "$url" ]] && ! api_has "$p" .outputs.kind; then
     api_has "$p" .url && url="$(api_expand "$(api_cfg "$p" .url)" <(jq -cn --arg url "$url" '{url: $url}'))"
     report_url "$p" "$url" "$app"
   fi
@@ -4011,6 +4249,7 @@ api_delete_one() {
   fi
   log "$p: deleted $name"
   api_record "$p" remove "$id"
+  ! api_has "$p" .outputs.kind || record_outputs "$p" remove all "${name#"$(jq -r .prefix "$TMP/api/$p.vars")"-}"
 }
 
 # api_status <provider>: what is there
@@ -4063,7 +4302,9 @@ cmd_api() {
         esac
         shift
       done
-      [[ -n "$image" || -n "$source" ]] || die "api deploy: --image (a container image) or --source (a folder of source code) is needed"
+      api_load "$p"
+      # a provider whose resources are monitors, keys or the like (outputs:) takes neither
+      [[ -n "$image" || -n "$source" ]] || api_has "$p" .outputs.kind || die "api deploy: --image (a container image) or --source (a folder of source code) is needed"
       api_deploy "$p" "$app" "$image" "$port" "$envfile" "$dry" "$source" ;;
     *) die "api: check, list, status, destroy or deploy" ;;
   esac
@@ -4086,6 +4327,15 @@ cmd_api() {
 #   deploy: [turso, db, shell, "{name}", ...]      # optional: after create or on a repeat
 #   delete: [turso, db, destroy, "{name}", --yes]
 #   gone: "not found"              # optional: text in a failed delete that means it was gone already
+#   database:                      # optional: the provider's resources are databases (database contract)
+#     engine: libsql               # what deploy tells the app it is
+#     url: [turso, db, show, "{name}", --url]            # prints the address
+#     token: [turso, db, tokens, create, "{name}"]       # prints a token (optional)
+#     connection: "{url}?authToken={token}"              # the connection string (default: the address)
+#
+# With database:, deploy <app> also asks for the address and token, and keeps them in the
+# provider's record in the state store (outputs.databases, outputs.database_credentials), where
+# deploy reads them: an app says database = "<provider>-<app>".
 #
 # {name} is <name_prefix>-<app>; {prefix}, {app} and each setting can be used too. A command line
 # tool has no label to mark what freelunch made, so the provider's record in the state store does:
@@ -4117,7 +4367,7 @@ cli_load() {
 cli_words() {
   local p="$1" verb="$2" vars="${3:-$TMP/api/$1.vars}" out
   out="$(jq -r --arg v "$verb" --slurpfile x "$vars" '
-    (if $v == "list" then .list.command else .[$v] end) as $words
+    (if $v == "list" then .list.command else getpath($v | split(".")) end) as $words
     | ($x[0] + ($x[0].settings // {})) as $vars
     | $words[] | tostring
     | reduce ($vars | to_entries[] | select(.value | type | . == "string" or . == "number")) as $e (.; gsub("\\{" + $e.key + "\\}"; $e.value | tostring))' "$TMP/api/$p.json")"
@@ -4168,6 +4418,113 @@ cli_recorded() {
   [[ -n "$rec" ]] && jq -e --arg n "$2" 'any(.resources[]?; .name == $n)' <<< "$rec" >/dev/null
 }
 
+# record_outputs <provider> set|remove <database|service|bucket|all> <app> [entry json] [credentials json]:
+# what an engine without a state file made, in the provider's record, in the shape of the contracts
+# (databases and database_credentials, services and service_credentials, buckets and bucket_keys), which
+# deploy reads like a stack's outputs. The record is encrypted like state.
+record_outputs() {
+  local p="$1" op="$2" kind="$3" name="$4" entry="${5:-null}" cred="${6:-null}" cur rc=0 list creds
+  [[ -n "$(state_config)" ]] || return 0
+  cur="$(record_pull "$p")"
+  if [[ -z "$cur" ]]; then
+    cur='{"engine":"api","resources":[]}'
+    [[ ! -f "$PROVIDERS_DIR/$p/cli.yaml" ]] || cur='{"engine":"cli","resources":[]}'
+  fi
+  case "$kind" in
+    database) list=databases; creds=database_credentials ;;
+    service)  list=services;  creds=service_credentials ;;
+    bucket)   list=buckets;   creds=bucket_keys ;;
+    all)      list=""; creds="" ;;
+  esac
+  case "$op" in
+    set)    jq -c --arg n "$name" --argjson d "$entry" --argjson c "$cred" --arg k "$p-$name" --arg l "$list" --arg cr "$creds" \
+              '.outputs[$l] = (((.outputs[$l] // []) | map(select(.name != $n))) + [$d]) | .outputs[$cr] = ((.outputs[$cr] // {}) + {($k): $c})' <<< "$cur" > "$TMP/api/$p.record" ;;
+    remove) jq -c --arg n "$name" --arg k "$p-$name" \
+              'if .outputs then reduce [["databases","database_credentials"],["services","service_credentials"],["buckets","bucket_keys"]][] as $x (.; .outputs[$x[0]] = ((.outputs[$x[0]] // []) | map(select(.name != $n))) | .outputs[$x[1]] = ((.outputs[$x[1]] // {}) | del(.[$k]))) else . end' <<< "$cur" > "$TMP/api/$p.record" ;;
+  esac
+  record_push "$p" "$TMP/api/$p.record" || rc=$?
+  [[ $rc -ne 2 ]] || die "$p: the store's record of $p changed while this ran (another machine or CI): run it again"
+  return $rc
+}
+
+# record_has_output <provider> <app>: whether the record already has outputs for it
+record_has_output() {
+  local rec; rec="$(record_pull "$1")"
+  [[ -n "$rec" ]] && jq -e --arg n "$2" 'any(.outputs[]?; type == "array" and any(.[]?; type == "object" and .name == $n))' <<< "$rec" >/dev/null
+}
+
+# cli_capture <provider> <verb>: run the verb's command and print its output (not its errors),
+# trimmed; the errors are in $TMP/api/<provider>.cli.err
+cli_capture() {
+  local p="$1" words=() w
+  while IFS= read -r w; do words+=("$w"); done < <(cli_words "$p" "$2")
+  "${words[@]}" 2> "$TMP/api/$p.cli.err" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$' | tail -1
+}
+
+# cli_has_outputs <provider>: whether its resources are databases, services or buckets
+cli_has_outputs() { api_has "$1" .database.url || api_has "$1" .service.kind || api_has "$1" .bucket.endpoint; }
+
+# cli_template <provider> <caps json> <template>: the template with {name} of the captured values put in
+cli_template() {
+  jq -nr --argjson c "$2" --arg t "$3" 'reduce ($c | to_entries[]) as $e ($t; gsub("\\{" + $e.key + "\\}"; $e.value))'
+}
+
+# cli_captures <provider> <block> <app> <name>: run each command of the block's capture: and print
+# the values by name as JSON, with name, app and prefix; a command that prints nothing stops it
+cli_captures() {
+  local p="$1" block="$2" app="$3" name="$4" caps out key
+  caps="$(jq -nc --arg a "$app" --arg n "$name" --arg p "$(jq -r .prefix "$TMP/api/$p.vars")" '{app: $a, name: $n, prefix: $p}')"
+  for key in $(jq -r --arg b "$block" '.[$b].capture // {} | keys[]' "$TMP/api/$p.json"); do
+    out="$(cli_capture "$p" "$block.capture.$key")" || true
+    [[ -n "$out" ]] || die "cli: $p gave no $key for $name: $(head -c 300 "$TMP/api/$p.cli.err")"
+    caps="$(jq -c --arg k "$key" --arg v "$out" '. + {($k): $v}' <<< "$caps")"
+  done
+  echo "$caps"
+}
+
+# cli_outputs <provider> <app> <name>: for a provider whose resources are databases, services or
+# buckets, ask the tool for what an app needs and keep it in the record as that contract. Nothing
+# is printed or logged of the secrets. What is already in the record is kept (a token is made once).
+cli_outputs() {
+  local p="$1" app="$2" name="$3" kind="" caps entry cred url token conn host port eng
+  cli_has_outputs "$p" || return 0
+  if api_has "$p" .database.url; then kind=database
+  elif api_has "$p" .service.kind; then kind=service
+  else kind=bucket; fi
+  [[ -n "$(state_config)" ]] || die "cli: $p makes ${kind}s, and $([[ $kind == database ]] && echo "the connection string" || echo "what an app needs of one (its variables or keys)") is kept in the provider's record in the state store, which this project doesn't have yet (freelunch state init)"
+  if record_has_output "$p" "$app"; then return 0; fi
+  case "$kind" in
+    database)
+      url="$(cli_capture "$p" database.url)" || true
+      [[ -n "$url" ]] || die "cli: $p gave no address for $name: $(head -c 300 "$TMP/api/$p.cli.err")"
+      token=""
+      if api_has "$p" .database.token; then
+        token="$(cli_capture "$p" database.token)" || true
+        [[ -n "$token" ]] || die "cli: $p gave no token for $name: $(head -c 300 "$TMP/api/$p.cli.err")"
+      fi
+      conn="$(api_cfg "$p" .database.connection)"; [[ -n "$conn" ]] || conn="{url}"
+      conn="${conn//\{url\}/$url}"; conn="${conn//\{token\}/$token}"
+      host="${url#*://}"; host="${host%%[/?:]*}"
+      port="$(api_cfg "$p" .database.port)"; [[ -n "$port" ]] || port=443
+      eng="$(api_cfg "$p" .database.engine)"
+      entry="$(jq -nc --arg p "$p" --arg n "$app" --arg e "${eng:-unknown}" --arg h "$host" --argjson port "$port" --arg d "$name" --arg b "$(api_cfg "$p" .database.behavior)" \
+        '{provider: $p, name: $n, engine: $e, host: $h, port: $port, database: $d, behavior: (if $b == "" then null else $b end)}')"
+      cred="$(jq -nc --arg u "$conn" --arg t "$token" '{url: $u} + (if $t == "" then {} else {password: $t} end)')" ;;
+    service)
+      caps="$(cli_captures "$p" service "$app" "$name")"
+      entry="$(jq -nc --arg p "$p" --arg n "$app" --arg k "$(api_cfg "$p" .service.kind)" --arg h "$(cli_template "$p" "$caps" "$(api_cfg "$p" .service.host)")" --arg port "$(api_cfg "$p" .service.port)" \
+        '{provider: $p, name: $n, kind: $k, host: (if $h == "" then null else $h end), port: (if $port == "" then null else ($port | tonumber) end)}')"
+      cred="$(jq -c --argjson c "$caps" '{env: ((.service.env // {}) | map_values(. as $t | reduce ($c | to_entries[]) as $e ($t; gsub("\\{" + $e.key + "\\}"; $e.value))))}' "$TMP/api/$p.json")" ;;
+    bucket)
+      caps="$(cli_captures "$p" bucket "$app" "$name")"
+      entry="$(jq -nc --arg p "$p" --arg n "$app" --arg b "$(cli_template "$p" "$caps" "$(api_cfg "$p" '.bucket.bucket // "{name}"')")" --arg e "$(api_cfg "$p" .bucket.endpoint)" --arg r "$(api_cfg "$p" .bucket.region)" \
+        '{provider: $p, name: $n, bucket: $b, endpoint: $e, region: (if $r == "" then "auto" else $r end)}')"
+      cred="$(jq -c --argjson c "$caps" '{access_key_id: (.bucket.access_key_id // "{access_key_id}"), secret_access_key: (.bucket.secret_access_key // "{secret_access_key}")} | map_values(. as $t | reduce ($c | to_entries[]) as $e ($t; gsub("\\{" + $e.key + "\\}"; $e.value)))' "$TMP/api/$p.json")" ;;
+  esac
+  record_outputs "$p" set "$kind" "$app" "$entry" "$cred"
+  log "$p: $name: what an app needs of it is in the record: an app says $([[ $kind == database ]] && echo database || echo needs) = \"$p-$app\""
+}
+
 # cli_deploy <provider> <app> <adopt 0|1> <dry run 0|1>: make <prefix>-<app> if it isn't there; run
 # the deploy command when there is one; leave alone what freelunch didn't make
 cli_deploy() {
@@ -4176,7 +4533,7 @@ cli_deploy() {
   name="$(jq -r .name "$TMP/api/$p.vars")"
   if [[ "$dry" == 1 ]]; then
     log "$p: $name: would run, nothing sent:"
-    for w in create deploy; do
+    for w in create deploy database.url database.token; do
       api_has "$p" ".$w" || continue
       echo "  $w: $(cli_words "$p" "$w" | paste -sd' ' -)"
     done
@@ -4206,6 +4563,7 @@ cli_deploy() {
     cli_run "$p" deploy || die "cli: the deploy of $name at $p failed: $(head -c 300 "$TMP/api/$p.cli.out")"
     log "$p: $name: deployed"
   fi
+  cli_outputs "$p" "$app" "$name"
 }
 
 # cli_destroy <provider> <all with the prefix 0|1>: delete what the provider's record names
@@ -4235,6 +4593,7 @@ cli_destroy() {
       log "$p: deleted $name"
     fi
     api_record "$p" remove "$name"
+    ! cli_has_outputs "$p" || record_outputs "$p" remove all "${name#"$(jq -r .prefix "$TMP/api/$p.vars")"-}"
     done_any=1
   done <<< "$names"
   [[ $done_any -eq 1 ]] || log "$p: nothing of freelunch's to delete"
@@ -4378,7 +4737,13 @@ platform_field() {
 # target, then the provider's hook makes it (the Northflank project)
 engine_apply() {
   local p="$1" plan="$2"; shift 2
-  apply_once "$p" "$plan" "$@"
+  if [[ "$(meta "$p" layer)" == "host" ]]; then
+    # A host stack can wait for capacity (OCI), and is guarded against a wait running in CI.
+    ci_wait_guard "$p" "$plan"
+    if [[ "${ENGINE_WAIT:-0}" -eq 1 ]]; then apply_until_capacity "$p" "$plan" "$@"; else apply_host "$p" "$plan" "$@"; fi
+  else
+    apply_once "$p" "$plan" "$@"
+  fi
   engine_call "$p" apply
 }
 
@@ -6842,6 +7207,536 @@ cmd_check() {
   if [[ $FAILS -eq 0 ]]; then echo "The config is complete."; else echo "$FAILS problem(s)."; return 1; fi
 }
 
+# --- the dns engine ------------------------------------------------------------------------------
+#
+# A DNS provider (engine: dns) keeps the records of a project's hostnames at a zone it hosts:
+# providers/<name>/dns.sh holds its hooks, the project's .freelunch/<name>/terraform.tfvars says
+# what to keep:
+#   zone    = "example.dedyn.io"
+#   records = { api = { host = "oci-main" }, www = { type = "CNAME", value = "api.example.dedyn.io" } }
+# A record with a host is an A record to the host's public IP. The hooks:
+#   dns_<p>_check                 does the token work (prints the reason when not)
+#   dns_<p>_list <zone>           the zone's rrsets, as JSON [{subname, type, ttl, records}]
+#   dns_<p>_write <zone> <file>   apply a JSON list of rrsets; records [] deletes one
+# OWNERSHIP: next to each record freelunch makes, it writes a TXT record at _freelunch-owner.<sub>
+# holding "freelunch-owner=<project>" (the way external-dns marks what it owns). A name that has
+# records and no such TXT of ours is never changed or deleted, and destroy removes only names
+# that have it. Some providers (DuckDNS) can't list a zone: they say dns_<p>_mode = update, and
+# freelunch only sets and clears the names the project lists.
+
+dns_fn() { echo "dns_${1//-/_}_$2"; }
+dns_load() { # dns_load <provider>: its hooks
+  [[ -f "$PROVIDERS_DIR/$1/dns.sh" ]] || die "dns: $1 has no dns.sh (providers/$1/)"
+  # shellcheck source=/dev/null
+  . "$PROVIDERS_DIR/$1/dns.sh"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  mkdir -p "$TMP/dns"
+}
+dns_has() { declare -F "$(dns_fn "$1" "$2")" >/dev/null; }
+
+# dns_owner: who the project is, in the ownership TXT
+dns_owner() {
+  local n; n="$(project_prefix "$PROJECT")"
+  [[ -n "$n" ]] || n="$(project_name "$(basename "$(dirname "$PROJECT")")")"
+  echo "$n"
+}
+dns_owner_sub() { echo "_freelunch-owner${1:+.$1}"; } # the subname of a name's ownership TXT
+dns_owner_rec() { printf '"freelunch-owner=%s"' "$(dns_owner)"; }
+
+# dns_host_ip <host>: a host's public IP, from its stack's state
+dns_host_ip() {
+  local p state
+  for p in $(all_providers); do
+    [[ "$(meta "$p" layer)" == "host" && -d "$(stack_dir "$p")" ]] && is_deployed "$p" || continue
+    state="$(config_dir "$p")/terraform.tfstate"
+    jq -r --arg h "$1" '.outputs.hosts.value[]? | select("\(.provider)-\(.name)" == $h) | .public_ip // empty' "$state" 2>/dev/null
+  done | head -1
+}
+
+# dns_desired <provider>: the rrsets the project's tfvars asks for
+dns_desired() {
+  local p="$1" file zone sub host type value ttl ip out='[]' rec
+  file="$(config_dir "$p")/terraform.tfvars"
+  [[ -f "$file" ]] || die "dns: missing $(rel "$file") (freelunch dns $p init writes an example)"
+  zone="$(tfvar "$file" zone)"
+  [[ -n "$zone" ]] || die "dns: $(rel "$file") needs zone = \"example.com\""
+  # fields split at \x1f, which unlike a tab keeps an empty host in its place
+  while IFS=$'\x1f' read -r sub host type value ttl; do
+    [[ -n "$sub" ]] || continue
+    [[ "$sub" =~ ^[a-z0-9_]([a-z0-9_.-]*[a-z0-9_])?$ ]] || die "dns: the record name '$sub' isn't a subdomain (lowercase letters, digits, - and .)"
+    [[ -n "$type" ]] || type=A
+    if [[ -n "$host" ]]; then
+      ip="$(dns_host_ip "$host")"
+      [[ -n "$ip" ]] || die "dns: $sub points at $host, which has no public IP here (apply its stack first, or give value = \"...\")"
+      value="$ip"
+    fi
+    [[ -n "$value" ]] || die "dns: $sub needs host = \"<provider>-<name>\" or value = \"...\""
+    [[ "$type" != CNAME || "$value" == *. ]] && rec="$value" || rec="$value."
+    out="$(jq -c --arg s "$sub" --arg t "$type" --argjson l "${ttl:-3600}" --arg r "$rec" '. + [{subname: $s, type: $t, ttl: $l, records: [$r]}]' <<< "$out")"
+  done < <(tfvars_map "$file" records host type value ttl | tr '\t' '\037')
+  echo "$out"
+}
+
+# dns_changes <provider> <zone> <desired> <list>: what to write, on stdout as JSON; refuses a
+# name someone else keeps
+dns_changes() {
+  local zone="$2" desired="$3" list="$4" d sub type owner_sub ours foreign here changes='[]' mine
+  mine="$(dns_owner_rec)"
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    sub="$(jq -r .subname <<< "$d")"; type="$(jq -r .type <<< "$d")"
+    owner_sub="$(dns_owner_sub "$sub")"
+    ours="$(jq -r --arg o "$owner_sub" --arg m "$mine" 'any(.[]; .subname == $o and .type == "TXT" and (.records | index($m)))' <<< "$list")"
+    foreign="$(jq -r --arg o "$owner_sub" --arg m "$mine" 'any(.[]; .subname == $o and .type == "TXT" and ((.records | index($m)) | not))' <<< "$list")"
+    here="$(jq -c --arg s "$sub" '[.[] | select(.subname == $s)]' <<< "$list")"
+    if [[ "$foreign" == true ]]; then
+      echo "freelunch: dns: $sub.$zone is kept by another project (its _freelunch-owner TXT names someone else); not touching it" >&2; return 1
+    fi
+    if [[ "$ours" != true && "$(jq 'length' <<< "$here")" -gt 0 ]]; then
+      echo "freelunch: dns: $sub.$zone already has records ($(jq -r '[.[].type] | join(", ")' <<< "$here")) and freelunch didn't make them. Not touching them: remove them at your DNS provider yourself, or pick another name" >&2; return 1
+    fi
+    # an address record of another type than the one wanted goes (a CNAME can't share a name)
+    changes="$(jq -c --argjson here "$here" --arg t "$type" '. + [$here[] | select(.type != $t and (.type | IN("A","AAAA","CNAME"))) | {subname, type, ttl, records: []}]' <<< "$changes")"
+    if ! jq -e --argjson d "$d" 'any(.[]; .subname == $d.subname and .type == $d.type and .ttl == $d.ttl and .records == $d.records)' <<< "$here" >/dev/null; then
+      changes="$(jq -c --argjson d "$d" '. + [$d]' <<< "$changes")"
+    fi
+    if [[ "$ours" != true ]]; then
+      changes="$(jq -c --arg o "$owner_sub" --arg m "$mine" --argjson l "$(jq -r .ttl <<< "$d")" '. + [{subname: $o, type: "TXT", ttl: $l, records: [$m]}]' <<< "$changes")"
+    fi
+  done < <(jq -c '.[]' <<< "$desired")
+  echo "$changes"
+}
+
+# dns_ours <list>: the names the project keeps in a zone (those with its ownership TXT)
+dns_ours() {
+  jq -r --arg m "$(dns_owner_rec)" '.[] | select(.type == "TXT" and (.subname | startswith("_freelunch-owner")) and (.records | index($m))) | .subname | sub("^_freelunch-owner\\.?"; "")' <<< "$1"
+}
+
+# dns_apply <provider> [dry]
+dns_apply() {
+  local p="$1" dry="${2:-0}" zone desired list changes
+  zone="$(tfvar "$(config_dir "$p")/terraform.tfvars" zone)"
+  desired="$(dns_desired "$p")"
+  if dns_has "$p" mode; then dns_apply_update "$p" "$zone" "$desired" "$dry"; return; fi
+  list="$("$(dns_fn "$p" list)" "$zone")" || die "dns: can't list $zone at $p"
+  changes="$(dns_changes "$p" "$zone" "$desired" "$list")" || return 1
+  if [[ "$(jq length <<< "$changes")" -eq 0 ]]; then log "dns: $zone at $p is as the project wants it"; return 0; fi
+  jq -r --arg z "$zone" '.[] | "dns: \(if .records == [] then "delete" else "set" end) \(.type) \(if .subname == "" then $z else .subname + "." + $z end)\(if .records == [] then "" else " -> " + (.records | join(" ")) end)"' <<< "$changes" >&2
+  [[ "$dry" == 1 ]] && return 0
+  printf '%s\n' "$changes" > "$TMP/dns/$p.changes.json"
+  "$(dns_fn "$p" write)" "$zone" "$TMP/dns/$p.changes.json" || die "dns: $p refused the change"
+  log "dns: $zone at $p updated"
+}
+
+# dns_destroy <provider> [dry]: remove what the project made, and nothing else
+dns_destroy() {
+  local p="$1" dry="${2:-0}" zone list changes='[]' sub
+  zone="$(tfvar "$(config_dir "$p")/terraform.tfvars" zone)"
+  if dns_has "$p" mode; then dns_destroy_update "$p" "$zone" "$(dns_desired "$p")" "$dry"; return; fi
+  list="$("$(dns_fn "$p" list)" "$zone")" || die "dns: can't list $zone at $p"
+  while IFS= read -r sub; do
+    changes="$(jq -c --arg s "$sub" --argjson l "$list" '. + [$l[] | select(.subname == $s and (.type | IN("A","AAAA","CNAME"))) | {subname, type, ttl, records: []}]' <<< "$changes")"
+    changes="$(jq -c --arg o "$(dns_owner_sub "$sub")" --argjson l "$list" '. + [$l[] | select(.subname == $o and .type == "TXT") | {subname, type, ttl, records: []}]' <<< "$changes")"
+  done < <(dns_ours "$list")
+  if [[ "$(jq length <<< "$changes")" -eq 0 ]]; then log "dns: nothing of the project's to delete at $zone"; return 0; fi
+  jq -r --arg z "$zone" '.[] | "dns: delete \(.type) \(if .subname == "" then $z else .subname + "." + $z end)"' <<< "$changes" >&2
+  [[ "$dry" == 1 ]] && return 0
+  printf '%s\n' "$changes" > "$TMP/dns/$p.changes.json"
+  "$(dns_fn "$p" write)" "$zone" "$TMP/dns/$p.changes.json" || die "dns: $p refused the change"
+  log "dns: deleted the project's records at $zone"
+}
+
+# update-only providers (no listing): set and clear the listed names
+dns_apply_update() { # <p> <zone> <desired> <dry>
+  local p="$1" zone="$2" d dry="$4"
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    log "dns: set $(jq -r '.subname' <<< "$d").$zone -> $(jq -r '.records[0]' <<< "$d")"
+    [[ "$dry" == 1 ]] || "$(dns_fn "$p" write)" "$zone" <(jq -c -n --argjson d "$d" '[$d]') || die "dns: $p refused $(jq -r .subname <<< "$d")"
+  done < <(jq -c '.[]' <<< "$3")
+}
+dns_destroy_update() { # <p> <zone> <desired> <dry>
+  local p="$1" zone="$2" d dry="$4"
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    log "dns: clear $(jq -r '.subname' <<< "$d").$zone"
+    [[ "$dry" == 1 ]] || "$(dns_fn "$p" write)" "$zone" <(jq -c -n --argjson d "$d" '[$d | .records = []]') || die "dns: $p refused $(jq -r .subname <<< "$d")"
+  done < <(jq -c '.[]' <<< "$3")
+}
+
+# dns_providers: the DNS providers this project has a folder with a tfvars for
+dns_providers() {
+  local p
+  [[ -n "$PROJECT" ]] || return 0
+  for p in $(all_providers); do
+    # the folder first: engine_of reads the provider's yaml, and this runs for every provider
+    [[ -f "$PROJECT/$p/terraform.tfvars" && "$(engine_of "$p")" == dns ]] && echo "$p"
+  done
+  return 0
+}
+
+# dns_all apply|destroy: the action for each DNS provider the project has a config for
+dns_all() {
+  local p
+  for p in $(dns_providers); do
+    dns_load "$p"
+    if [[ "$1" == apply ]]; then dns_apply "$p"; else dns_destroy "$p"; fi
+  done
+}
+
+# cmd_dns <provider> init | check | status | apply | destroy [--dry-run]
+cmd_dns() {
+  local p="${1:-}" sub="${2:-}" dry=0 a zone desired list
+  [[ -n "$p" && -n "$sub" ]] || die "dns: freelunch dns <provider> init | check | status | apply | destroy [--dry-run]"
+  [[ "$(engine_of "$p")" == dns ]] || die "dns: $p isn't a DNS provider (engine: dns)"
+  shift 2
+  for a in "$@"; do [[ "$a" == --dry-run ]] && dry=1 || die "dns: unknown option $a"; done
+  [[ -n "$PROJECT" ]] || die "dns: run it in a project, where its .freelunch/ folder is"
+  dns_load "$p"
+  case "$sub" in
+    init)
+      mkdir -p "$PROJECT/$p"
+      write_new "$PROJECT/$p/terraform.tfvars" < "$PROVIDERS_DIR/$p/terraform.tfvars.example" ;;
+    check)   "$(dns_fn "$p" check)" || die "dns: $p doesn't take the token" ; log "dns: the token works" ;;
+    apply)   dns_apply "$p" "$dry" ;;
+    destroy) dns_destroy "$p" "$dry" ;;
+    status)
+      zone="$(tfvar "$(config_dir "$p")/terraform.tfvars" zone)"
+      desired="$(dns_desired "$p")"
+      echo "Records at $p ($zone)"
+      if dns_has "$p" mode; then
+        jq -r '.[] | "  \(.subname)  \(.records[0])  (this provider can only be set, not read)"' <<< "$desired"
+        return 0
+      fi
+      list="$("$(dns_fn "$p" list)" "$zone")" || die "dns: can't list $zone at $p"
+      jq -r --arg m "$(dns_owner_rec)" --argjson l "$list" '
+        .[] | . as $d
+        | ($l | any(.[]; .subname == ("_freelunch-owner." + $d.subname) and .type == "TXT" and (.records | index($m)))) as $ours
+        | ($l | map(select(.subname == $d.subname and .type == $d.type))[0]) as $now
+        | "  \($d.subname)  \($d.type) \($d.records[0])  " + (if $now == null then (if ($l | any(.[]; .subname == $d.subname)) then "taken by records freelunch did not make" else "not made yet (freelunch dns '"$p"' apply)" end)
+            elif $ours | not then "exists, not ours"
+            elif $now.records == $d.records then "ok" else "differs: \($now.records[0])" end)' <<< "$desired" ;;
+    *) die "dns: unknown command $sub (init, check, status, apply, destroy)" ;;
+  esac
+}
+
+# probe_dns: a node per record the project keeps: exists when its ownership TXT and record are
+# there, healthy when they hold what the tfvars say
+probe_dns() {
+  local p zone desired list d sub type row
+  for p in $(dns_providers); do
+    dns_load "$p"
+    dns_has "$p" mode && continue
+    zone="$(tfvar "$(config_dir "$p")/terraform.tfvars" zone)"
+    desired="$(dns_desired "$p" 2>/dev/null)" || { probe_row "dns-$p" dns null null null "its records can't be worked out from the tfvars"; continue; }
+    if ! list="$("$(dns_fn "$p" list)" "$zone" 2>/dev/null)"; then probe_row "dns-$p" dns null null null "not asked: can't list $zone (is the token set?)"; continue; fi
+    while IFS= read -r d; do
+      [[ -n "$d" ]] || continue
+      sub="$(jq -r .subname <<< "$d")"
+      row="dns-$p-$sub"
+      if ! jq -e --arg s "$sub" --arg t "$(jq -r .type <<< "$d")" 'any(.[]; .subname == $s and .type == $t)' <<< "$list" >/dev/null; then
+        probe_row "$row" dns false null false "$sub.$zone isn't there (freelunch dns $p apply)"
+      elif [[ -n "$(dns_changes "$p" "$zone" "[$d]" "$list" 2>/dev/null | jq -r 'if length == 0 then empty else "x" end' 2>/dev/null)" ]]; then
+        probe_row "$row" dns true true false "$sub.$zone isn't as the project wants it (freelunch dns $p apply)"
+      else probe_row "$row" dns true true true ""; fi
+    done < <(jq -c '.[]' <<< "$desired")
+  done
+}
+
+# --- node probes ----------------------------------------------------------------------------
+#
+# freelunch check <node> / --json: every node of the project (host, platform, app, database,
+# bucket, tunnel) answers the same three questions: does it exist, can it be reached, is it
+# healthy. Each answer is true, false or null (not asked, and the reason says why). It reads the
+# same state as status and doctor, and changes nothing.
+
+# probe_row <node> <type> <exists> <reachable> <healthy> <reason>: one JSON line per node
+probe_row() {
+  jq -nc --arg n "$1" --arg t "$2" --argjson e "$3" --argjson r "$4" --argjson h "$5" --arg why "$6" \
+    '{node: $n, type: $t, exists: $e, reachable: $r, healthy: $h, reason: (if $why == "" then null else $why end)}'
+}
+
+# tcp_open <host> <port>: whether something answers there within a few seconds
+tcp_open() { nc -z -w 5 "$1" "$2" >/dev/null 2>&1; }
+
+# probe_tcp <node> <type> <host> <port>: a node that is a service at an address
+probe_tcp() {
+  if ! command -v nc >/dev/null; then probe_row "$1" "$2" true null null "nc isn't installed, so $3:$4 wasn't asked"
+  elif tcp_open "$3" "$4"; then probe_row "$1" "$2" true true true ""
+  else probe_row "$1" "$2" true false false "nothing answers at $3:$4"; fi
+}
+
+# probe_stack_nodes: databases and buckets of every deployed stack, from its state
+probe_stack_nodes() {
+  local p state row host port
+  for p in $(all_providers); do
+    [[ -d "$(stack_dir "$p")" ]] && is_deployed "$p" || continue
+    state="$(config_dir "$p")/terraform.tfstate"
+    while IFS=$'\t' read -r row host port; do
+      [[ -n "$row" ]] && probe_tcp "$row" database "$host" "$port"
+    done < <(jq -r '.outputs.databases.value[]? | ["\(.provider)-\(.name)", .host, .port] | @tsv' "$state" 2>/dev/null)
+    while IFS=$'\t' read -r row host; do
+      [[ -n "$row" ]] && probe_tcp "$row" bucket "$host" 443
+    done < <(jq -r '.outputs.buckets.value[]? | ["\(.provider)-\(.name)", (.endpoint | sub("^https?://"; "") | sub("[:/].*$"; ""))] | @tsv' "$state" 2>/dev/null)
+    # a service (secrets, observability, messaging) that gave an address is asked there; one that
+    # gave none is only known to exist
+    while IFS=$'\x1f' read -r row host port; do
+      [[ -n "$row" ]] || continue
+      if [[ -n "$host" && -n "$port" ]]; then probe_tcp "$row" service "$host" "$port"
+      else probe_row "$row" service true null null "it gave no address to ask"; fi
+    done < <(jq -r '.outputs.services.value[]? | ["\(.provider)-\(.name)", (.host // ""), (.port // "" | tostring)] | join("\u001f")' "$state" 2>/dev/null)
+  done
+}
+
+# probe_record_nodes: databases, services and buckets that engines without a state file (api, cli)
+# made, from the outputs of their records in the state store
+probe_record_nodes() {
+  local p rec row host port type
+  [[ -n "$(state_config)" && $STATE_ON -eq 1 ]] || return 0
+  for p in $(cd "$PROVIDERS_DIR" && ls -d -- */ 2>/dev/null | sed 's|/$||' | grep -v '^_'); do
+    [[ -d "$PROJECT/$p" ]] || continue
+    [[ -f "$PROVIDERS_DIR/$p/api.yaml" || -f "$PROVIDERS_DIR/$p/cli.yaml" ]] || continue
+    rec="$(record_pull "$p")"
+    [[ -n "$rec" ]] && jq -e '.outputs' <<< "$rec" >/dev/null 2>&1 || continue
+    while IFS=$'\x1f' read -r type row host port; do
+      [[ -n "$row" ]] || continue
+      if [[ -n "$host" && -n "$port" ]]; then probe_tcp "$row" "$type" "$host" "$port"
+      else probe_row "$row" "$type" true null null "it gave no address to ask"; fi
+    done < <(jq -r '(.outputs.databases[]? | ["database", "\(.provider)-\(.name)", (.host // ""), (.port // "" | tostring)]),
+                    (.outputs.services[]?  | ["service",  "\(.provider)-\(.name)", (.host // ""), (.port // "" | tostring)]),
+                    (.outputs.buckets[]?   | ["bucket",   "\(.provider)-\(.name)", (.endpoint | sub("^https?://"; "") | sub("[:/].*$"; "")), "443"])
+                    | join("\u001f")' <<< "$rec")
+  done
+}
+
+# probe_hosts_and_apps: hosts (over SSH), the apps on them, and the platforms, from the deploy plan
+# shellcheck disable=SC2016 # the remote script is expanded by the remote shell
+probe_hosts_and_apps() {
+  local apps_file tunnel_state="" host kind address user out app service state health seen reach why ok bad
+  apps_file="$(state_root)/apps.tfvars"
+  [[ -n "$TF" ]] || return 0
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  [[ -f "$apps_file" || -n "$tunnel_state" ]] || return 0
+  { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1 || die "check: apps.tfvars doesn't resolve against the inventory (freelunch deploy --dry-run says why)"
+  ssh_options yes
+  for host in $(jq -r 'keys[]' "$TMP/targets.json"); do
+    kind="$(jq -r --arg h "$host" '.[$h].kind' "$TMP/targets.json")"
+    if [[ "$kind" == "platform" ]]; then
+      probe_row "$host" platform true null null "its API is asked by freelunch status"
+      for app in $(jq -r --arg h "$host" '.[$h].apps | keys[]' "$TMP/targets.json"); do
+        probe_row "$app" app null null null "runs on $host: freelunch status asks the platform"
+      done
+      continue
+    fi
+    address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
+    user="$(jq -r --arg h "$host" '.[$h].user' "$TMP/targets.json")"
+    reach=null; why=""; out=""
+    if [[ -z "$address" ]]; then why="it has no address"
+    elif ! ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1; then why="its host key isn't pinned yet (freelunch trust $host)"
+    elif ! out="$(printf '%s\n' "$REMOTE_STATUS" | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' 2>/dev/null)"; then
+      reach=false; why="can't reach $user@$address over SSH"
+    else reach=true; fi
+    if [[ "$reach" == true ]]; then probe_row "$host" host true true true ""
+    elif [[ "$reach" == false ]]; then probe_row "$host" host true false false "$why"
+    else probe_row "$host" host true null null "$why"; fi
+    seen=" "
+    if [[ "$reach" == true ]]; then
+      for app in $(jq -r --arg h "$host" '.[$h].apps | keys[]' "$TMP/targets.json"); do
+        ok=0; bad=0
+        while IFS='|' read -r a service state health; do
+          [[ "$a" == "$app" ]] || continue
+          if [[ "$state" == running && ( -z "$health" || "$health" == healthy ) ]]; then ok=$((ok + 1)); else bad=$((bad + 1)); fi
+        done <<< "$out"
+        if [[ $((ok + bad)) -eq 0 ]]; then probe_row "$app" app false true false "not deployed on $host yet (freelunch deploy)"
+        elif [[ $bad -gt 0 ]]; then probe_row "$app" app true true false "$bad of its containers on $host aren't running and healthy"
+        else probe_row "$app" app true true true ""; fi
+      done
+    else
+      for app in $(jq -r --arg h "$host" '.[$h].apps | keys[]' "$TMP/targets.json"); do
+        probe_row "$app" app null "$reach" null "not asked: $host $why"
+      done
+    fi
+  done
+}
+
+# probe_tunnels: Cloudflare Tunnels, by the API
+probe_tunnels() {
+  local state account zone host id out token="${CLOUDFLARE_API_TOKEN:-}" tfvars st
+  state="$(config_dir cloudflare)/terraform.tfstate"
+  [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare || return 0
+  tfvars="$(config_dir cloudflare)/terraform.tfvars"
+  account="$(tfvar "$tfvars" account_id 2>/dev/null || true)"
+  zone="$(tfvar "$tfvars" zone 2>/dev/null || true)"
+  if [[ -n "$token" && -z "$account" && -n "$zone" ]]; then account="$(cf_get "/zones?name=$zone" | jq -r '.result[0].account.id // empty' 2>/dev/null)"; fi
+  while IFS=$'\t' read -r host id; do
+    if [[ -z "$token" || -z "$account" ]]; then probe_row "tunnel-$host" tunnel true null null "not checked without CLOUDFLARE_API_TOKEN"; continue; fi
+    out="$(cf_get "/accounts/$account/cfd_tunnel/$id")"
+    st="$(jq -r '.result.status // empty' <<< "$out" 2>/dev/null)"
+    case "$st" in
+      healthy)  probe_row "tunnel-$host" tunnel true true true "" ;;
+      degraded) probe_row "tunnel-$host" tunnel true true false "degraded: some of its connections are down" ;;
+      inactive) probe_row "tunnel-$host" tunnel true false false "never connected: freelunch deploy starts cloudflared" ;;
+      down)     probe_row "tunnel-$host" tunnel true false false "cloudflared isn't connected" ;;
+      *)        probe_row "tunnel-$host" tunnel null null null "unknown: $(cf_errors "$out")" ;;
+    esac
+  done < <(jq -r '(.outputs.tunnels.value // {}) | to_entries[] | [.key, .value] | @tsv' "$state")
+}
+
+# cmd_probe [node] [--json]: the rows above, as a table or as a JSON list. Exits 1 when a node
+# that should be there isn't, or isn't healthy; null answers don't fail it.
+cmd_probe() {
+  local node="" json=0 a rows
+  for a in "$@"; do
+    case "$a" in
+      --json) json=1 ;;
+      -*)     die "check: unknown option $a" ;;
+      *)      node="$a" ;;
+    esac
+  done
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  [[ -n "$PROJECT" ]] || die "check: run it in a project, where its .freelunch/ folder is"
+  rows="$( { probe_hosts_and_apps; probe_stack_nodes; probe_record_nodes; probe_tunnels; probe_dns; } | jq -sc '.')"
+  if [[ -n "$node" ]]; then
+    jq -e --arg n "$node" 'any(.[]; .node == $n)' <<< "$rows" >/dev/null \
+      || die "check: no node named $node. Nodes: $(jq -r '[.[].node] | join(", ")' <<< "$rows")"
+    rows="$(jq -c --arg n "$node" 'map(select(.node == $n))' <<< "$rows")"
+  fi
+  if [[ $json -eq 1 ]]; then jq . <<< "$rows"
+  else
+    jq -r '.[] | [(if .healthy == true then "ok" elif .healthy == false or .exists == false then "FAIL" else "-" end), .type, .node, (.reason // "")] | @tsv' <<< "$rows" \
+      | awk -F'\t' '{ printf "  %-5s %-9s %-24s %s\n", $1, $2, $3, $4 }'
+  fi
+  ! jq -e 'any(.[]; .healthy == false or .exists == false)' <<< "$rows" >/dev/null
+}
+
+# --- journeys ---------------------------------------------------------------------------------
+#
+# A journey is a path through the graph: a user, a hostname, the app it reaches, what that app
+# needs, what those need. It is derived from the Cloudflare routes and the apps' needs, and
+# probed hop by hop with the same answers as freelunch check. It stops at the first hop that
+# fails and says which edge and why.
+
+# journey_route_app <hostname>: the app a route reaches
+journey_route_app() {
+  local host port app
+  host="$(jq -r --arg h "$1" '.[$h].host' <<< "$JOURNEY_ROUTES")"
+  app="$(jq -r --arg h "$1" '.[$h].app // empty' <<< "$JOURNEY_ROUTES")"
+  if [[ -z "$app" ]]; then
+    port="$(jq -r --arg h "$1" '.[$h].service // "" | capture(":(?<p>[0-9]+)$").p // empty' <<< "$JOURNEY_ROUTES")"
+    app="$(jq -r --arg h "$host" --arg p "$port" '[to_entries[] | select(.value.host == $h and ($p == "" or (.value.port | tostring) == $p)) | .key] | if length == 1 then .[0] else empty end' "$TMP/graph.json")"
+    [[ -n "$app" ]] || app="$(jq -r --arg h "$host" '[to_entries[] | select(.value.host == $h) | .key] | if length == 1 then .[0] else empty end' "$TMP/graph.json")"
+  fi
+  echo "$app"
+}
+
+# journey_hops <app> <from label>: hops below an app, depth first, one JSON line each
+JOURNEY_SEEN=" "
+journey_hops() {
+  local app="$1" from="$2" n medium
+  [[ "$JOURNEY_SEEN" != *" $from>$app "* ]] || return 0
+  JOURNEY_SEEN="$JOURNEY_SEEN$from>$app "
+  jq -nc --arg f "$from" --arg t "$app" --arg m "$3" '{from: $f, to: $t, medium: $m}'
+  for n in $(jq -r --arg a "$app" '.[$a].needs[]' "$TMP/graph.json"); do
+    if jq -e --arg n "$n" 'has($n)' "$TMP/graph.json" >/dev/null; then
+      medium="$(jq -r --arg f "$app" --arg t "$n" '[.[] | select(.from == $f and .to == $t)] | .[0].medium // "network"' "$TMP/edges.json")"
+      journey_hops "$n" "$app" "$medium"
+    else
+      jq -nc --arg f "$app" --arg t "$n" '{from: $f, to: $t, medium: "direct"}'
+    fi
+  done
+}
+
+# journey_names: the journeys of this project: each route's hostname, and each app that
+# nothing reaches through a route or a need (it has no user hop)
+journey_names() {
+  local h app reached=" " a n
+  for h in $(jq -r 'keys[]' <<< "$JOURNEY_ROUTES"); do
+    echo "$h"
+    app="$(journey_route_app "$h")"
+    [[ -z "$app" ]] || reached="$reached$app "
+  done
+  for a in $(jq -r 'keys[]' "$TMP/graph.json"); do
+    for n in $(jq -r --arg a "$a" '.[$a].needs[]' "$TMP/graph.json"); do reached="$reached$n "; done
+  done
+  for a in $(jq -r 'keys[]' "$TMP/graph.json"); do
+    [[ "$reached" == *" $a "* ]] || echo "$a"
+  done
+}
+
+# journey_run <name> <rows>: probe one journey; prints a JSON object {journey, ok, hops: [...]}
+journey_run() {
+  local name="$1" rows="$2" app="" hops="[]" hop ok=1 answer reason from to medium tunnel host row
+  local lines=()
+  if jq -e --arg h "$name" 'has($h)' <<< "$JOURNEY_ROUTES" >/dev/null; then
+    app="$(journey_route_app "$name")"
+    host="$(jq -r --arg h "$name" '.[$h].host' <<< "$JOURNEY_ROUTES")"
+    [[ -n "$app" ]] || { echo "freelunch: journey: the route $name goes to $host, where more than one app runs and none is named (app = \"...\" in the route, or a port in apps.tfvars)" >&2; return 1; }
+    if verify_url "https://$name" "" "${FREELUNCH_VERIFY_TIMEOUT:-10}" 2>/dev/null; then answer="answers"; else answer="does not answer"; fi
+    hop="$(jq -nc --arg f "user" --arg t "$name" --arg m "https" --arg a "$answer" '{from: $f, to: $t, medium: $m, ok: ($a == "answers"), reason: (if $a == "answers" then null else "nothing answers at https://" + $t end)}')"
+    hops="$(jq -c --argjson h "$hop" '. + [$h]' <<< "$hops")"
+    # the tunnel from the hostname to the host
+    tunnel="tunnel-$host"
+    row="$(jq -c --arg n "$tunnel" 'map(select(.node == $n))[0] // empty' <<< "$rows")"
+    if [[ -n "$row" ]]; then
+      hops="$(jq -c --arg f "$name" --arg n "$tunnel" --argjson r "$row" '. + [{from: $f, to: $n, medium: "cloudflare", ok: (if $r.healthy == false then false elif $r.healthy == true then true else null end), reason: $r.reason}]' <<< "$hops")"
+      from="$tunnel"
+    else
+      from="$name"
+    fi
+  else
+    app="$name"; from="(no route)"
+  fi
+  # the app itself, and what it needs
+  while IFS= read -r hop; do
+    [[ -n "$hop" ]] || continue
+    to="$(jq -r .to <<< "$hop")"; medium="$(jq -r .medium <<< "$hop")"
+    row="$(jq -c --arg n "$to" 'map(select(.node == $n))[0] // empty' <<< "$rows")"
+    if [[ -z "$row" ]]; then
+      hops="$(jq -c --argjson h "$hop" '. + [$h + {ok: null, reason: "not probed: no node of that name"}]' <<< "$hops")"
+    else
+      hops="$(jq -c --argjson h "$hop" --argjson r "$row" '. + [$h + {ok: (if $r.healthy == false or $r.exists == false then false elif $r.healthy == true then true else null end), reason: $r.reason}]' <<< "$hops")"
+    fi
+  done < <(JOURNEY_SEEN=" "; journey_hops "$app" "$from" "$([[ "$from" == "(no route)" ]] && echo "-" || echo "route")")
+  # stop at the first hop that fails
+  hops="$(jq -c 'reduce .[] as $h ({hops: [], stopped: false}; if .stopped then . else .hops += [$h] | .stopped = ($h.ok == false) end) | .hops' <<< "$hops")"
+  jq -e 'any(.[]; .ok == false)' <<< "$hops" >/dev/null && ok=0
+  jq -nc --arg j "$name" --argjson ok "$ok" --argjson h "$hops" '{journey: $j, ok: ($ok == 1), hops: $h}'
+}
+
+# cmd_journey [name] [--json]
+cmd_journey() {
+  local name="" json=0 a rows names results='[]' n out failed=0
+  for a in "$@"; do
+    case "$a" in
+      --json) json=1 ;;
+      -*)     die "journey: unknown option $a" ;;
+      *)      name="$a" ;;
+    esac
+  done
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  [[ -n "$PROJECT" ]] || die "journey: run it in a project, where its .freelunch/ folder is"
+  rows="$( { probe_hosts_and_apps; probe_stack_nodes; probe_record_nodes; probe_tunnels; probe_dns; } | jq -sc '.')"
+  [[ -f "$TMP/graph.json" ]] || die "journey: there are no apps to follow (apps.tfvars)"
+  JOURNEY_ROUTES='{}'
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then JOURNEY_ROUTES="$(jq -c '.outputs.routes.value // {}' "$(config_dir cloudflare)/terraform.tfstate")"; fi
+  names="$(journey_names)"
+  if [[ -n "$name" ]]; then
+    grep -qx -- "$name" <<< "$names" || die "journey: no journey named $name. Journeys: $(tr '\n' ' ' <<< "$names")"
+    names="$name"
+  fi
+  [[ -n "$names" ]] || die "journey: nothing to follow: no routes and no apps"
+  while IFS= read -r n; do
+    out="$(journey_run "$n" "$rows")" || return 1
+    results="$(jq -c --argjson o "$out" '. + [$o]' <<< "$results")"
+    [[ "$(jq -r .ok <<< "$out")" == true ]] || failed=1
+  done <<< "$names"
+  if [[ $json -eq 1 ]]; then jq . <<< "$results"
+  else
+    jq -r '.[] | "\(.journey)", (.hops[] | "  \(if .ok == true then "ok   " elif .ok == false then "FAIL " else "-    " end) \(.from) -> \(.to) (\(.medium))\(if .reason then ": " + .reason else "" end)")' <<< "$results"
+  fi
+  return $failed
+}
+
 cmd_doctor() {
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   SCRATCH_HYBRID=1
@@ -7593,25 +8488,17 @@ ci_secret_names() {
     emit FREELUNCH_STATE_PASSPHRASE "the passphrase that encrypts the state (the line in .freelunch/.env)"
   fi
   for s in $(project_stacks); do
-    case "$s" in
-      cloudflare)   emit CLOUDFLARE_API_TOKEN "Cloudflare API token" ;;
-      neon)         emit NEON_API_KEY "Neon API key" ;;
-      supabase)     emit SUPABASE_ACCESS_TOKEN "Supabase access token" ;;
-      upstash)           emit UPSTASH_EMAIL "Upstash account email"; emit UPSTASH_API_KEY "Upstash API key" ;;
-      mongodb-atlas)     emit MONGODB_ATLAS_PUBLIC_KEY "MongoDB Atlas public API key"; emit MONGODB_ATLAS_PRIVATE_KEY "MongoDB Atlas private API key" ;;
-      cockroachdb)       emit COCKROACH_API_KEY "CockroachDB Cloud API key" ;;
-      tidb-cloud)        emit TIDBCLOUD_PUBLIC_KEY "TiDB Cloud public API key"; emit TIDBCLOUD_PRIVATE_KEY "TiDB Cloud private API key" ;;
-      aiven)             emit AIVEN_TOKEN "Aiven API token" ;;
-      redis-cloud)       emit REDISCLOUD_ACCESS_KEY "Redis Cloud access key"; emit REDISCLOUD_SECRET_KEY "Redis Cloud secret key" ;;
-      couchbase-capella) emit CAPELLA_AUTHENTICATION_TOKEN "Couchbase Capella API token" ;;
-      datastax-astra)    emit ASTRA_API_TOKEN "DataStax Astra token" ;;
-      yugabyte)          emit YBM_API_KEY "YugabyteDB Aeon API key" ;;
-      neo4j-aura)        emit AURA_CLIENT_ID "Neo4j Aura client ID"; emit AURA_CLIENT_SECRET "Neo4j Aura client secret" ;;
-      motherduck)        emit MOTHERDUCK_TOKEN "MotherDuck token"; emit MOTHERDUCK_ADMIN_TOKEN "MotherDuck admin token" ;;
-      backblaze-b2) emit B2_APPLICATION_KEY_ID "Backblaze key ID"; emit B2_APPLICATION_KEY "Backblaze application key" ;;
-    esac
+    # tokens a provider's stack needs: secrets: "NAME=what; NAME=what" in its provider.yaml
+    while IFS= read -r entry; do
+      [[ -z "$entry" ]] || emit "${entry%%=*}" "${entry#*=}"
+    done < <(meta "$s" secrets | tr ';' '\n' | sed -e 's/^ *//' -e 's/ *$//')
     while IFS=$'\t' read -r var what; do [[ -z "$var" ]] || emit "$var" "$what"; done < <(engine_call "$s" secrets)
     [[ "$(meta "$s" layer)" != "host" ]] || emit FREELUNCH_SSH_PRIVATE_KEY "the private SSH key deploy signs in to the hosts with (without a passphrase)"
+  done
+  for s in $(dns_providers); do
+    while IFS= read -r entry; do
+      [[ -z "$entry" ]] || emit "${entry%%=*}" "${entry#*=}"
+    done < <(meta "$s" secrets | tr ';' '\n' | sed -e 's/^ *//' -e 's/ *$//')
   done
   for var in $(tfvars_map "$PROJECT/apps.tfvars" registries password_env | cut -f2); do
     emit "$var" "the read-only token for a private registry (apps.tfvars)"
@@ -7925,6 +8812,30 @@ EOF
   fi
 }
 
+# ci_providers: the CI providers freelunch can write a pipeline for
+ci_providers() {
+  local p
+  for p in $(all_providers); do
+    [[ -f "$PROVIDERS_DIR/$p/pipeline.tpl" && "$(engine_of "$p")" == ci ]] && echo "$p"
+  done
+  return 0
+}
+
+# ci_provider_pipeline <project root> <provider>: the pipeline of a CI provider (engine: ci) from its
+# pipeline.tpl, in the file its provider.yaml names. It runs the runner image, restores the bundle
+# and runs FREELUNCH_RUN, the way the GitLab one does; secrets stay in the CI's own settings.
+ci_provider_pipeline() {
+  local base="$1" p="$2" file tag
+  file="$(meta "$p" ci_file)"
+  [[ -n "$file" ]] || die "ci init: $p's provider.yaml has no ci_file"
+  tag="$(pinned_version)"
+  [[ -n "$tag" ]] || tag="$(release_version)"
+  [[ "$tag" == v* ]] || tag=""
+  tag="${tag#v}"
+  mkdir -p "$base/$(dirname "$file")"
+  sed "s|@IMAGE@|ghcr.io/freelunch-sh/freelunch:${tag:-1}|" "$PROVIDERS_DIR/$p/pipeline.tpl" | write_new "$base/$file"
+}
+
 # gitlab_pipeline <project root>: a pipeline that runs freelunch in the runner image
 gitlab_pipeline() {
   local base="$1" file tag state_vars=""
@@ -8031,14 +8942,38 @@ ci_offer_first_run() {
   log "started freelunch doctor in $repo; watch it with: gh run watch --repo $repo, or on the Actions tab"
 }
 
+# ci_offer_journey <yes|no|ask>: run freelunch journey in Actions, after a deploy has put the
+# apps there, so the paths through the graph are seen working. Asks first; nothing runs unasked.
+ci_offer_journey() {
+  local how="$1" base repo a
+  [[ "$how" != no ]] || return 0
+  if [[ "$how" == ask ]]; then
+    interactive || return 0
+    a="$(ask "Run freelunch journey in GitHub Actions after the first deploy, to check each path end to end? (yes/no)" no)"
+    [[ "$a" =~ ^(y|yes)$ ]] || return 0
+  fi
+  base="$(dirname "$PROJECT")"
+  command -v gh >/dev/null || { log "ci init: the journey takes gh (https://cli.github.com); or Actions > freelunch > Run workflow > journey"; return 0; }
+  repo="$(cd "$base" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" || { log "ci init: gh can't tell which repository this is, so no journey"; return 0; }
+  if ! (cd "$base" && gh workflow list --repo "$repo" --json name -q '.[].name' 2>/dev/null) | grep -qx freelunch; then
+    log "ci init: GitHub doesn't have the freelunch workflow yet: commit and push it and let it deploy, then freelunch ci init --journey (or Actions > freelunch > Run workflow > journey)"
+    return 0
+  fi
+  (cd "$base" && gh workflow run "$CI_WORKFLOW" --repo "$repo" -f run=journey) >/dev/null \
+    || { log "ci init: gh couldn't start the workflow (see above)"; return 0; }
+  log "started freelunch journey in $repo; watch it with: gh run watch --repo $repo, or on the Actions tab"
+}
+
 ci_init() {
-  local where="github" base a given=0 pipeline=0 secrets=ask jobs="provision,ci,cd" state_kind="" first_run=ask
+  local where="github" base a given=0 pipeline=0 secrets=ask jobs="provision,ci,cd" state_kind="" first_run=ask journey=ask
   for a in "$@"; do
     case "$a" in
       --state=*)       state_kind="${a#--state=}"
                        [[ "$state_kind" =~ ^(git|oci|r2|b2|gitlab)$ ]] || die "ci init: --state takes git, oci, r2, b2 or gitlab" ;;
       --first-run)     first_run=yes ;;
       --no-first-run)  first_run=no ;;
+      --journey)       journey=yes ;;
+      --no-journey)    journey=no ;;
       --jobs=*)        jobs="${a#--jobs=}"
                        [[ "$jobs" =~ ^(provision|ci|cd)(,(provision|ci|cd))*$ ]] || die "ci init: --jobs takes provision, ci and cd, separated by commas" ;;
       --set-secrets)   secrets="set" ;;
@@ -8056,7 +8991,8 @@ ci_init() {
   case "$where" in
     github) if [[ $pipeline -eq 1 ]]; then [[ $CI_BUNDLE_MODE -eq 0 ]] || die "ci init: --pipeline hands secrets over one by one, not as a bundle"; pipeline_workflow "$base"; else [[ ",$jobs," != *,cd,* ]] || github_workflows "$base"; job_workflows "$base" "$jobs"; fi ;;
     gitlab) CI_BUNDLE_MODE=1; gitlab_pipeline "$base" ;;
-    *)      die "ci init: github or gitlab (other CI systems: docs/ci.md#other-ci-systems)" ;;
+    *)      if [[ -f "$PROVIDERS_DIR/$where/pipeline.tpl" && "$(engine_of "$where")" == ci ]]; then CI_BUNDLE_MODE=1; ci_provider_pipeline "$base" "$where"
+            else die "ci init: github, gitlab or a CI provider with a pipeline ($(ci_providers | tr '\n' ' ')); other CI systems: docs/ci.md#other-ci-systems"; fi ;;
   esac
   printf '\nNext steps:\n' >&2
   local i=1
@@ -8066,9 +9002,13 @@ ci_init() {
     ci_hand_over_secrets "$secrets"
     echo "  $((i + 1)). commit and push .freelunch/ and the workflows" >&2
     ci_offer_first_run "$first_run"
+    ci_offer_journey "$journey"
   elif [[ "$where" == "github" ]]; then
     echo "  $i. freelunch ci secrets: what CI needs and git doesn't have, in the secret FREELUNCH_BUNDLE" >&2
     echo "  $((i + 1)). commit and push the workflows, then freelunch ci wait <stack> --plan <file> to wait for capacity there" >&2
+  elif [[ -n "$(meta "$where" ci_secret)" ]]; then
+    echo "  $i. freelunch ci secrets --print, into the CI's secret: $(meta "$where" ci_secret)" >&2
+    echo "  $((i + 1)). commit and push the pipeline, then run it: $(meta "$where" ci_run)" >&2
   else
     echo "  $i. freelunch ci secrets --print, into the CI/CD variable FREELUNCH_BUNDLE" >&2
     echo "  $((i + 1)). commit and push the pipeline" >&2
@@ -9067,7 +10007,8 @@ main() {
     status)               cmd_status ;;
     logs)                 cmd_logs "$@" ;;
     doctor)               cmd_doctor ;;
-    check)                cmd_check ;;
+    journey)              resolve_state_refs; sync_start status; cmd_journey "$@" ;;
+    check)                if [[ $# -gt 0 ]]; then resolve_state_refs; sync_start status; cmd_probe "$@"; else cmd_check; fi ;;
     verify)               cmd_verify "$@" ;;
     build)                cmd_build "$@" ;;
     harden)               cmd_harden "$@" ;;
@@ -9077,6 +10018,7 @@ main() {
     inventory)            cmd_inventory ;;
     output)               cmd_output "$@" ;;
     catalog)              cmd_catalog ;;
+    dns)                  resolve_state_refs; cmd_dns "$@" ;;
     api)                  resolve_state_refs; cmd_api "$@" ;;
     cli)                  resolve_state_refs; cmd_cli "$@" ;;
     guided)               resolve_state_refs; cmd_guided "$@" ;;

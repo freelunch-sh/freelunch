@@ -15,6 +15,11 @@ variable "apps" {
     env_file = optional(string)
     bucket   = optional(string)
     database = optional(string)
+    # Other nodes this app depends on: apps, buckets and databases (docs/graph.md). bucket and
+    # database above mean the same as one entry here.
+    needs = optional(list(string), [])
+    # The port a dependant reaches this app on.
+    port = optional(number)
     # Compute plan of the app on a container platform; without it the stack's plan.
     plan = optional(string)
   }))
@@ -50,6 +55,15 @@ variable "hosts" {
   type = map(object({
     address = optional(string)
     user    = optional(string)
+  }))
+  default = {}
+}
+
+variable "mesh" {
+  description = "Mesh addresses from the stacks that output `mesh`: per host, an address and whether deploy should SSH to it."
+  type = map(object({
+    address = string
+    ssh     = optional(bool, false)
   }))
   default = {}
 }
@@ -104,6 +118,51 @@ variable "extra_databases" {
 variable "extra_database_credentials" {
   description = "Credentials of those databases, keyed <provider>-<name>, each with a url."
   type        = map(object({ url = string, password = optional(string) }))
+  default     = {}
+  sensitive   = true
+}
+
+variable "service_state_paths" {
+  description = "State files of the stacks that make services (outputs services and service_credentials): secrets, observability, messaging."
+  type        = list(string)
+  default     = []
+}
+
+variable "extra_services" {
+  description = "Services from engine records, in the shape of the services output."
+  type = list(object({
+    provider = string
+    name     = string
+    kind     = optional(string)
+    host     = optional(string)
+    port     = optional(number)
+    behavior = optional(string)
+  }))
+  default = []
+}
+
+variable "extra_service_credentials" {
+  description = "What an app gets of those services, keyed <provider>-<name>, each with an env map."
+  type        = map(object({ env = map(string) }))
+  default     = {}
+  sensitive   = true
+}
+
+variable "extra_buckets" {
+  description = "Buckets from engine records, in the shape of the buckets output."
+  type = list(object({
+    provider = string
+    name     = string
+    bucket   = string
+    endpoint = string
+    region   = optional(string, "auto")
+  }))
+  default = []
+}
+
+variable "extra_bucket_keys" {
+  description = "Keys of those buckets, keyed <provider>-<name>."
+  type        = map(object({ access_key_id = string, secret_access_key = string }))
   default     = {}
   sensitive   = true
 }

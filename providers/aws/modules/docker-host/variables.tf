@@ -69,6 +69,13 @@ variable "tailscale_auth_key" {
   sensitive   = true
 }
 
+variable "netbird_setup_key" {
+  description = "Optional NetBird setup key; hosts join your NetBird network on first boot."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
 variable "acknowledge_billable_resources" {
   description = "Allow instance types, volume types or CPU credit modes outside the Free plan."
   type        = bool

@@ -24,6 +24,8 @@ module "bootstrap" {
   swap_size_gb           = each.value.swap_size_gb
   tailscale_auth_key     = var.tailscale_auth_key
   tailscale_hostname     = "${var.name_prefix}-azure-${each.key}"
+  netbird_setup_key      = var.netbird_setup_key
+  netbird_hostname       = "${var.name_prefix}-azure-${each.key}"
   max_encoded_size_bytes = 65536 # Azure custom data limit (64 KB)
 }
 

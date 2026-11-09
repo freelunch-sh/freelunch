@@ -709,3 +709,141 @@ run "apps_need_a_database_a_stack_made" {
 
   expect_failures = [output.targets]
 }
+
+run "needs_name_other_nodes_and_feed_the_environment" {
+  command = plan
+
+  variables {
+    database_state_paths = ["tests/fixtures/database.tfstate"]
+    storage_state_paths  = ["tests/fixtures/storage.tfstate"]
+    apps = {
+      web = { host = "oci-main", compose = "compose.yaml", needs = ["api", "neon-main", "backblaze-b2-results"] }
+      api = { host = "oci-main", compose = "compose.yaml", port = 8080, database = "neon-main" }
+    }
+  }
+
+  assert {
+    condition     = output.graph.web.host == "oci-main" && output.graph.web.port == null && join(",", output.graph.web.needs) == "api,neon-main,backblaze-b2-results" && output.graph.api.port == 8080 && join(",", output.graph.api.needs) == "neon-main"
+    error_message = "The graph lists each app's host, port and effective needs; bucket and database count as needs."
+  }
+
+  assert {
+    condition     = nonsensitive(output.app_env.web.NEON_MAIN_URL) == "postgres://owner:mock-db-pass@ep-mock.eu-central-1.aws.neon.tech/neondb?sslmode=require" && nonsensitive(output.app_env.web.BACKBLAZE_B2_RESULTS_BUCKET) == "freelunch-results" && !contains(keys(output.app_env.web), "DATABASE_URL")
+    error_message = "A need gives the dependant the node's settings under the node's own name, and the old names stay for the old fields."
+  }
+
+  assert {
+    condition     = nonsensitive(output.app_env.api) == { DATABASE_URL = "postgres://owner:mock-db-pass@ep-mock.eu-central-1.aws.neon.tech/neondb?sslmode=require" }
+    error_message = "The database field still gives DATABASE_URL and nothing else."
+  }
+}
+
+run "a_need_on_nothing_is_refused" {
+  command = plan
+
+  variables {
+    apps = { web = { host = "oci-main", compose = "compose.yaml", needs = ["nonesuch"] } }
+  }
+
+  expect_failures = [output.graph]
+}
+
+run "a_mesh_address_is_used_for_ssh_when_asked" {
+  command = plan
+
+  variables {
+    mesh = { "oci-main" = { address = "100.64.0.7", ssh = true } }
+  }
+
+  assert {
+    condition     = output.targets["oci-main"].address == "100.64.0.7"
+    error_message = "A host on a mesh with ssh on is reached at its mesh address."
+  }
+}
+
+run "a_mesh_address_is_not_used_for_ssh_by_default" {
+  command = plan
+
+  variables {
+    mesh = { "oci-main" = { address = "100.64.0.7" } }
+  }
+
+  assert {
+    condition     = output.targets["oci-main"].address == "203.0.113.10"
+    error_message = "Without ssh = true, the public address stays."
+  }
+}
+
+run "an_address_in_apps_tfvars_beats_the_mesh" {
+  command = plan
+
+  variables {
+    mesh  = { "oci-main" = { address = "100.64.0.7", ssh = true } }
+    hosts = { "oci-main" = { address = "freelunch-oci-main" } }
+  }
+
+  assert {
+    condition     = output.targets["oci-main"].address == "freelunch-oci-main"
+    error_message = "A hand-written address wins."
+  }
+}
+
+run "a_need_on_a_service_gives_the_variables_it_names" {
+  command = plan
+
+  variables {
+    service_state_paths = ["tests/fixtures/service.tfstate"]
+    apps = {
+      api = { host = "oci-main", compose = "compose.yaml", needs = ["axiom-logs"] }
+      web = { host = "oci-main", compose = "compose.yaml" }
+    }
+  }
+
+  assert {
+    condition     = nonsensitive(output.app_env.api) == { AXIOM_TOKEN = "xaat-mock-service-token", AXIOM_DATASET = "shop-logs" } && !contains(keys(output.app_env), "web")
+    error_message = "A service gives the app the variables it names, as they are, and an app that doesn't need it gets nothing."
+  }
+
+  assert {
+    condition     = join(",", output.graph.api.needs) == "axiom-logs"
+    error_message = "A service is a node an app can need."
+  }
+}
+
+run "a_need_on_a_service_nobody_made_is_refused" {
+  command = plan
+
+  variables {
+    apps = { api = { host = "oci-main", compose = "compose.yaml", needs = ["axiom-logs"] } }
+  }
+
+  expect_failures = [output.graph]
+}
+
+run "services_and_buckets_can_come_from_engine_records" {
+  command = plan
+
+  variables {
+    extra_services = [{ provider = "uptimerobot", name = "heartbeat", kind = "observability", host = "heartbeat.uptimerobot.com", port = 443 }]
+    extra_service_credentials = {
+      "uptimerobot-heartbeat" = { env = { HEARTBEAT_URL = "https://heartbeat.uptimerobot.com/m-mock-key" } }
+    }
+    extra_buckets = [{ provider = "filebase", name = "assets", bucket = "freelunch-assets", endpoint = "https://s3.filebase.com", region = "us-east-1" }]
+    extra_bucket_keys = {
+      "filebase-assets" = { access_key_id = "FBKEY", secret_access_key = "mock-secret" }
+    }
+    apps = {
+      api = { host = "oci-main", compose = "compose.yaml", needs = ["uptimerobot-heartbeat"], bucket = "filebase-assets" }
+    }
+  }
+
+  assert {
+    condition     = nonsensitive(output.app_env.api.HEARTBEAT_URL) == "https://heartbeat.uptimerobot.com/m-mock-key"
+    error_message = "A service from a record gives the app the variables it names."
+  }
+
+  assert {
+    condition     = nonsensitive(output.app_env.api.S3_BUCKET) == "freelunch-assets" && nonsensitive(output.app_env.api.AWS_ACCESS_KEY_ID) == "FBKEY" && nonsensitive(output.app_env.api.AWS_ENDPOINT_URL_S3) == "https://s3.filebase.com"
+    error_message = "A bucket from a record gives the app its S3 settings."
+  }
+}

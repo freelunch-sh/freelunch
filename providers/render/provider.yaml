@@ -4,6 +4,7 @@ display_name: "Render"
 category: containers
 status: ready
 layer: platform
+arch: amd64
 terraform_provider: "render-oss/render"
 iac: partner
 free_tier_type: always-free

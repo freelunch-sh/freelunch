@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export CLOUDAMQP_APIKEY (or put it in .freelunch/.env); CloudAMQP console >
+# Team API keys.
+
+# The free plan (Little Lemur) allows one instance: 1M messages a month, 20 connections, 100 queues.
+brokers = {
+  main = {}
+  # main = { region = "google-compute-engine::europe-west1" }
+}

@@ -23,6 +23,16 @@ output "targets" {
   }
 }
 
+output "graph" {
+  description = "The dependency graph: per app, its host, port and effective needs (needs, bucket and database together)."
+  value       = { for name, a in local.apps : name => { host = a.host, port = a.port, needs = local.needs[name] } }
+
+  precondition {
+    condition     = length(local.unknown_needs) == 0
+    error_message = "Apps need nodes that don't exist: ${join(", ", local.unknown_needs)}. Known nodes: ${join(", ", sort(local.need_nodes))}. A need is an app in apps.tfvars, or a bucket or database a stack has made."
+  }
+}
+
 output "platforms" {
   description = "Deploy plan per container platform target: the provider's ID for it (the Northflank project), region, plan and volume size, what it costs a month and what the free plan covers, and a service per app from its Compose file."
   value = {

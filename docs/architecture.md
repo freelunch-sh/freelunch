@@ -170,6 +170,40 @@ An engine that has no state file (`api`, `cli`) gives the same contract through 
 stack outputs, and `deploy` reads it from the state store. The record is encrypted like state, so
 the credentials are no more exposed there than a stack's are.
 
+## Service contract
+
+A stack that makes a **service** an app uses through a token, a URL or a key (secrets managers,
+observability, messaging: `doppler`, `axiom`, `healthchecks-io`, `cloudamqp`...) outputs `services`,
+a list of objects with these attributes:
+
+| Attribute | Type | Example |
+|---|---|---|
+| `provider` | string | `axiom` |
+| `name` | string | `logs` (unique within the provider) |
+| `kind` | string | `secrets`, `observability` or `messaging` |
+| `host` | string | where it answers, for `freelunch check`; may be null |
+| `port` | number | `443`; may be null |
+| `behavior` | string | what the free tier does when idle or full: `capped`, `pauses`, `always-on`... Optional |
+
+and `service_credentials`, a sensitive map from `<provider>-<name>` to `{ env }`, where `env` is a
+map of the **environment variables** an app needs to use it, named the way that service's own tools
+read them (`AXIOM_TOKEN`, `AMQP_URL`, `DOPPLER_TOKEN`). An app names it in `needs` in `apps.tfvars`
+(`needs = ["axiom-logs"]`) and `deploy` puts exactly those variables in its environment, on every
+host and platform; they are kept out of the dry run and the logs. Unlike a database or bucket, whose
+variables get the node's name as a prefix, a service's are not prefixed, because its tools read fixed
+names: two services that use the same names (two Axiom datasets) can't both be needed by one app, and
+the stack names them apart (`AXIOM_DATASET_LOGS`) when it makes more than one.
+
+Rules for a service stack:
+
+- Credentials are **scoped to what the app needs** (an ingest-only token, a read-only service token),
+  never the account key the stack itself signs in with.
+- `host` and `port` let `freelunch check` and the deploy's health gate ask whether it answers; a
+  service with none is only known to exist.
+- It makes only what the free tier covers, and refuses more (a validation), as the other stacks do.
+
+An engine without a state file (`api`, `cli`) gives services through its [record](#engine-records): `outputs.services` and `outputs.service_credentials`, in the same shape.
+
 ## Projects
 
 The CLI runs in one of two modes:

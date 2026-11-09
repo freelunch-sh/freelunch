@@ -5,6 +5,7 @@ display_name: "Microsoft Azure"
 category: hyperscalers
 status: ready
 layer: host
+arch: amd64
 terraform_provider: "hashicorp/azurerm"
 iac: official
 free_tier_type: trial

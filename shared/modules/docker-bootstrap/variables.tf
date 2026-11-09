@@ -87,6 +87,19 @@ variable "tailscale_hostname" {
   default     = null
 }
 
+variable "netbird_setup_key" {
+  description = "Optional NetBird setup key. When set, the host joins your NetBird network on first boot."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
+variable "netbird_hostname" {
+  description = "Hostname the node registers with in NetBird."
+  type        = string
+  default     = null
+}
+
 variable "max_encoded_size_bytes" {
   description = "Provider limit for base64-encoded user data. null skips the check."
   type        = number

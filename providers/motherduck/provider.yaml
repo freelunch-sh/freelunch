@@ -10,6 +10,7 @@ free_tier_type: always-free
 free_tier: "Lite plan: 10 GB storage, 10 Pulse compute-hours/month, 3 users and 2 service accounts, 1 day snapshot retention; serverless DuckDB for analytics"
 card_required: "no"
 url: "https://motherduck.com/pricing/"
+secrets: "MOTHERDUCK_TOKEN=MotherDuck token; MOTHERDUCK_ADMIN_TOKEN=MotherDuck admin token"
 last_verified: "2026-11-08"
 notes: "Queries stop when a free limit is exceeded: over the storage cap blocks queries on MotherDuck storage, over the compute cap blocks queries until the month resets. The Terraform provider cannot create an account or pick a plan; it manages databases, service accounts and tokens inside one."
 sources:

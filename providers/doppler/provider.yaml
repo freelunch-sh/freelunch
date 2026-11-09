@@ -2,7 +2,7 @@
 name: doppler
 display_name: "Doppler"
 category: secrets
-status: planned
+status: ready
 layer: service
 terraform_provider: "DopplerHQ/doppler"
 iac: community
@@ -10,8 +10,9 @@ free_tier_type: always-free
 free_tier: "Free for 5 users"
 card_required: "no"
 url: "https://www.doppler.com/pricing"
+secrets: "DOPPLER_TOKEN=Doppler token that may create projects"
 last_verified: "2026-10-18"
-notes: "Planned source for app secrets, so they stay out of cloud-init user data."
+notes: "Makes projects with a read-only service token per config; an app that needs one gets DOPPLER_TOKEN (docs/architecture.md#service-contract). Not yet run against a real account."
 sources:
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"

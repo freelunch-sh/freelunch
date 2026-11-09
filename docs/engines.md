@@ -34,6 +34,9 @@ Every engine implements these verbs: `check`, `apply`, `outputs`, `deploy`, `sta
 | `api` | an HTTP or GraphQL API with create, list, delete | Deno Deploy, Phase 6 |
 | `cli` | the vendor CLI is the supported path | Turso, wrangler |
 | `guided` | no usable API: checks the token, prints the manual steps | Back4App, Leapcell |
+| `ci` | a CI system: `ci init` writes its pipeline from a template ([how](ci.md#other-ci-systems)) | CircleCI, Bitbucket, Buildkite, Azure DevOps, Codeberg |
+| `registry` | a container registry the image workflow pushes to ([how](ci.md#registries)) | Docker Hub |
+| `dns` | keeps DNS records in a zone, marking each as the project's own with a TXT record ([how](graph.md#dns-records)) | deSEC, Duck DNS |
 
 `engine:` in `provider.yaml` defaults from `iac` (official, partner, community means `tofu`; stale,
 none means `api`, `cli` or `guided`) and can be overridden per resource kind.
@@ -59,6 +62,52 @@ to mark what freelunch made, so the provider's **record** in the state store doe
 exists and is not in the record is never changed or deleted (`--adopt` says it is yours), and
 with no state store nothing that exists is touched (`destroy --all-with-prefix` is the explicit
 way). `doctor` checks the tool is installed, its variable is set and `check` succeeds.
+
+A provider whose resources are **databases** adds a `database:` block (`engine`, `url`, `token`,
+`connection`): after `deploy <name>` makes the database, freelunch runs `url` and `token` and keeps the
+result in the provider's record as `outputs.databases` and `outputs.database_credentials`, which is the
+[database contract](architecture.md#database-contract). An app then says `database = "<provider>-<name>"`
+and `deploy` reads it like a stack's output, `freelunch check` asks its address, and `destroy` takes it
+out of the record. The token is made once with the database and never printed. This needs the state store,
+which is where the record, and so the connection string, lives. [Turso](../providers/turso/README.md) is
+the first.
+
+A provider whose resources are **services** or **buckets** says so the same way, with a `service:` or
+`bucket:` block: `capture:` names commands whose output is kept under that name, and the other values
+are templates over them (`{key}`, `{name}`, `{app}`, `{prefix}`):
+
+```yaml
+service:                       # the service contract
+  kind: observability
+  host: "{name}.example.com"   # where `freelunch check` asks (optional)
+  port: 443
+  capture: { key: [tool, key, "{name}"] }
+  env: { MONITOR_URL: "https://hb.example.com/{key}" }   # the variables an app gets
+bucket:                        # the storage contract
+  endpoint: "https://s3.example.com"
+  region: us-east-1
+  bucket: "{name}"
+  capture: { ak: [tool, key, "{name}"], sk: [tool, secret, "{name}"] }
+  access_key_id: "{ak}"
+  secret_access_key: "{sk}"
+```
+
+An `api.yaml` does it with an `outputs:` block of jq programs over the answer to the create call
+(`$item`, `$app`, `$name`, `$prefix`): `kind` (`database`, `service` or `bucket`), `entry` (the contract's
+entry) and `credentials`:
+
+```yaml
+outputs:
+  kind: service
+  entry: '{ kind: "observability", host: ($name + ".example.com"), port: 443 }'
+  credentials: '{ env: { PUSH_URL: ("https://push.example.com/" + $item.key) } }'
+```
+
+Either way the result is in the provider's record (`outputs.services` and `service_credentials`, or
+`buckets` and `bucket_keys`), `deploy` reads it for `needs = ["<provider>-<app>"]` or `bucket =
+"<provider>-<app>"`, `freelunch check` asks it, and `destroy` takes it out. The record is encrypted
+like state, so the secrets are no more exposed there than in a stack's state; without a state store
+nothing is made, because there would be nowhere to keep them.
 
 ### The `guided` engine
 

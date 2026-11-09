@@ -2,7 +2,7 @@
 name: better-stack
 display_name: "Better Stack"
 category: observability
-status: planned
+status: ready
 layer: service
 terraform_provider: "BetterStackHQ/better-uptime"
 iac: partner
@@ -10,8 +10,9 @@ free_tier_type: always-free
 free_tier: "10 monitors with 3-min checks, status page; logs via the BetterStackHQ/logtail provider"
 card_required: "no"
 url: "https://betterstack.com/pricing"
+secrets: "BETTERUPTIME_API_TOKEN=Better Stack Uptime API token (team-scoped)"
 last_verified: "2026-10-18"
-notes: null
+notes: "Makes heartbeats; an app that needs one gets BETTERSTACK_HEARTBEAT_URL (docs/architecture.md#service-contract). Logs use a different provider (logtail) and are not made here. Not yet run against a real account."
 sources:
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"

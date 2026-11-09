@@ -2,7 +2,7 @@
 name: tailscale
 display_name: "Tailscale"
 category: networking
-status: planned
+status: ready
 layer: glue
 terraform_provider: "tailscale/tailscale"
 iac: community
@@ -10,8 +10,9 @@ free_tier_type: always-free
 free_tier: "Personal plan: 3 users, 100 devices"
 card_required: "no"
 url: "https://tailscale.com/pricing"
+secrets: "TAILSCALE_API_KEY=Tailscale API access token"
 last_verified: "2026-10-18"
-notes: "Hosts can already join a tailnet on first boot (tailscale_auth_key in the shared bootstrap). This stack will manage ACLs and auth keys."
+notes: "Makes the key hosts join with on first boot (tailscale_auth_key in the host stacks) and reports each host's tailnet address as the mesh contract (docs/graph.md#the-mesh). Not yet run against a real tailnet."
 sources:
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"

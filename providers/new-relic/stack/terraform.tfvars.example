@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export NEW_RELIC_API_KEY (or put it in .freelunch/.env): a user API key (NRAK-...) of a
+# user with core or full platform access, which creating ingest keys needs.
+
+account_id = 1234567
+# region = "EU"            # US (default) or EU
+
+# One ingest (licence) key per entry. The free plan: 100 GB of ingest a month, 1 full platform user.
+# ingest_keys = ["main"]

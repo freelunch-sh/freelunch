@@ -12,6 +12,7 @@ module "docker_host" {
 
   instances          = var.instances
   tailscale_auth_key = var.tailscale_auth_key
+  netbird_setup_key  = var.netbird_setup_key
 
   acknowledge_billable_resources = var.acknowledge_billable_resources
 }

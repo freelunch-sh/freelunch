@@ -11,6 +11,7 @@ free_tier: "Redis: 1 free database with 250 MB data, 500K commands/month and 10 
 behavior: always-on
 card_required: "unknown"
 url: "https://upstash.com/pricing"
+secrets: "UPSTASH_EMAIL=Upstash account email; UPSTASH_API_KEY=Upstash API key"
 last_verified: "2026-11-08"
 notes: null
 sources:
