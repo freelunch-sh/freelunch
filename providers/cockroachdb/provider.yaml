@@ -6,15 +6,16 @@ status: ready
 layer: service
 terraform_provider: "cockroachdb/cockroach"
 iac: partner
-free_tier_type: always-free
-free_tier: "Basic clusters include $15 of usage a month (50M request units + 10 GiB storage) across the organisation; a payment method must be on file"
+free_tier_type: trial
+free_tier: "New organisations (created on or after 2026-09-15) get a 30-day, $400 trial and no free plan; Basic clusters in older organisations keep $15 of usage a month (50M request units + 10 GiB storage), card on file"
 behavior: scale-to-zero
-card_required: "yes"
+card_required: "unknown"
 url: "https://www.cockroachlabs.com/pricing/"
-last_verified: "2026-11-08"
-notes: null
+last_verified: "2026-11-09"
+notes: "Cockroach Continuum pricing (Standard and Mission Critical) applies to organisations created on or after 2026-09-15 and the pricing page lists no free plan; the docs page still describes the Basic allowance, so it is assumed to hold only for older organisations. This stack creates Basic clusters, which new organisations may not be able to create (unverified)."
 sources:
-  - "cockroachlabs.com/docs/cockroachcloud/free-trial (checked 2026-11-08)"
+  - "cockroachlabs.com/docs/cockroachcloud/free-trial (checked 2026-11-09)"
+  - "cockroachlabs.com/pricing (checked 2026-11-09)"
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
 inspire:

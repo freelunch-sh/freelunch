@@ -3706,7 +3706,7 @@ test_records_round_trip_through_the_store() {
   rm -rf "$p/.freelunch/records"
   equals "$(in_dir "$p" "$CLI" state record pull deno 2>/dev/null | jq -r '.resources | length')" 2
   # A provider with no record yet pulls nothing.
-  equals "$(in_dir "$p" "$CLI" state record pull zeabur 2>/dev/null)" ""
+  equals "$(in_dir "$p" "$CLI" state record pull nosuchprovider 2>/dev/null)" ""
 }
 
 test_records_older_copy_is_refused() {

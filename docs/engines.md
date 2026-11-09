@@ -31,7 +31,7 @@ Every engine implements these verbs: `check`, `apply`, `outputs`, `deploy`, `sta
 | Engine | Use when | Examples |
 |---|---|---|
 | `tofu` | a maintained Terraform provider exists | Neon, OCI, Cloudflare DNS |
-| `api` | an HTTP or GraphQL API with create, list, delete | Deno Deploy, Zeabur, Phase 6 |
+| `api` | an HTTP or GraphQL API with create, list, delete | Deno Deploy, Phase 6 |
 | `cli` | the vendor CLI is the supported path | Turso, wrangler |
 | `guided` | no usable API: checks the token, prints the manual steps | Back4App, Leapcell |
 
@@ -112,6 +112,6 @@ never needs to see a secret after it has been stored.
 4. Catalogue: `engine` and `jobs` fields, validation, README output.
 5. Workflow generation for all jobs per engine, and `ci init` guided token setup for each provider
    (including OIDC where possible). Make the Actions run the default path in the docs.
-6. Deno Deploy, then Zeabur.
+6. Deno Deploy.
 7. `cli` and `guided` engines.
 8. Database credentials into deploy.

@@ -5,19 +5,23 @@
 | **Status** | ✅ Implemented (not yet run against a real account) |
 | **Category** | Managed databases |
 | **Layer** | `service`: standalone managed service |
-| **Free tier** | ♾️ Free monthly allowance (within limits), needs a card on file |
-| **Card required** | **yes** (a payment method is required for the monthly allowance) |
+| **Free tier** | ⏳ 30-day $400 trial for new organisations; monthly allowance only for older ones |
+| **Card required** | unknown (not for the Standard trial; yes for the older monthly allowance) |
 | **Terraform provider** | [`cockroachdb/cockroach`](https://registry.terraform.io/providers/cockroachdb/cockroach) (official) |
-| **Last verified** | 2026-11-08 |
+| **Last verified** | 2026-11-09 |
 
 ## What's free
 
-CockroachDB Basic includes **$15 of usage a month**, equal to **50M request units and 10 GiB of
-storage**, across all clusters in the organisation. A payment method must be on file; you are
-charged only above the allowance. Contract customers are not eligible. New organisations also get
-a 30-day, $400 trial (no card for Standard). Number of clusters is **unverified**. See the
-[docs](https://docs.cockroachlabs.com/docs/cockroachcloud/free-trial); the pricing page itself
-no longer lists a free plan.
+**Organisations created on or after 2026-09-15 have no free plan.** They get Cockroach Continuum
+pricing (Standard and Mission Critical) and a **30-day, $400 trial** (no card for Standard); after
+that, clusters are paused and deleted after a 30-day grace period unless a payment method is added.
+The [pricing page](https://www.cockroachlabs.com/pricing/) no longer lists Basic.
+
+Older organisations are documented to keep CockroachDB Basic's **$15 of usage a month**, equal to
+**50M request units and 10 GiB of storage**, across all clusters, with a payment method on file.
+The [docs](https://docs.cockroachlabs.com/docs/cockroachcloud/free-trial) still describe this
+without a date, so treat it as unconfirmed. This stack creates Basic clusters, which a new
+organisation may not be able to create (unverified).
 
 The stack sets each cluster's `request_unit_limit` and `storage_mib_limit` to the allowance and
 checks that the totals across clusters stay within it; more needs `acknowledge_billable_resources

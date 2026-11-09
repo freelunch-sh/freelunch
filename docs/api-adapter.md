@@ -3,7 +3,7 @@
 Status: the driver is built (`freelunch api <provider> ...`); no provider uses it yet, Deno Deploy is
 the first (see [engines-plan.md](engines-plan.md)). Render is hand-written in `bin/freelunch` (`render_*`) and stays that way.
 The adapter is for new providers with an HTTP API and no maintained Terraform provider
-(Deno Deploy, Zeabur and the Phase 6 API-only providers).
+(Deno Deploy and the Phase 6 API-only providers).
 
 ## Idea
 
@@ -101,5 +101,4 @@ stops with the provider's status, and destroy deletes only ours.
 
 1. Driver and generic test with a throwaway fixture provider.
 2. Deno Deploy (REST apps; source upload as the first `custom` function).
-3. Zeabur (GraphQL).
-4. Phase 6 providers.
+3. Phase 6 providers.
