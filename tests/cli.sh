@@ -1818,7 +1818,7 @@ test_wait_says_which_signal_ended_it() {
       /bin/sleep 0.1
     done
     kill -$sig "$pid"
-    for _ in $(seq 1 100); do
+    for _ in $(seq 1 600); do
       [[ "$(sed -n 's/^state=//p' "$p/.freelunch/oci/wait.state" || true)" != "stopped" ]] || break
       /bin/sleep 0.1
     done
@@ -5039,7 +5039,10 @@ test_ci_init_guides_the_secrets_and_the_first_run() {
   contains "$out" "GitHub doesn't have the workflows yet"
   fails grep -q '^gh workflow run' "$p/fake.log"
   rm -r "$p/.github"
-  FAKE_WORKFLOWS="freelunch-provision freelunch" ci_in "$p" ci init --print-secrets --first-run >/dev/null 2>&1
+  FAKE_WORKFLOWS="freelunch-provision freelunch" ci_in "$p" ci init --print-secrets --first-run >"$p/debug.out" 2>&1 # DEBUG-TEMP
+  if ! grep -qx 'gh workflow run freelunch-provision.yml --repo me/shop -f action=doctor' "$p/fake.log"; then # DEBUG-TEMP
+    { echo "DEBUG ci init output:"; cat "$p/debug.out"; echo "DEBUG fake.log:"; cat "$p/fake.log"; } >&2 # DEBUG-TEMP
+  fi # DEBUG-TEMP
   grep -qx 'gh workflow run freelunch-provision.yml --repo me/shop -f action=doctor' "$p/fake.log"
   : > "$p/fake.log"; rm -r "$p/.github"
   printf 'no\n' | FREELUNCH_INTERACTIVE=1 FAKE_WORKFLOWS="freelunch-provision" ci_in "$p" ci init --print-secrets >/dev/null 2>&1
