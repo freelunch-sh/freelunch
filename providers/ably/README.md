@@ -9,6 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | [`ably/ably`](https://registry.terraform.io/providers/ably/ably/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-19 |
 
 ## What's free

@@ -9,6 +9,7 @@
 | **Free tier** | ⏳ Trial credit (time-limited) |
 | **Card required** | yes |
 | **Terraform provider** | [`linode/linode`](https://registry.terraform.io/providers/linode/linode/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

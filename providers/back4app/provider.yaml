@@ -6,12 +6,13 @@ status: planned
 layer: platform
 terraform_provider: null
 iac: none
+engine: guided
 free_tier_type: always-free
 free_tier: "1 container, 256 MB RAM, 100 GB transfer"
 card_required: "no"
 url: "https://www.back4app.com/pricing/container-as-a-service"
-last_verified: "2026-10-18"
-notes: null
+last_verified: "2026-11-08"
+notes: "No documented API for creating Containers apps was found (2026-11-08); the b4a CLI covers Parse apps interactively. Blocked until Back4App publishes one. Declared guided: freelunch prints the manual steps and checks what it can, until an API exists."
 sources:
   - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
   - "registry.terraform.io (checked 2026-10-18)"

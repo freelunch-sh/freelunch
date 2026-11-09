@@ -86,3 +86,33 @@ variable "r2_permission_group_id" {
   type        = string
   default     = null
 }
+
+variable "workers" {
+  description = <<-EOT
+    Workers to deploy, keyed by name, e.g.
+    { api = { script_file = "../apps/api/worker.js", hostname = "api.example.com" } }.
+    One ES module per Worker, named <name_prefix>-<name>. hostname puts it on a custom domain
+    in the zone. The free plan runs 100 Workers and 100,000 requests a day.
+  EOT
+  type = map(object({
+    script_file        = string
+    hostname           = optional(string)
+    compatibility_date = optional(string, "2025-09-01")
+  }))
+  default = {}
+}
+
+variable "pages" {
+  description = "Pages projects to create, keyed by name, e.g. { site = { hostname = \"www.example.com\" } }. Upload the files with `wrangler pages deploy` or a Git connection."
+  type = map(object({
+    production_branch = optional(string, "main")
+    hostname          = optional(string)
+  }))
+  default = {}
+}
+
+variable "acknowledge_billable_resources" {
+  description = "Allow more Workers or Pages projects than the free plan includes."
+  type        = bool
+  default     = false
+}

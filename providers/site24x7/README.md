@@ -9,6 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | [`site24x7/site24x7`](https://registry.terraform.io/providers/site24x7/site24x7/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-19 |
 
 ## What's free

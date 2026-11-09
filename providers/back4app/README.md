@@ -9,13 +9,18 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | None. Automate through the provider's API or CLI. |
-| **Last verified** | 2026-10-18 |
+| **Engine** | `guided` |
+| **Last verified** | 2026-11-08 |
 
 ## What's free
 
 1 container, 256 MB RAM, 100 GB transfer
 
 > Free tiers change without notice. Check <https://www.back4app.com/pricing/container-as-a-service> before relying on this.
+
+## Notes
+
+No documented API for creating Containers apps was found (2026-11-08); the b4a CLI covers Parse apps interactively. Blocked until Back4App publishes one. Declared guided: freelunch prints the manual steps and checks what it can, until an API exists.
 
 ## Plan
 

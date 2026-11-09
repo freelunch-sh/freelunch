@@ -9,6 +9,7 @@
 | **Free tier** | 🎓 Startup / research programs only |
 | **Card required** | yes |
 | **Terraform provider** | [`runpod/runpod`](https://registry.terraform.io/providers/runpod/runpod/latest) (community) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export ASTRA_API_TOKEN (or put it in .freelunch/.env). Make an application
+# token with the Organization Administrator role in the Astra console under
+# Settings > Application Tokens.
+
+# One serverless database per entry; the free plan has 5. A database idle for 48 hours is
+# hibernated (wake it from the console) and deleted after 30 days hibernated.
+databases = {
+  main = {}
+  # main = { cloud_provider = "aws", region = "us-east-2", keyspace = "app" }
+}
+
+# Optional: make an application token per database for apps to use (role ids from the
+# console or `astra_role`); it lands in database_credentials as the password.
+# token_role_ids = []

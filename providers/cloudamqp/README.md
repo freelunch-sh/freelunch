@@ -9,6 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | [`cloudamqp/cloudamqp`](https://registry.terraform.io/providers/cloudamqp/cloudamqp/latest) (community) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

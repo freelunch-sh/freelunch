@@ -2,16 +2,20 @@
 name: datastax-astra
 display_name: "DataStax Astra DB"
 category: databases
-status: planned
+status: ready
 layer: service
 terraform_provider: "datastax/astra"
 iac: partner
 free_tier_type: always-free
-free_tier: "Free serverless tier"
+free_tier: "Free plan: up to 5 serverless databases, fixed monthly credits (amount unpublished), hibernated after 48 hours idle and deleted after 30 days hibernated"
 card_required: "unknown"
 url: "https://www.datastax.com/pricing"
-last_verified: "2026-10-18"
-notes: "Limits not verified during research."
+last_verified: "2026-11-08"
+notes: "Monthly credit amount and free-plan regions not published in the docs reached (unverified). Card requirement unverified."
 sources:
   - "registry.terraform.io (checked 2026-10-18)"
+  - "docs.datastax.com/en/astra-db-serverless (database limits, statuses; via search 2026-11-08)"
 inspire: []
+limits:
+  max_databases: 5
+  clouds: ["aws", "gcp", "azure"]

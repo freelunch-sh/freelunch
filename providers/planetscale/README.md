@@ -9,6 +9,7 @@
 | **Free tier** | 💲 No free tier (paid) |
 | **Card required** | yes |
 | **Terraform provider** | [`planetscale/planetscale`](https://registry.terraform.io/providers/planetscale/planetscale/latest) (community) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

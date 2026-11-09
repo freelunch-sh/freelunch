@@ -9,6 +9,7 @@
 | **Free tier** | 🔁 Recurring monthly credit |
 | **Card required** | no |
 | **Terraform provider** | [`terraform-community-providers/railway`](https://registry.terraform.io/providers/terraform-community-providers/railway/latest) (community) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-24 |
 
 ## What's free

@@ -9,6 +9,7 @@
 | **Free tier** | 💲 No free tier (paid) |
 | **Card required** | unknown |
 | **Terraform provider** | None. Automate through the provider's API or CLI. |
+| **Engine** | `guided` |
 | **Last verified** | 2026-10-23 |
 
 ## What's free

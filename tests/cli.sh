@@ -16,6 +16,9 @@ for v in $(compgen -v FREELUNCH_STATE_); do unset "$v"; done
 REAL_TF="${FREELUNCH_TF:-$(command -v tofu || command -v terraform || true)}"
 REAL_TF="$(command -v "$REAL_TF" || true)"
 export REAL_TF
+# Not version | grep -q: grep quits at the first match, and a tofu that writes after that dies of
+# SIGPIPE, which pipefail turns into "not OpenTofu" (it did, on CI).
+is_opentofu() { local v; v="$(CHECKPOINT_DISABLE=1 "$REAL_TF" version 2>/dev/null)" || true; [[ "$v" == *OpenTofu* ]]; }
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 passed=0
@@ -266,6 +269,11 @@ case "$1 $2" in
     if [[ "$*" == *visibility* ]]; then echo "${FAKE_VISIBILITY:-PRIVATE}"; else echo "me/shop"; fi ;;
   "secret set")
     mkdir -p "$FAKE_GH" && cat > "$FAKE_GH/$3" ;;
+  "variable set")
+    mkdir -p "$FAKE_GH"
+    name="$3"; body=""; while [[ $# -gt 0 ]]; do [[ "$1" == "--body" ]] && body="$2"; shift; done
+    printf '%s' "$body" > "$FAKE_GH/var-$name" ;;
+  "workflow list") printf '%s\n' ${FAKE_WORKFLOWS:-} ;;
   "workflow enable"|"workflow disable"|"workflow run") ;;
   "run list") echo "${FAKE_RUNS:-[]}" ;;
   "api users/"*) echo 4242 ;;
@@ -282,7 +290,51 @@ cat > "$WORK/bin/slow-tf" <<'EOF'
 if [[ "$*" == "version" ]]; then v="$("$REAL_TF" version)"; echo "${v%%$'\n'*}"; sleep 0.3; echo "${v#*$'\n'}"; exit 0; fi
 exec "$REAL_TF" "$@"
 EOF
-chmod +x "$WORK/sleepy-bin/"* "$WORK/gh-bin/gh" "$WORK/bin/slow-tf"
+# An aws that logs what it is asked (account 123456789012). FAKE_AWS_OIDC=1: the GitHub OIDC
+# provider exists already; FAKE_AWS_ROLE=1: so does the role. The trust policy a role is made
+# with is kept in $FAKE_GH/aws-trust.json.
+cat > "$WORK/gh-bin/aws" <<'EOF'
+#!/usr/bin/env bash
+echo "aws $*" >> "$FAKE_LOG"
+case "$1 $2" in
+  "sts get-caller-identity") echo 123456789012 ;;
+  "iam list-open-id-connect-providers") [[ "${FAKE_AWS_OIDC:-}" != 1 ]] || echo "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com" ;;
+  "iam get-role") [[ "${FAKE_AWS_ROLE:-}" == 1 ]] || exit 254 ;;
+  "iam create-role"|"iam update-assume-role-policy")
+    for a in "$@"; do [[ "$a" == file://* ]] && { mkdir -p "$FAKE_GH"; cp "${a#file://}" "$FAKE_GH/aws-trust.json"; }; done ;;
+esac
+EOF
+# A gcloud that logs what it is asked (project number 123456789). Every describe fails, as if
+# nothing were there yet, unless FAKE_GCP_EXISTS=1.
+cat > "$WORK/gh-bin/gcloud" <<'EOF'
+#!/usr/bin/env bash
+echo "gcloud $*" >> "$FAKE_LOG"
+case "$*" in
+  "projects describe"*) echo 123456789 ;;
+  *" describe "*) [[ "${FAKE_GCP_EXISTS:-}" == 1 ]] || exit 1 ;;
+esac
+EOF
+# An az that logs what it is asked (tenant tenant-3333, subscription sub-4444, a new app is
+# app-1111 with object id obj-2222). FAKE_AZ_EXISTS=1: the app, its principal and its "main"
+# federated credential are there. A credential it is given is kept in $FAKE_GH/azure-cred-<name>.json.
+cat > "$WORK/gh-bin/az" <<'EOF'
+#!/usr/bin/env bash
+echo "az $*" >> "$FAKE_LOG"
+case "$*" in
+  "account show --query tenantId"*) echo tenant-3333 ;;
+  "account show --query id"*) echo sub-4444 ;;
+  "ad app list"*) [[ "${FAKE_AZ_EXISTS:-}" != 1 ]] || echo app-1111 ;;
+  "ad app create"*) echo app-1111 ;;
+  "ad app show"*) echo obj-2222 ;;
+  "ad sp show"*) [[ "${FAKE_AZ_EXISTS:-}" == 1 ]] || exit 1 ;;
+  "ad app federated-credential list"*) [[ "${FAKE_AZ_EXISTS:-}" != 1 ]] || echo main ;;
+  "ad app federated-credential create"*)
+    for a in "$@"; do
+      if [[ "$a" == @* ]]; then mkdir -p "$FAKE_GH"; cp "${a#@}" "$FAKE_GH/azure-cred-$(jq -r .name "${a#@}").json"; fi
+    done ;;
+esac
+EOF
+chmod +x "$WORK/sleepy-bin/"* "$WORK/gh-bin/gh" "$WORK/gh-bin/aws" "$WORK/gh-bin/gcloud" "$WORK/gh-bin/az" "$WORK/bin/slow-tf"
 mkdir -p "$WORK/nf-bin" && ln -s "$WORK/wait-bin/sleep" "$WORK/nf-bin/sleep"
 # Secret stores: 1Password's op knows op://Private/GHCR/token, the macOS keychain knows
 # freelunch-cloudflare. Both log what they are asked.
@@ -645,6 +697,50 @@ case "$url" in
       "DELETE /containers/"*) rm -f "$sw/containers/$id.json"; respond 200 '{}' ;;
       *) respond 404 '{"message":"no such route"}' ;;
     esac ;;
+  https://api.render.com/v1/*)
+    path="${url#https://api.render.com/v1}"
+    rd="${FAKE_RD:?}"
+    mkdir -p "$rd/services" "$rd/envs" "$rd/creds"
+    echo "rd $method $path token=$auth" >> "$FAKE_LOG"
+    if [[ "$auth" != "${FAKE_RD_TOKEN:-rd-key}" ]]; then respond 401 '{"message":"unauthorized"}'; exit 0; fi
+    id="${path#/services/}"; id="${id%%/*}"; id="${id%%\?*}"
+    case "$method $path" in
+      "GET /owners"*) respond 200 '[{"owner":{"id":"usr-abc123def456","name":"me","email":"me@example.com","type":"user"},"cursor":"c1"}]' ;;
+      "GET /services?"*)
+        respond 200 "$(for f in "$rd/services"/*.json; do [[ -f "$f" ]] && cat "$f"; done | jq -sc '[.[] | {service: ., cursor: .id}]')" ;;
+      "POST /services")
+        if [[ -n "${FAKE_RD_QUOTA:-}" ]]; then respond 402 '{"message":"payment information is required"}'; exit 0; fi
+        id="srv-$(jq -r .name <<< "$data")"
+        jq -c --arg id "$id" '{id: $id, name, ownerId, type, suspended: "not_suspended", serviceDetails: (.serviceDetails + {url: ("https://" + .name + ".onrender.com")}), image}' <<< "$data" > "$rd/services/$id.json"
+        jq -c '[.envVars[] | {envVar: .}]' <<< "$data" > "$rd/envs/$id.json"
+        printf '%s\n' "$data" > "$rd/sent-${id#srv-}.json"
+        respond 201 "$(jq -c '{service: ., deployId: "dep-1"}' "$rd/services/$id.json")" ;;
+      "GET /services/"*/env-vars*) respond 200 "$(cat "$rd/envs/$id.json")" ;;
+      "PUT /services/"*/env-vars)
+        jq -c '[.[] | {envVar: .}]' <<< "$data" > "$rd/envs/$id.json"
+        printf '%s\n' "$data" > "$rd/sent-env-${id#srv-}.json"
+        respond 200 "$(cat "$rd/envs/$id.json")" ;;
+      "POST /services/"*/deploys) respond 201 '{"id":"dep-2","status":"created"}' ;;
+      "GET /services/"*/deploys/*) respond 200 "{\"id\":\"${path##*/}\",\"status\":\"${FAKE_RD_DEPLOY:-live}\"}" ;;
+      "GET /services/"*) if [[ -f "$rd/services/$id.json" ]]; then respond 200 "$(cat "$rd/services/$id.json")"; else respond 404 '{"message":"not found"}'; fi ;;
+      "PATCH /services/"*)
+        jq -c --argjson d "$data" '. * $d' "$rd/services/$id.json" > "$rd/services/$id.new" && mv "$rd/services/$id.new" "$rd/services/$id.json"
+        printf '%s\n' "$data" > "$rd/sent-patch-${id#srv-}.json"
+        respond 200 "$(cat "$rd/services/$id.json")" ;;
+      "DELETE /services/"*) rm -f "$rd/services/$id.json" "$rd/envs/$id.json"; respond 204 '' ;;
+      "GET /registrycredentials"*)
+        respond 200 "$(for f in "$rd/creds"/*.json; do [[ -f "$f" ]] && cat "$f"; done | jq -sc '.')" ;;
+      "POST /registrycredentials")
+        cid="rc-$(ls "$rd/creds" | wc -l | tr -d ' ')"
+        jq -c --arg id "$cid" '. + {id: $id} | del(.authToken)' <<< "$data" > "$rd/creds/$cid.json"
+        printf '%s\n' "$data" > "$rd/sent-cred-$cid.json"
+        respond 201 "$(cat "$rd/creds/$cid.json")" ;;
+      "PATCH /registrycredentials/"*)
+        printf '%s\n' "$data" > "$rd/sent-cred-${path##*/}.json"
+        respond 200 "$(cat "$rd/creds/${path##*/}.json")" ;;
+      "DELETE /registrycredentials/"*) rm -f "$rd/creds/${path##*/}.json"; respond 204 '' ;;
+      *) respond 404 '{"message":"no such route"}' ;;
+    esac ;;
   https://artifactregistry.googleapis.com/v1/*)
     path="${url#https://artifactregistry.googleapis.com/v1}"
     cr="${FAKE_CR:?}"
@@ -985,17 +1081,28 @@ exists()   { [ -e "$1" ] || { echo "missing: $1"; return 1; }; }
 absent()   { [ ! -e "$1" ] || { echo "should not exist: $1"; return 1; }; }
 between()  { { [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]; } || { echo "expected $2 to $3, got: $1"; return 1; }; }
 
-run_test() { # run_test <name>: run test_<name> in a subshell with errexit on
-  local rc
+run_test() { # run_test <name>: run test_<name> in a subshell with errexit on; its result in $WORK/results/<name>
+  local rc start=$SECONDS
   set +e
-  (set -e; "test_$1") > "$WORK/$1.log" 2>&1
+  # The ERR trap names the command that failed, so a test that fails without saying why still shows where.
+  (set -eE; trap 'echo "  failed: $BASH_COMMAND (line $LINENO)" >&2' ERR; "test_$1") > "$WORK/$1.log" 2>&1
   rc=$?
   set -e
+  mkdir -p "$WORK/results"
+  printf '%s %s\n' "$rc" "$((SECONDS - start))" > "$WORK/results/$1.new" && mv "$WORK/results/$1.new" "$WORK/results/$1"
+}
+
+# report_test <name>: say how a finished test went, and count it
+report_test() {
+  local rc secs
+  read -r rc secs < "$WORK/results/$1"
   if [[ $rc -eq 0 ]]; then
     passed=$((passed + 1)); echo "  ok    $1"
   else
     failed=$((failed + 1)); echo "  FAIL  $1"; sed 's/^/        /' "$WORK/$1.log"
   fi
+  reported=" $reported$1 "
+  [[ -z "${SLOW:-}" ]] || printf '%s %s\n' "$secs" "$1" >> "$WORK/times"
 }
 
 # A copy of the CLI with the real deploy and hybrid modules and the oci, northflank and
@@ -1007,8 +1114,8 @@ up_checkout() { # up_checkout <dir>
   cp "$ROOT"/deploy/*.tf "$dir/deploy/"
   cp "$ROOT"/hybrid/*.tf "$dir/hybrid/"
   cp -R "$ROOT/providers/cloudflare/apps/." "$dir/providers/cloudflare/apps/"
-  # koyeb is catalogued only: a provider with no stack
-  mkdir -p "$dir/providers/koyeb" && cp "$ROOT/providers/koyeb/provider.yaml" "$dir/providers/koyeb/"
+  # linode is catalogued only: a provider with no stack
+  mkdir -p "$dir/providers/linode" && cp "$ROOT/providers/linode/provider.yaml" "$dir/providers/linode/"
   for s in oci northflank cloudflare; do
     mkdir -p "$dir/providers/$s/stack"
     cp "$ROOT/providers/$s/provider.yaml" "$dir/providers/$s/"
@@ -2450,6 +2557,102 @@ YAML
   absent "$p/sw/namespaces/ns-sunbird.json"
 }
 
+rd_in() { # rd_in <dir> <command> [args...]: run the CLI against the fake Render API and registry
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/nf-bin:$WORK/bin:$PATH" FAKE_LOG="$dir/fake.log" FAKE_RD="$dir/rd" RENDER_API_KEY="${TEST_RD_KEY-rd-key}" "$CLI" "$@")
+}
+
+test_render_applies_deploys_and_destroys() {
+  local p="$WORK/rd-all" out body digest
+  mkdir -p "$p/rd"
+  cat > "$p/compose.yaml" <<'YAML'
+services:
+  api:
+    image: ghcr.io/me/api:1.0.0
+    command: serve --name api
+    ports: ["8080:8080"]
+    environment:
+      LOG_LEVEL: info
+YAML
+  (cd "$p" && "$CLI" init --name sunbird render) >/dev/null 2>&1
+  printf 'owner_id = "usr-abc123def456"\nname_prefix = "sunbird"\n' > "$p/.freelunch/render/terraform.tfvars"
+  printf 'API_SECRET=s3cret-value\n' > "$p/.freelunch/api.env"
+  printf 'apps = {\n  api = { host = "render-main", compose = "../compose.yaml", env_file = "api.env" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  out="$(FREELUNCH_AUTO_APPROVE=1 rd_in "$p" apply render 2>&1)"
+  contains "$out" "render: workspace usr-abc123def456 (services are named sunbird-<app>)"
+  out="$(rd_in "$p" deploy 2>&1)"
+  digest="$(sed -n 's/^.*api: ghcr.io\/me\/api:1.0.0 = //p' <<< "$out")"
+  [[ "$digest" == sha256:* ]] || { echo "no digest in: $out"; return 1; }
+  body="$(cat "$p/rd/sent-sunbird-api.json")"
+  equals "$(jq -c '{type, name, ownerId, image, plan: .serviceDetails.plan, runtime: .serviceDetails.runtime, region: .serviceDetails.region, cmd: .serviceDetails.envSpecificDetails.dockerCommand}' <<< "$body")" \
+    "{\"type\":\"web_service\",\"name\":\"sunbird-api\",\"ownerId\":\"usr-abc123def456\",\"image\":{\"ownerId\":\"usr-abc123def456\",\"imagePath\":\"ghcr.io/me/api@$digest\"},\"plan\":\"free\",\"runtime\":\"image\",\"region\":\"oregon\",\"cmd\":\"serve --name api\"}"
+  equals "$(jq -c '[.envVars[] | {(.key): .value}] | add' <<< "$body")" '{"FREELUNCH_MANAGED":"sunbird","PORT":"8080","API_SECRET":"s3cret-value","LOG_LEVEL":"info"}'
+  contains "$out" "render-main: api is running"
+  contains "$out" "render-main: api: https://sunbird-api.onrender.com"
+  lacks "$(cat "$p/fake.log")" "s3cret-value"
+  # A second deploy updates the same service, its variables, and starts a deploy.
+  out="$(rd_in "$p" deploy 2>&1)"
+  grep -q '^rd PATCH /services/srv-sunbird-api ' "$p/fake.log"
+  grep -q '^rd PUT /services/srv-sunbird-api/env-vars ' "$p/fake.log"
+  grep -q '^rd POST /services/srv-sunbird-api/deploys ' "$p/fake.log"
+  equals "$(grep -c '^rd POST /services ' "$p/fake.log")" 1
+  out="$(rd_in "$p" status 2>&1)"
+  contains "$out" "api                  serving at https://sunbird-api.onrender.com"
+  if out="$(TEST_RD_KEY='' rd_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "RENDER_API_KEY is not set"
+  out="$(FREELUNCH_AUTO_APPROVE=1 rd_in "$p" destroy render 2>&1)"
+  contains "$out" "render: deleted the service sunbird-api"
+  absent "$p/rd/services/srv-sunbird-api.json"
+}
+
+test_render_leaves_services_it_did_not_make() {
+  local p="$WORK/rd-foreign" out
+  mkdir -p "$p/rd/services" "$p/rd/envs"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["8080:8080"]\n' > "$p/compose.yaml"
+  (cd "$p" && "$CLI" init --name sunbird render) >/dev/null 2>&1
+  printf 'owner_id = "usr-abc123def456"\nname_prefix = "sunbird"\n' > "$p/.freelunch/render/terraform.tfvars"
+  printf 'apps = {\n  api = { host = "render-main", compose = "../compose.yaml" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  echo '{"id":"srv-sunbird-api","name":"sunbird-api","ownerId":"usr-abc123def456","type":"web_service","suspended":"not_suspended","serviceDetails":{"url":"https://sunbird-api.onrender.com"}}' > "$p/rd/services/srv-sunbird-api.json"
+  echo '[{"envVar":{"key":"MINE","value":"yes"}}]' > "$p/rd/envs/srv-sunbird-api.json"
+  FREELUNCH_AUTO_APPROVE=1 rd_in "$p" apply render >/dev/null 2>&1
+  if out="$(rd_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "there is a service sunbird-api that freelunch didn't make"
+  out="$(FREELUNCH_AUTO_APPROVE=1 rd_in "$p" destroy render 2>&1)"
+  contains "$out" "the service sunbird-api wasn't made by freelunch, so it stays"
+  exists "$p/rd/services/srv-sunbird-api.json"
+}
+
+test_render_saves_a_login_for_a_private_image() {
+  local p="$WORK/rd-private" out
+  mkdir -p "$p/rd"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["8080:8080"]\n' > "$p/compose.yaml"
+  (cd "$p" && "$CLI" init --name sunbird render) >/dev/null 2>&1
+  printf 'owner_id = "usr-abc123def456"\nname_prefix = "sunbird"\n' > "$p/.freelunch/render/terraform.tfvars"
+  printf 'apps = {\n  api = { host = "render-main", compose = "../compose.yaml" }\n}\nregistries = {\n  "ghcr.io" = { username = "me", password_env = "GHCR_TOKEN" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  FREELUNCH_AUTO_APPROVE=1 rd_in "$p" apply render >/dev/null 2>&1
+  out="$(GHCR_TOKEN=ghp_test-token FAKE_PRIVATE=me/api rd_in "$p" deploy 2>&1)"
+  equals "$(jq -c '{name, registry, username, authToken}' "$p/rd/sent-cred-rc-0.json")" '{"name":"freelunch sunbird ghcr.io","registry":"GITHUB","username":"me","authToken":"ghp_test-token"}'
+  equals "$(jq -r .image.registryCredentialId "$p/rd/sent-sunbird-api.json")" rc-0
+  lacks "$(cat "$p/fake.log")" "ghp_test-token"
+  lacks "$out" "ghp_test-token"
+  out="$(FREELUNCH_AUTO_APPROVE=1 rd_in "$p" destroy render 2>&1)"
+  contains "$out" "render: deleted the registry login freelunch sunbird ghcr.io"
+}
+
+test_render_stops_when_the_deploy_fails() {
+  local p="$WORK/rd-fail" out
+  mkdir -p "$p/rd"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["8080:8080"]\n' > "$p/compose.yaml"
+  (cd "$p" && "$CLI" init --name sunbird render) >/dev/null 2>&1
+  printf 'owner_id = "usr-abc123def456"\nname_prefix = "sunbird"\n' > "$p/.freelunch/render/terraform.tfvars"
+  printf 'apps = {\n  api = { host = "render-main", compose = "../compose.yaml" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  FREELUNCH_AUTO_APPROVE=1 rd_in "$p" apply render >/dev/null 2>&1
+  if out="$(FAKE_RD_DEPLOY=update_failed rd_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "render: the deploy of api is update_failed"
+  printf 'owner_id = "usr-other"\nname_prefix = "sunbird"\n' > "$p/.freelunch/render/terraform.tfvars"
+  if out="$(FREELUNCH_AUTO_APPROVE=1 rd_in "$p" apply render 2>&1)"; then echo "apply should have failed"; return 1; fi
+}
+
 test_cloud_run_copies_a_private_image() {
   local p="$WORK/cr-private" out
   cr_project "$p"
@@ -2935,7 +3138,7 @@ test_wait_goes_on_from_an_earlier_run() {
 state_store() {
   mkdir -p "$1-store"
   printf '# A folder stands in for the bucket.\npath = "%s/{stack}.tfstate"\n' "$1-store" > "$1/.freelunch/state.local.tfbackend"
-  if CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu; then
+  if is_opentofu; then
     echo "FREELUNCH_STATE_PASSPHRASE=correct horse battery staple" >> "$1/.freelunch/.env"
   else
     echo "FREELUNCH_STATE_PASSPHRASE=none" >> "$1/.freelunch/.env"
@@ -2944,6 +3147,593 @@ state_store() {
 
 # with_ip <state file> <ip>: the state as an apply that moved oci-main to <ip> leaves it
 with_ip() { jq --arg ip "$2" '.serial += 1 | .outputs.hosts.value[0].public_ip = $ip' "$1" > "$1.new" && mv "$1.new" "$1"; }
+
+# --- the api engine ---------------------------------------------------------------------
+
+# A fake HTTP API for the api engine, in its own PATH folder. It serves the phase named in
+# FAKE_API_PHASE from tests/fixtures/<name>/scenario.json: an ordered list of {match, status,
+# body, times}, where match is "METHOD /path" (the query left out); each entry is used up in turn (once
+# unless it says times), and the last one that matches goes on answering. A request nothing
+# matches gets a 599. It logs "METHOD /path", and keeps the request bodies and the headers
+# the config file gave curl.
+mkdir -p "$WORK/api-bin"
+cat > "$WORK/api-bin/curl" <<'EOF'
+#!/usr/bin/env bash
+method=GET out=/dev/null cfg="" data=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -w|--max-time) shift 2 ;;
+    -X) method="$2"; shift 2 ;;
+    -K) cfg="$2"; shift 2 ;;
+    --data-binary) data="${2#@}"; shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+path="/${url#*://*/}"; path="${path%%\?*}"
+echo "$method $path" >> "$FAKE_API_DIR/log"
+echo "$*" >> "$FAKE_API_DIR/argv"
+[[ -z "$cfg" ]] || grep '^header' "$cfg" >> "$FAKE_API_DIR/headers"
+[[ -z "$data" ]] || { cat "$data" >> "$FAKE_API_DIR/bodies"; echo >> "$FAKE_API_DIR/bodies"; }
+scenario="$FAKE_API_DIR/scenario.json"
+touch "$FAKE_API_DIR/used"
+matches="$(jq -r --arg r "$method $path" --arg phase "$FAKE_API_PHASE" '.[$phase] | to_entries[] | select(.value.match == $r) | .key' "$scenario")"
+pick=""
+for i in $matches; do
+  times="$(jq -r --arg phase "$FAKE_API_PHASE" ".[\$phase][$i].times // 1" "$scenario")"
+  used="$(grep -c "^$i\$" "$FAKE_API_DIR/used" || true)"
+  if [[ "$used" -lt "$times" ]]; then pick="$i"; break; fi
+  pick="$i"
+done
+if [[ -z "$pick" ]]; then echo '{"message":"no such route in the scenario"}' > "$out"; echo 599; exit 0; fi
+echo "$pick" >> "$FAKE_API_DIR/used"
+jq -c --arg phase "$FAKE_API_PHASE" ".[\$phase][$pick].body" "$scenario" > "$out"
+jq -r --arg phase "$FAKE_API_PHASE" ".[\$phase][$pick].status" "$scenario"
+EOF
+chmod +x "$WORK/api-bin/curl"
+
+# api_checkout <dir> <name>: a copy of the CLI whose providers folder has that provider's
+# api.yaml: its fixture's, for the made-up one
+api_checkout() {
+  local dir="$1" name="$2"
+  mkdir -p "$dir/bin" "$dir/providers/$name"
+  cp "$CLI" "$dir/bin/"
+  if [[ -f "$ROOT/tests/fixtures/$name/api.yaml" ]]; then cp "$ROOT/tests/fixtures/$name/"api.* "$dir/providers/$name/"; else cp "$ROOT/providers/$name/"api.* "$dir/providers/$name/"; fi
+}
+
+# api_run <checkout> <name> <phase> <args...>: freelunch api <name> <args> against the fake,
+# with a fresh log. The token is the scenario's, in the variable api.yaml names.
+api_run() {
+  local dir="$1" name="$2" phase="$3" var; shift 3
+  rm -rf "$dir/fake"; mkdir -p "$dir/fake"
+  cp "$ROOT/tests/fixtures/$name/scenario.json" "$dir/fake/scenario.json"
+  var="$(sed -n 's/^  env: *//p' "$dir/providers/$name/api.yaml" | head -1)"
+  (cd "${API_CWD:-$dir}" && env "$var=$(jq -r .token "$ROOT/tests/fixtures/$name/scenario.json")" PATH="$WORK/api-bin:$PATH" \
+    FAKE_API_DIR="$dir/fake" FAKE_API_PHASE="$phase" FREELUNCH_API_POLL=0 "$dir/bin/freelunch" api "$name" "$@")
+}
+
+# The same lifecycle for every provider that has an api.yaml, from its fixture: a first deploy
+# makes the service, a second updates it, one somebody else made is left alone, a failed deploy
+# stops with the provider's status, an API error hides the app's secrets, and destroy deletes
+# only what freelunch made. A provider with an api.yaml and no fixture fails here.
+test_api_engine_lifecycle_for_every_provider() {
+  local f name dir out fake token scen src_args=() ours foreign other
+  printf 'SECRET_KEY=supersecretvalue\nPLAIN=1\n' > "$WORK/api-lifecycle.env"
+  for f in "$ROOT"/providers/*/api.yaml "$ROOT"/tests/fixtures/*/api.yaml; do
+    [[ -f "$f" ]] || continue
+    name="$(basename "$(dirname "$f")")"
+    exists "$ROOT/tests/fixtures/$name/scenario.json"
+    [[ "$(jq -r '.generic == false' "$ROOT/tests/fixtures/$name/scenario.json")" == false ]] || continue
+    dir="$WORK/api-$name"; fake="$dir/fake"
+    scen="$ROOT/tests/fixtures/$name/scenario.json"
+    token="$(jq -r .token "$scen")"
+    ours="$(jq -r .ours_id "$scen")"; foreign="$(jq -r .foreign_id "$scen")"; other="$(jq -r .other_id "$scen")"
+    # a provider that deploys source gets a folder of it
+    src_args=()
+    if jq -e '.source_files' "$scen" >/dev/null; then
+      rm -rf "$WORK/src-$name"; mkdir -p "$WORK/src-$name"
+      while IFS= read -r f; do
+        mkdir -p "$WORK/src-$name/$(dirname "$f")"; jq -r --arg f "$f" '.source_files[$f]' "$scen" > "$WORK/src-$name/$f"
+      done < <(jq -r '.source_files | keys[]' "$scen")
+      src_args=(--source "$WORK/src-$name")
+    fi
+    api_checkout "$dir" "$name"
+    # create: the token goes in the config file, never on curl's command line
+    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --port 8080 --env-file "$WORK/api-lifecycle.env" ${src_args[@]+"${src_args[@]}"} 2>&1)"
+    contains "$out" "$name: freelunch-web: made"
+    contains "$(cat "$fake/headers")" "$token"
+    lacks "$(cat "$fake/argv")" "$token"
+    contains "$(cat "$fake/bodies")" supersecretvalue
+    lacks "$out" supersecretvalue
+    # update: a service of ours is there, so it is changed, not made again
+    out="$(api_run "$dir" "$name" update deploy web --image ghcr.io/me/web:2 --env-file "$WORK/api-lifecycle.env" ${src_args[@]+"${src_args[@]}"} 2>&1)"
+    contains "$out" "$name: freelunch-web: updated"
+    lacks "$out" ": made"
+    # a service of that name that freelunch didn't make is never touched
+    if out="$(api_run "$dir" "$name" foreign deploy web --image ghcr.io/me/web:1 ${src_args[@]+"${src_args[@]}"} 2>&1)"; then echo "$name: deploy over a foreign service should fail"; return 1; fi
+    contains "$out" "which freelunch didn't make"
+    equals "$(grep -vc '^GET ' "$fake/log" || true)" 0
+    # a deploy that ends badly stops with the provider's status
+    if out="$(api_run "$dir" "$name" failed deploy web --image ghcr.io/me/web:1 ${src_args[@]+"${src_args[@]}"} 2>&1)"; then echo "$name: a failed deploy should fail"; return 1; fi
+    contains "$out" "$(jq -r '.failed_says' "$ROOT/tests/fixtures/$name/scenario.json")"
+    # an API error doesn't repeat the app's secrets
+    if out="$(api_run "$dir" "$name" rejected deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api-lifecycle.env" ${src_args[@]+"${src_args[@]}"} 2>&1)"; then echo "$name: a rejected create should fail"; return 1; fi
+    contains "$out" "bad value <redacted> in env"
+    lacks "$out" supersecretvalue
+    # destroy: only ours (a 404 says it was gone already); the other two stay
+    out="$(api_run "$dir" "$name" destroy destroy 2>&1)"
+    contains "$out" "deleted freelunch-web"
+    contains "$out" "left alone"
+    equals "$(grep -c '^DELETE ' "$fake/log")" 1
+    contains "$(grep '^DELETE ' "$fake/log")" "$ours"
+    lacks "$(cat "$fake/log")" "$foreign"
+    lacks "$(cat "$fake/log")" "$other"
+    # dry run: nothing is sent, and the env value is hidden
+    out="$(api_run "$dir" "$name" create deploy web --image ghcr.io/me/web:1 --env-file "$WORK/api-lifecycle.env" ${src_args[@]+"${src_args[@]}"} --dry-run 2>&1)"
+    contains "$out" "would"
+    lacks "$out" supersecretvalue
+    [[ ! -e "$fake/log" ]] || { echo "$name: a dry run sent requests"; return 1; }
+  done
+}
+
+# GraphQL: every call has a body, and an error inside a 200 is a failure.
+test_api_engine_speaks_graphql() {
+  local dir="$WORK/api-gql" out
+  printf 'SECRET_KEY=supersecretvalue\n' > "$WORK/api-graphql.env"
+  api_checkout "$dir" sample-gql
+  contains "$(api_run "$dir" sample-gql check check 2>&1)" "the token works"
+  out="$(api_run "$dir" sample-gql create deploy web --image img:1 --env-file "$WORK/api-graphql.env" 2>&1)"
+  contains "$out" "freelunch-web: made"
+  contains "$(cat "$dir/fake/bodies")" '"variables":{"n":"freelunch-web","i":"img:1","e":{"SECRET_KEY":"supersecretvalue"}}'
+  equals "$(grep -c '^POST /graphql$' "$dir/fake/log")" 3
+  if out="$(api_run "$dir" sample-gql quota deploy web --image img:1 --env-file "$WORK/api-graphql.env" 2>&1)"; then echo "a GraphQL error should fail"; return 1; fi
+  contains "$out" "can't make freelunch-web (400): quota exceeded for <redacted>"
+  lacks "$out" supersecretvalue
+}
+
+# A step the format can't express is bash in the provider's api.sh, named by custom:.
+test_api_engine_runs_a_custom_step() {
+  local dir="$WORK/api-custom" out
+  api_checkout "$dir" sample-custom
+  out="$(api_run "$dir" sample-custom create deploy web --image img:7 2>&1)"
+  contains "$out" "freelunch-web: made"
+  equals "$(cat "$dir/fake/custom")" "uploaded img:7 for a1"
+  contains "$out" "web: https://web.custom.test"
+}
+
+# The provider's record in the store: written on create, read by status and destroy, and a
+# project with nothing but the store's settings can do all of it.
+test_api_engine_keeps_a_record_in_the_store() {
+  local p="$WORK/api-rec" dir="$WORK/api-rec-co" out
+  mkdir -p "$p/.freelunch"
+  state_store "$p"
+  printf 'SECRET_KEY=supersecretvalue\n' > "$WORK/api-record.env"
+  api_checkout "$dir" sample
+  export API_CWD="$p"
+  api_run "$dir" sample create deploy web --image img:1 >/dev/null 2>&1
+  exists "$p-store/record-sample.tfstate"
+  out="$(in_dir "$p" "$CLI" state record pull sample 2>/dev/null)"
+  equals "$(jq -r '.resources[0] | "\(.id) \(.name) \(.kind) \(.marker)"' <<< "$out")" "s1 freelunch-web app freelunch"
+  # status reads it, and says what the provider no longer lists
+  out="$(api_run "$dir" sample foreign status 2>&1)"
+  contains "$out" "record in the store: 1 resources"
+  contains "$out" "freelunch-web is in the record but sample doesn't list it"
+  # destroy deletes what the record names even when the listing doesn't show it, then clears it
+  out="$(api_run "$dir" sample record_only destroy 2>&1)"
+  contains "$out" "deleted freelunch-web"
+  equals "$(grep -c '^DELETE /v1/services/s1' "$dir/fake/log")" 1
+  equals "$(in_dir "$p" "$CLI" state record pull sample 2>/dev/null | jq -c .resources)" "[]"
+  unset API_CWD
+}
+
+# api.yaml is checked when it is read: a missing field says which, and a provider whose API
+# can't delete is refused, since destroy could not clean up after it.
+test_api_engine_checks_api_yaml() {
+  local dir="$WORK/api-bad" out
+  api_checkout "$dir" sample
+  grep -v '^  fields:' "$dir/providers/sample/api.yaml" > "$dir/x" && mv "$dir/x" "$dir/providers/sample/api.yaml"
+  if out="$(api_run "$dir" sample create status 2>&1)"; then echo "a missing field should fail"; return 1; fi
+  contains "$out" "providers/sample/api.yaml needs list.fields.id"
+  api_checkout "$dir" sample
+  sed -i.bak '/^delete:/,/^  ok:/d' "$dir/providers/sample/api.yaml"
+  if out="$(api_run "$dir" sample create status 2>&1)"; then echo "no delete should be refused"; return 1; fi
+  contains "$out" "sample is refused: its API has no way to delete"
+}
+
+# The catalogue and the CLI work out a provider's engine separately (Terraform for the README,
+# bash for freelunch engine); they have to agree for every provider.
+test_engine_of_agrees_with_the_catalogue() {
+  local f name row
+  for f in "$ROOT"/providers/*/README.md; do
+    name="$(basename "$(dirname "$f")")"
+    row="$(sed -n 's/^| \*\*Engine\*\* | `\(.*\)` |$/\1/p' "$f")"
+    [[ -n "$row" ]] || continue
+    equals "$("$CLI" engine "$name")" "$row"
+  done
+}
+
+# Deno Deploy takes source, not an image: the files go up inline as base64 under their relative
+# paths, with the entrypoint in the config; the app carries a freelunch label that marks it as
+# ours; its address comes from the revision.
+test_deno_deploy_uploads_the_source() {
+  local dir="$WORK/api-deno-src" src="$WORK/deno-src" out body
+  mkdir -p "$src/lib" "$src/.git" "$src/node_modules/x"
+  printf "Deno.serve(() => new Response('hi'));\n" > "$src/main.ts"
+  printf 'export const x = 1;\n' > "$src/lib/util.ts"
+  echo secret > "$src/.git/config"; echo dep > "$src/node_modules/x/index.js"
+  printf 'SECRET_KEY=supersecretvalue\n' > "$WORK/api-deno.env"
+  api_checkout "$dir" deno-deploy
+  out="$(api_run "$dir" deno-deploy create deploy web --source "$src" --env-file "$WORK/api-deno.env" 2>&1)"
+  contains "$out" "deno-deploy: freelunch-web: made"
+  contains "$out" "deno-deploy: web: https://freelunch-web.me.deno.net"
+  # the app is made with its label and its environment
+  body="$(sed -n 1p "$dir/fake/bodies")"
+  equals "$(jq -c '{slug, labels}' <<< "$body")" '{"slug":"freelunch-web","labels":{"freelunch":"freelunch"}}'
+  equals "$(jq -c '.env_vars' <<< "$body")" '[{"key":"SECRET_KEY","value":"supersecretvalue","secret":true}]'
+  # the deploy: the two source files and nothing from .git or node_modules
+  body="$(grep -m1 '"assets"' "$dir/fake/bodies")"
+  equals "$(jq -c '.assets | keys' <<< "$body")" '["lib/util.ts","main.ts"]'
+  equals "$(jq -r '.assets["main.ts"] | "\(.kind) \(.encoding)"' <<< "$body")" "file base64"
+  equals "$(jq -r '.assets["main.ts"].content' <<< "$body" | base64 -d)" "Deno.serve(() => new Response('hi'));"
+  equals "$(jq -c '.config' <<< "$body")" '{"runtime":{"type":"dynamic","entrypoint":"main.ts"}}'
+  equals "$(jq -r '.production' <<< "$body")" true
+  # a deploy without source, and without the entrypoint, says what is missing
+  if out="$(api_run "$dir" deno-deploy create deploy web --image x:1 2>&1)"; then echo "no source should fail"; return 1; fi
+  contains "$out" "a deploy uploads source code: pass the app's folder with --source"
+  rm "$src/main.ts"
+  if out="$(api_run "$dir" deno-deploy create deploy web --source "$src" 2>&1)"; then echo "no entrypoint should fail"; return 1; fi
+  contains "$out" "the entrypoint main.ts isn't in"
+  # the dry run says what it would do and uploads nothing
+  out="$(api_run "$dir" deno-deploy create deploy web --source "$src" --dry-run 2>&1)"
+  contains "$out" "a custom step (deno_deploy) uploads"
+  [[ ! -e "$dir/fake/log" ]] || { echo "a dry run sent requests"; return 1; }
+}
+
+# --- the cli and guided engines --------------------------------------------------------------
+
+# A made-up command line tool: fakecli whoami | list | create <n> | deploy <n> | destroy <n> --yes.
+# Its databases are the lines of $FAKE_CLI_DIR/dbs; it logs what it is asked to $FAKE_CLI_DIR/log.
+# whoami fails without FAKECLI_TOKEN; list fails with FAKE_CLI_LIST_FAIL=1; create fails for a
+# name it has; destroy says "not found" for one it hasn't.
+mkdir -p "$WORK/cli-bin"
+cat > "$WORK/cli-bin/fakecli" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p "$FAKE_CLI_DIR"; touch "$FAKE_CLI_DIR/dbs"
+echo "fakecli $*" >> "$FAKE_CLI_DIR/log"
+case "$1" in
+  whoami) [[ -n "${FAKECLI_TOKEN:-}" ]] || { echo "not signed in" >&2; exit 1; }; echo me ;;
+  list) [[ -z "${FAKE_CLI_LIST_FAIL:-}" ]] || { echo "boom" >&2; exit 1; }; echo "NAME  REGION"; sed 's/$/  eu/' "$FAKE_CLI_DIR/dbs" ;;
+  create) grep -qx "$2" "$FAKE_CLI_DIR/dbs" && { echo "$2 exists" >&2; exit 1; }; echo "$2" >> "$FAKE_CLI_DIR/dbs" ;;
+  deploy) ;;
+  destroy) grep -qx "$2" "$FAKE_CLI_DIR/dbs" || { echo "database $2 not found" >&2; exit 1; }; grep -vx "$2" "$FAKE_CLI_DIR/dbs" > "$FAKE_CLI_DIR/dbs.new"; mv "$FAKE_CLI_DIR/dbs.new" "$FAKE_CLI_DIR/dbs" ;;
+esac
+EOF
+chmod +x "$WORK/cli-bin/fakecli"
+
+# engine_checkout <dir> <name>: a copy of the CLI whose providers folder has that fixture's
+# provider files (its yaml and scripts, not its scenario)
+engine_checkout() {
+  local dir="$1" name="$2" f
+  mkdir -p "$dir/bin" "$dir/providers/$name"
+  cp "$CLI" "$dir/bin/"
+  for f in "$ROOT/tests/fixtures/$name"/*; do [[ "$(basename "$f")" == scenario.json ]] || cp "$f" "$dir/providers/$name/"; done
+}
+
+# cli_in <checkout> <project> <command...>: freelunch there, with fakecli, its token and its
+# databases in the checkout
+cli_in() {
+  local co="$1" proj="$2"; shift 2
+  (cd "$proj" && PATH="$WORK/cli-bin:$PATH" FAKE_CLI_DIR="$co/fakecli" FAKECLI_TOKEN="${FAKECLI_TOKEN-tok}" "$co/bin/freelunch" "$@")
+}
+
+# The cli engine runs the tool's own commands, and trusts only its record for what is
+# freelunch's: it makes what is missing, leaves what it didn't make, and deletes what it did.
+test_cli_engine_lifecycle() {
+  local co="$WORK/cli-co" p="$WORK/cli-proj" out
+  engine_checkout "$co" sample-cli
+  mkdir -p "$p/.freelunch"; state_store "$p"
+  # a first deploy: made, deployed, recorded
+  out="$(cli_in "$co" "$p" cli sample-cli deploy web 2>&1)"
+  contains "$out" "sample-cli: freelunch-web: made"
+  contains "$out" "sample-cli: freelunch-web: deployed"
+  grep -qx 'fakecli create freelunch-web' "$co/fakecli/log"
+  grep -qx 'fakecli deploy freelunch-web' "$co/fakecli/log"
+  equals "$(cli_in "$co" "$p" state record pull sample-cli 2>/dev/null | jq -r '.engine + " " + .resources[0].name')" "cli freelunch-web"
+  # again: it is ours, so only the deploy runs
+  : > "$co/fakecli/log"
+  out="$(cli_in "$co" "$p" cli sample-cli deploy web 2>&1)"
+  contains "$out" "there already, and ours"
+  fails grep -q 'fakecli create' "$co/fakecli/log"
+  grep -qx 'fakecli deploy freelunch-web' "$co/fakecli/log"
+  # something there that is not in the record is never touched
+  echo freelunch-api >> "$co/fakecli/dbs"
+  : > "$co/fakecli/log"
+  if out="$(cli_in "$co" "$p" cli sample-cli deploy api 2>&1)"; then echo "a foreign database should stop the deploy"; return 1; fi
+  contains "$out" "which freelunch didn't make"
+  fails grep -q 'fakecli \(create\|deploy\|destroy\)' "$co/fakecli/log"
+  # a list that fails stops the run, and does not look like "not there"
+  : > "$co/fakecli/log"
+  if out="$(FAKE_CLI_LIST_FAIL=1 cli_in "$co" "$p" cli sample-cli deploy cache 2>&1)"; then echo "a failed list should stop the deploy"; return 1; fi
+  contains "$out" "couldn't list what sample-cli has: boom"
+  fails grep -q 'fakecli create' "$co/fakecli/log"
+  # status says which are ours
+  out="$(cli_in "$co" "$p" cli sample-cli status 2>&1)"
+  contains "$out" "freelunch-web"
+  contains "$out" "ours"
+  contains "$out" "freelunch-api            not in the record"
+  # destroy deletes what the record names, and the foreign one stays
+  out="$(cli_in "$co" "$p" cli sample-cli destroy 2>&1)"
+  contains "$out" "deleted freelunch-web"
+  grep -qx 'freelunch-api' "$co/fakecli/dbs"
+  fails grep -qx 'freelunch-web' "$co/fakecli/dbs"
+  equals "$(cli_in "$co" "$p" state record pull sample-cli 2>/dev/null | jq -c .resources)" "[]"
+  # --adopt takes over what is there
+  out="$(cli_in "$co" "$p" cli sample-cli deploy api --adopt 2>&1)"
+  contains "$out" "there already, and ours"
+  equals "$(cli_in "$co" "$p" state record pull sample-cli 2>/dev/null | jq -r '.resources[0].name')" freelunch-api
+  # a delete of something already gone is a success
+  sed -i.bak '/freelunch-api/d' "$co/fakecli/dbs" && rm "$co/fakecli/dbs.bak"
+  out="$(cli_in "$co" "$p" cli sample-cli destroy 2>&1)"
+  contains "$out" "freelunch-api was gone already"
+  # the dry run runs nothing
+  : > "$co/fakecli/log"
+  out="$(cli_in "$co" "$p" cli sample-cli deploy web --dry-run 2>&1)"
+  contains "$out" "create: fakecli create freelunch-web"
+  [[ ! -s "$co/fakecli/log" ]] || { echo "a dry run ran the tool"; return 1; }
+}
+
+# With no state store there is no record, so nothing that exists is changed.
+test_cli_engine_without_a_record_changes_nothing_that_exists() {
+  local co="$WORK/cli-co2" p="$WORK/cli-proj2" out
+  engine_checkout "$co" sample-cli
+  mkdir -p "$p/.freelunch"
+  out="$(cli_in "$co" "$p" cli sample-cli deploy web 2>&1)"
+  contains "$out" "sample-cli: freelunch-web: made"
+  if out="$(cli_in "$co" "$p" cli sample-cli deploy web 2>&1)"; then echo "an existing database with no record should stop the deploy"; return 1; fi
+  contains "$out" "with no state store there is no record"
+  : > "$co/fakecli/log"
+  if out="$(cli_in "$co" "$p" cli sample-cli destroy 2>&1)"; then echo "destroy with no record should stop"; return 1; fi
+  contains "$out" "--all-with-prefix"
+  fails grep -q 'fakecli destroy' "$co/fakecli/log"
+  echo other-thing >> "$co/fakecli/dbs"
+  cli_in "$co" "$p" cli sample-cli destroy --all-with-prefix >/dev/null 2>&1
+  grep -qx 'other-thing' "$co/fakecli/dbs"
+  fails grep -qx 'freelunch-web' "$co/fakecli/dbs"
+}
+
+# doctor checks the tool is installed, its variable is set and it signs in; guided providers get
+# their token checked when the provider has a way to ask.
+test_doctor_checks_cli_and_guided_providers() {
+  local co="$WORK/cli-co3" p="$WORK/cli-proj3" out
+  engine_checkout "$co" sample-cli
+  engine_checkout "$co" sample-guided
+  mkdir -p "$p/.freelunch/sample-cli" "$p/.freelunch/sample-guided"
+  out="$(cli_in "$co" "$p" doctor 2>&1 || true)"
+  contains "$out" "sample-cli (cli engine: fakecli)"
+  contains "$out" "ok    fakecli is installed"
+  contains "$out" "ok    fakecli signs in"
+  contains "$out" "sample-guided (guided engine: steps by hand)"
+  # the tool's token not set, and the tool not installed
+  out="$(FAKECLI_TOKEN="" cli_in "$co" "$p" doctor 2>&1 || true)"
+  contains "$out" "FAKECLI_TOKEN is not set"
+  out="$(cd "$p" && PATH="/usr/bin:/bin" FAKECLI_TOKEN=tok "$co/bin/freelunch" doctor 2>&1 || true)"
+  contains "$out" "fail  fakecli isn't installed (pip install fakecli)"
+  # no folder in the project, no check
+  rmdir "$p/.freelunch/sample-cli"
+  out="$(cli_in "$co" "$p" doctor 2>&1 || true)"
+  lacks "$out" "sample-cli (cli engine"
+}
+
+test_guided_engine_prints_the_steps_and_checks_the_token() {
+  local co="$WORK/guided-co" out
+  engine_checkout "$co" sample-guided
+  mkdir -p "$WORK/guided-proj/.freelunch"
+  rm -rf "$co/fake"; mkdir -p "$co/fake"; cp "$ROOT/tests/fixtures/sample-guided/scenario.json" "$co/fake/"
+  guided() { (cd "$WORK/guided-proj" && PATH="$WORK/api-bin:$PATH" FAKE_API_DIR="$co/fake" FAKE_API_PHASE="$1" SAMPLEG_TOKEN="${SAMPLEG_TOKEN-sampleg-token-77}" "$co/bin/freelunch" guided sample-guided); }
+  out="$(guided check 2>&1)"
+  contains "$out" "1. Sign in at https://sample.example and make an API token."
+  contains "$out" "3. Put the token in .freelunch/.env as SAMPLEG_TOKEN."
+  contains "$out" "ok    sample-guided takes the token in SAMPLEG_TOKEN"
+  # a token it turns down, and the token not hidden in what it says
+  out="$(guided bad 2>&1 || true)"
+  if guided bad >/dev/null 2>&1; then echo "a token turned down should fail the command"; return 1; fi
+  contains "$out" "fail  sample-guided doesn't take the token in SAMPLEG_TOKEN (401): invalid token <redacted>"
+  lacks "$out" "sampleg-token-77"
+  # no token set
+  out="$(SAMPLEG_TOKEN="" guided check 2>&1 || true)"
+  contains "$out" "SAMPLEG_TOKEN is not set"
+  # a provider with no way to check says so
+  sed -i.bak '/^base_url:/,$d' "$co/providers/sample-guided/guided.yaml" && rm "$co/providers/sample-guided/guided.yaml.bak"
+  rm -f "$co/.cache"; out="$(guided check 2>&1)"
+  contains "$out" "sample-guided has no way to check a token"
+}
+
+# Every provider with a guided.yaml has steps that print, and a cli.yaml or guided.yaml is the
+# provider's whole engine: the catalogue agrees (a guided provider needs no stack or api.yaml).
+test_guided_providers_print_their_steps() {
+  local f name out n=0
+  for f in "$ROOT"/providers/*/guided.yaml; do
+    name="$(basename "$(dirname "$f")")"
+    out="$("$CLI" guided "$name" 2>&1)"
+    contains "$out" "$name has no API or command line freelunch can drive"
+    contains "$out" "1. "
+    equals "$("$CLI" engine "$name")" guided
+    n=$((n + 1))
+  done
+  [[ $n -ge 3 ]]
+}
+
+# --- databases in an app's environment -------------------------------------------------------
+
+# give_database <project>: a deployed database stack (the neon fixture) and the api app using it
+give_database() {
+  mkdir -p "$1/.freelunch/neon"
+  cp "$ROOT/deploy/tests/fixtures/database.tfstate" "$1/.freelunch/neon/terraform.tfstate"
+  sed -i.bak 's|env_file = "api.env" }|env_file = "api.env", database = "neon-main" }|' "$1/.freelunch/apps.tfvars"
+}
+
+DB_URL='postgres://owner:mock-db-pass@ep-mock.eu-central-1.aws.neon.tech/neondb?sslmode=require'
+
+# database = "neon-main" in apps.tfvars puts DATABASE_URL in the app's environment, the way a
+# bucket's settings get there: on a VM in its .env under the env_file's values, and on Northflank
+# in the service's environment. The dry run and the logs never show it.
+test_deploy_gives_an_app_its_database() {
+  local p="$WORK/db-vm" n="$WORK/db-nf" out
+  new_project "$p"
+  give_database "$p"
+  GHCR_TOKEN=ghp_test-token deploy_in "$p" >/dev/null 2>&1
+  equals "$(cat "$p/host/apps/api/.env")" "$(printf 'DATABASE_URL=%s\nAPI_SECRET=s3cret-value' "$DB_URL")"
+  out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" --dry-run 2>&1)"
+  contains "$out" "<DATABASE_URL of neon-main, then $p/.freelunch/api.env, redacted>"
+  lacks "$out" "mock-db-pass"
+  # with a bucket as well, and without an env_file
+  mkdir -p "$p/.freelunch/backblaze-b2"
+  cp "$ROOT/deploy/tests/fixtures/storage.tfstate" "$p/.freelunch/backblaze-b2/terraform.tfstate"
+  sed -i.bak 's|env_file = "api.env", database|env_file = "api.env", bucket = "backblaze-b2-results", database|' "$p/.freelunch/apps.tfvars"
+  out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" --dry-run 2>&1)"
+  contains "$out" "<the S3 settings of backblaze-b2-results, DATABASE_URL of neon-main, then $p/.freelunch/api.env, redacted>"
+  sed -i.bak 's|env_file = "api.env", ||' "$p/.freelunch/apps.tfvars"
+  GHCR_TOKEN=ghp_test-token deploy_in "$p" >/dev/null 2>&1
+  contains "$(cat "$p/host/apps/api/.env")" "DATABASE_URL=$DB_URL"
+  contains "$(cat "$p/host/apps/api/.env")" "S3_BUCKET=freelunch-results"
+  # a database no stack made stops the deploy, and says which exist
+  sed -i.bak 's|neon-main|supabase-app|' "$p/.freelunch/apps.tfvars"
+  if out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "Apps use databases that no stack has made: api (database supabase-app)"
+  # on Northflank it is the service's environment, under the env_file's values
+  nf_project "$n"
+  give_database "$n"
+  printf 'DATABASE_URL=my-own\n' >> "$n/.freelunch/api.env"
+  out="$(GHCR_TOKEN=x nf_in "$n" deploy 2>&1)"
+  contains "$out" ", with the database neon-main"
+  equals "$(sent "$n" api | jq -r .runtimeEnvironment.DATABASE_URL)" "my-own"
+  sed -i.bak '/DATABASE_URL=my-own/d' "$n/.freelunch/api.env"
+  GHCR_TOKEN=x nf_in "$n" deploy >/dev/null 2>&1
+  equals "$(sent "$n" api | jq -r .runtimeEnvironment.DATABASE_URL)" "$DB_URL"
+  lacks "$(cat "$n/fake.log")" "mock-db-pass"
+}
+
+test_cloud_run_gives_an_app_its_database() {
+  local p="$WORK/db-cr" out
+  cr_project "$p"
+  FREELUNCH_AUTO_APPROVE=1 cr_in "$p" apply cloud-run >/dev/null 2>&1
+  give_database "$p"
+  out="$(cr_in "$p" deploy 2>&1)"
+  contains "$out" ", with the database neon-main"
+  equals "$(jq -r '.template.containers[0].env[] | select(.name == "DATABASE_URL") | .value' "$p/cr/sent-api.json")" "$DB_URL"
+  lacks "$(cat "$p/fake.log")" "mock-db-pass"
+  lacks "$out" "mock-db-pass"
+}
+
+test_scaleway_gives_an_app_its_database() {
+  local p="$WORK/db-sw" out
+  mkdir -p "$p/sw"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["8080:8080"]\n' > "$p/compose.yaml"
+  (cd "$p" && "$CLI" init --name sunbird scaleway) >/dev/null 2>&1
+  printf 'project_id = "11111111-2222-3333-4444-555555555555"\nname_prefix = "sunbird"\n' > "$p/.freelunch/scaleway/terraform.tfvars"
+  printf 'API_SECRET=s3cret-value\n' > "$p/.freelunch/api.env"
+  printf 'apps = {\n  api = { host = "scaleway-main", compose = "../compose.yaml", env_file = "api.env" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  FREELUNCH_AUTO_APPROVE=1 sw_in "$p" apply scaleway >/dev/null 2>&1
+  give_database "$p"
+  out="$(sw_in "$p" deploy 2>&1)"
+  equals "$(jq -r .secret_environment_variables.DATABASE_URL "$p/sw/sent-api.json")" "$DB_URL"
+  lacks "$(cat "$p/fake.log")" "mock-db-pass"
+  lacks "$out" "mock-db-pass"
+}
+
+test_render_gives_an_app_its_database() {
+  local p="$WORK/db-rd" out
+  mkdir -p "$p/rd"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["8080:8080"]\n' > "$p/compose.yaml"
+  (cd "$p" && "$CLI" init --name sunbird render) >/dev/null 2>&1
+  printf 'owner_id = "usr-abc123def456"\nname_prefix = "sunbird"\n' > "$p/.freelunch/render/terraform.tfvars"
+  printf 'API_SECRET=s3cret-value\n' > "$p/.freelunch/api.env"
+  printf 'apps = {\n  api = { host = "render-main", compose = "../compose.yaml", env_file = "api.env" }\n}\n' > "$p/.freelunch/apps.tfvars"
+  FREELUNCH_AUTO_APPROVE=1 rd_in "$p" apply render >/dev/null 2>&1
+  give_database "$p"
+  out="$(rd_in "$p" deploy 2>&1)"
+  equals "$(jq -r '.envVars[] | select(.key == "DATABASE_URL") | .value' "$p/rd/sent-sunbird-api.json")" "$DB_URL"
+  lacks "$(cat "$p/fake.log")" "mock-db-pass"
+  lacks "$out" "mock-db-pass"
+}
+
+# A database an engine without a state file made (an api or cli provider) is in the outputs of
+# that provider's record in the state store, and reaches the app the same way.
+test_deploy_reads_a_database_from_an_engine_record() {
+  local p="$WORK/db-rec" out
+  new_project "$p"
+  state_store "$p"
+  mkdir -p "$p/.freelunch/deno-deploy"
+  sed -i.bak 's|env_file = "api.env" }|env_file = "api.env", database = "turso-app" }|' "$p/.freelunch/apps.tfvars"
+  # no record yet: stopped, saying what is known
+  if out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "Apps use databases that no stack has made: api (database turso-app)"
+  jq -n '{engine: "api", resources: [], outputs: {
+      databases: [{provider: "turso", name: "app", engine: "libsql"}],
+      database_credentials: {"turso-app": {url: "libsql://app-me.turso.io?authToken=mock-token"}}}}' > "$p/rec.json"
+  in_dir "$p" "$CLI" state record push deno-deploy "$p/rec.json" >/dev/null 2>&1
+  GHCR_TOKEN=ghp_test-token deploy_in "$p" >/dev/null 2>&1
+  contains "$(cat "$p/host/apps/api/.env")" "DATABASE_URL=libsql://app-me.turso.io?authToken=mock-token"
+  out="$(GHCR_TOKEN=ghp_test-token deploy_in "$p" --dry-run 2>&1)"
+  lacks "$out" "mock-token"
+}
+
+# A provider's engine is what its provider.yaml says, or what its iac implies.
+test_engine_of_defaults_from_iac() {
+  equals "$("$CLI" engine render)" tofu
+  equals "$("$CLI" engine neon)" tofu
+  equals "$("$CLI" engine back4app)" guided
+  equals "$("$CLI" engine render platform)" tofu
+  if "$CLI" engine nonesuch >/dev/null 2>&1; then echo "engine nonesuch should fail"; return 1; fi
+}
+
+# An engine's record goes to the store as a state of its own, and works with nothing local
+# but the store's settings: a clean directory reads it, changes it, and its cache is optional.
+test_records_round_trip_through_the_store() {
+  local p="$WORK/rec" q="$WORK/rec-clean" out
+  mkdir -p "$p/.freelunch"
+  state_store "$p"
+  printf '{"engine":"api","resources":[{"id":"app-1","name":"freelunch","kind":"app","marker":"freelunch","created":"2026-11-08"}]}\n' > "$p/rec.json"
+  in_dir "$p" "$CLI" state record push deno "$p/rec.json" 2>&1 | grep -q "copied the record to the store (serial 1)"
+  exists "$p-store/record-deno.tfstate"
+  if grep -q OpenTofu <<< "$(CHECKPOINT_DISABLE=1 "$REAL_TF" version)"; then fails grep -q 'app-1' "$p-store/record-deno.tfstate"; fi
+  # A clean directory: the settings and the passphrase, no records folder, no stacks.
+  mkdir -p "$q/.freelunch"
+  cp "$p/.freelunch/state.local.tfbackend" "$p/.freelunch/.env" "$q/.freelunch/"
+  out="$(in_dir "$q" "$CLI" state record pull deno 2>/dev/null)"
+  equals "$(jq -r '.resources[0].id' <<< "$out")" app-1
+  equals "$(jq -r '.serial' <<< "$out")" 1
+  # Change it there, push; the first directory sees the new one without any cache.
+  jq '.resources += [{"id":"dom-1","name":"d","kind":"domain","marker":"freelunch","created":"2026-11-08"}]' <<< "$out" > "$q/rec.json"
+  in_dir "$q" "$CLI" state record push deno "$q/rec.json" 2>&1 | grep -q "(serial 2)"
+  rm -rf "$p/.freelunch/records"
+  equals "$(in_dir "$p" "$CLI" state record pull deno 2>/dev/null | jq -r '.resources | length')" 2
+  # A provider with no record yet pulls nothing.
+  equals "$(in_dir "$p" "$CLI" state record pull nosuchprovider 2>/dev/null)" ""
+}
+
+test_records_older_copy_is_refused() {
+  local p="$WORK/rec-old" out base
+  mkdir -p "$p/.freelunch"
+  state_store "$p"
+  printf '{"engine":"api","resources":[]}\n' > "$p/rec.json"
+  in_dir "$p" "$CLI" state record push deno "$p/rec.json" >/dev/null 2>&1
+  base="$(in_dir "$p" "$CLI" state record pull deno 2>/dev/null)"
+  # Two machines start from serial 1; the first one gets in, the second is refused.
+  jq '.resources += [{"id":"a"}]' <<< "$base" > "$p/a.json"
+  jq '.resources += [{"id":"b"}]' <<< "$base" > "$p/b.json"
+  in_dir "$p" "$CLI" state record push deno "$p/a.json" >/dev/null 2>&1
+  if out="$(in_dir "$p" "$CLI" state record push deno "$p/b.json" 2>&1)"; then echo "push should have been refused"; return 1; fi
+  contains "$out" "the store has a newer record"
+  equals "$(in_dir "$p" "$CLI" state record pull deno 2>/dev/null | jq -r '.resources[0].id')" a
+  # Another lineage is refused too; --force takes it.
+  jq '.lineage = "somebody-else" | .serial = 9' <<< "$base" > "$p/c.json"
+  if out="$(in_dir "$p" "$CLI" state record push deno "$p/c.json" 2>&1)"; then echo "push should have been refused"; return 1; fi
+  contains "$out" "another one"
+  in_dir "$p" "$CLI" state record push deno "$p/c.json" --force >/dev/null 2>&1
+  equals "$(in_dir "$p" "$CLI" state record pull deno 2>/dev/null | jq -r '.lineage')" "$(jq -r .lineage "$p/c.json")"
+}
 
 # With a state store, a command starts from the store's copy of each stack's state when it
 # is newer, and one that applies copies it back, so another machine sees what one did. Two
@@ -3193,6 +3983,295 @@ test_ci_init_hands_each_secret_to_the_step() {
   ci_in "$p" ci init --bundle >/dev/null 2>&1
   grep -q 'bundle: ${{ secrets.FREELUNCH_BUNDLE }}' "$w"
   fails grep -q 'CLOUDFLARE_API_TOKEN' "$w"
+}
+
+# ci init puts the secrets the workflows pass on in the repository with gh when asked to, and
+# only then: --set-secrets does, --print-secrets and a run nobody can answer only print, and an
+# interactive run asks which. The values never reach gh's command line.
+test_ci_init_hands_over_secrets_only_as_asked() {
+  local p="$WORK/ci-hand" out
+  doctor_project "$p"
+  state_store "$p"
+  echo "CLOUDFLARE_API_TOKEN=cf-from-env" >> "$p/.freelunch/.env"
+  # Nobody to answer: it prints what to run and sets nothing.
+  out="$(ci_in "$p" ci init < /dev/null 2>&1)"
+  contains "$out" "CLOUDFLARE_API_TOKEN: Cloudflare API token"
+  contains "$out" "gh secret set CLOUDFLARE_API_TOKEN"
+  fails grep -q '^gh secret set' "$p/fake.log"
+  rm -r "$p/.github"
+  out="$(ci_in "$p" ci init --print-secrets 2>&1)"
+  fails grep -q '^gh secret set' "$p/fake.log"
+  rm -r "$p/.github"
+  # --set-secrets: the value from .env, read from stdin; what has no value here is said, not invented.
+  out="$(ci_in "$p" ci init --set-secrets 2>&1)"
+  contains "$out" "set the secret CLOUDFLARE_API_TOKEN in me/shop"
+  grep -qx 'gh secret set CLOUDFLARE_API_TOKEN --repo me/shop' "$p/fake.log"
+  equals "$(cat "$p/gh/CLOUDFLARE_API_TOKEN")" "cf-from-env"
+  fails grep -q 'cf-from-env' "$p/fake.log"
+  grep -qx 'key_file=~/.oci/freelunch_api_key.pem' "$p/gh/FREELUNCH_OCI_CONFIG"
+  fails grep -q 'user=' "$p/fake.log"
+  # Terraform can't encrypt the state, so there is no passphrase to hand over.
+  if is_opentofu; then contains "$out" "FREELUNCH_STATE_PASSPHRASE"; fi
+  contains "$out" "still to set:"
+  rm -r "$p/.github" "$p/gh"
+  # Asked, and the answer is print or set.
+  out="$(printf 'print\n' | FREELUNCH_INTERACTIVE=1 ci_in "$p" ci init 2>&1)"
+  contains "$out" "Set the"
+  absent "$p/gh/CLOUDFLARE_API_TOKEN"
+  rm -r "$p/.github"
+  printf 'set\n' | FREELUNCH_INTERACTIVE=1 ci_in "$p" ci init >/dev/null 2>&1
+  equals "$(cat "$p/gh/CLOUDFLARE_API_TOKEN")" "cf-from-env"
+}
+
+# One workflow per job: provision plans on a pull request, applies on a merge and destroys only
+# by hand with the repository's name typed; CI checks the config with no secret; provision and
+# the deploy share a concurrency group; and a fork's pull request never provisions.
+test_ci_init_writes_a_workflow_per_job() {
+  local p="$WORK/ci-jobs" prov check
+  doctor_project "$p"
+  state_store "$p"
+  ci_in "$p" ci init --print-secrets >/dev/null 2>&1
+  prov="$p/.github/workflows/freelunch-provision.yml"
+  check="$p/.github/workflows/freelunch-ci.yml"
+  exists "$prov"; exists "$check"; exists "$p/.github/workflows/freelunch.yml"
+  # provision: plan, apply, destroy
+  grep -q "run: \${{ github.event_name == 'pull_request' && 'plan all' || github.event_name == 'push' && 'apply all' || inputs.action == 'doctor' && 'doctor' || format('{0} all', inputs.action) }}" "$prov"
+  grep -q "FREELUNCH_AUTO_APPROVE: \${{ github.event_name != 'pull_request' && inputs.action != 'plan' && inputs.action != 'doctor' && '1' || '' }}" "$prov"
+  grep -q "inputs.confirm != github.event.repository.name" "$prov"
+  grep -qx '    paths: \[".freelunch/\*\*"\]' "$prov"
+  # one run at a time with the deploy
+  grep -qx '  group: freelunch' "$prov"
+  grep -qx '  group: freelunch' "$p/.github/workflows/freelunch.yml"
+  # never from a fork
+  grep -q "github.event.pull_request.head.repo.full_name == github.repository" "$prov"
+  # the secrets reach the freelunch step and no other
+  grep -q 'CLOUDFLARE_API_TOKEN: \${{ secrets.CLOUDFLARE_API_TOKEN }}' "$prov"
+  equals "$(grep -c 'secrets\.' "$prov")" "$(grep -c 'secrets\.' <(sed -n '/uses: freelunch-sh/,$p' "$prov"))"
+  # CI: the check, with no secret at all, and read-only
+  grep -q '          run: check' "$check"
+  fails grep -q 'secrets\.' "$check"
+  grep -qx '  contents: read' "$check"
+  if command -v actionlint >/dev/null; then actionlint "$prov" "$check" "$p/.github/workflows/freelunch.yml" "$p/.github/workflows/freelunch-wait.yml"; fi
+  # --jobs picks which
+  rm -r "$p/.github"
+  ci_in "$p" ci init --print-secrets --jobs=ci >/dev/null 2>&1
+  exists "$check"; absent "$prov"; absent "$p/.github/workflows/freelunch.yml"; absent "$p/.github/workflows/freelunch-wait.yml"
+  if ci_in "$p" ci init --jobs=deploy >/dev/null 2>&1; then echo "an unknown job should fail"; return 1; fi
+}
+
+# Keyless sign-in to AWS: ci oidc aws asks (or is told) whether to run the aws commands or print
+# them; the role it makes trusts this repository's main branch and its pull requests only, and has
+# no permissions unless --policy-arn says which. Once set up, the workflows sign in with it and
+# the AWS key secrets are no longer asked for.
+test_ci_oidc_aws_sets_up_keyless_sign_in() {
+  local p="$WORK/ci-oidc" out w
+  doctor_project "$p"
+  state_store "$p"
+  (cd "$p" && "$CLI" init aws) >/dev/null 2>&1
+  # before: the keys are secrets
+  out="$(ci_in "$p" ci init --print-secrets 2>&1)"
+  contains "$out" "AWS_ACCESS_KEY_ID"
+  rm -r "$p/.github"
+  # print: the commands and the trust policy, nothing run, nothing remembered
+  out="$(ci_in "$p" ci oidc aws --print 2>&1)"
+  contains "$out" "aws iam create-role --role-name freelunch-me-shop"
+  contains "$out" "repo:me/shop:ref:refs/heads/main"
+  contains "$out" "gh variable set AWS_ROLE_ARN --repo me/shop --body arn:aws:iam::123456789012:role/freelunch-me-shop"
+  fails grep -q '^aws iam create' "$p/fake.log"
+  absent "$p/.freelunch/oidc"
+  # nobody to answer: print as well
+  ci_in "$p" ci oidc aws < /dev/null >/dev/null 2>&1
+  fails grep -q '^aws iam create' "$p/fake.log"
+  # run: the provider, the role with its trust, the policy asked for, the variables
+  out="$(ci_in "$p" ci oidc aws --run --policy-arn arn:aws:iam::aws:policy/PowerUserAccess 2>&1)"
+  grep -q '^aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com' "$p/fake.log"
+  grep -q '^aws iam create-role --role-name freelunch-me-shop' "$p/fake.log"
+  grep -q '^aws iam attach-role-policy --role-name freelunch-me-shop --policy-arn arn:aws:iam::aws:policy/PowerUserAccess' "$p/fake.log"
+  equals "$(jq -c '.Statement[0].Condition.StringLike["token.actions.githubusercontent.com:sub"]' "$p/gh/aws-trust.json")" '["repo:me/shop:ref:refs/heads/main","repo:me/shop:pull_request"]'
+  equals "$(jq -r '.Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:aud"]' "$p/gh/aws-trust.json")" sts.amazonaws.com
+  equals "$(cat "$p/gh/var-AWS_ROLE_ARN")" "arn:aws:iam::123456789012:role/freelunch-me-shop"
+  grep -qx aws "$p/.freelunch/oidc"
+  # the workflows sign in with it, and the keys are no longer secrets
+  ci_in "$p" ci init --print-secrets >/dev/null 2>&1
+  for w in freelunch freelunch-wait freelunch-provision; do
+    grep -q 'id-token: write' "$p/.github/workflows/$w.yml"
+    grep -q 'uses: aws-actions/configure-aws-credentials@v4' "$p/.github/workflows/$w.yml"
+    fails grep -q 'AWS_ACCESS_KEY_ID' "$p/.github/workflows/$w.yml"
+  done
+  fails grep -q 'id-token\|aws-actions' "$p/.github/workflows/freelunch-ci.yml"
+  grep -q 'role-to-assume: \${{ vars.AWS_ROLE_ARN }}' "$p/.github/workflows/freelunch.yml"
+  if command -v actionlint >/dev/null; then actionlint "$p"/.github/workflows/*.yml; fi
+  # again, with the provider and the role there already: nothing is made twice
+  : > "$p/fake.log"
+  FAKE_AWS_OIDC=1 FAKE_AWS_ROLE=1 ci_in "$p" ci oidc aws --run >/dev/null 2>&1
+  fails grep -q '^aws iam create' "$p/fake.log"
+  grep -q '^aws iam update-assume-role-policy --role-name freelunch-me-shop' "$p/fake.log"
+  # asked, interactively
+  rm "$p/.freelunch/oidc"; : > "$p/fake.log"
+  printf 'print\n' | FREELUNCH_INTERACTIVE=1 ci_in "$p" ci oidc aws >/dev/null 2>&1
+  fails grep -q '^aws iam create' "$p/fake.log"
+  printf 'run\n' | FREELUNCH_INTERACTIVE=1 ci_in "$p" ci oidc aws >/dev/null 2>&1
+  grep -q '^aws iam create-role' "$p/fake.log"
+  # the others aren't built yet, and say so
+}
+
+# Keyless sign-in to Google Cloud: a pool and a provider that only take this repository's main
+# branch and pull requests, a service account with no roles unless --role says, and the
+# variables the sign-in step reads.
+test_ci_oidc_gcp_sets_up_keyless_sign_in() {
+  local p="$WORK/ci-oidc-gcp" out w line
+  doctor_project "$p"
+  state_store "$p"
+  # no project known: say so
+  if out="$(ci_in "$p" ci oidc gcp --print 2>&1)"; then echo "a missing project should fail"; return 1; fi
+  contains "$out" "which Google Cloud project?"
+  # print: in an order that works, quoted so it can be pasted, nothing run
+  out="$(ci_in "$p" ci oidc gcp --print --project my-proj 2>&1)"
+  contains "$out" "gcloud iam workload-identity-pools create freelunch --project my-proj"
+  contains "$out" "gcloud iam service-accounts create freelunch-ci --project my-proj"
+  # the printed command, read back by a shell, hands gcloud the condition whole
+  line="$(grep 'providers create-oidc' <<< "$out" | head -1)"
+  eval "set -- $line"
+  while [[ "$1" != --attribute-condition ]]; do shift; done
+  equals "$2" "assertion.repository == 'me/shop' && (assertion.ref == 'refs/heads/main' || assertion.event_name == 'pull_request')"
+  contains "$out" "gh variable set GCP_SERVICE_ACCOUNT --repo me/shop --body freelunch-ci@my-proj.iam.gserviceaccount.com"
+  [[ "${out%%providers create-oidc*}" == *"pools create freelunch"*"service-accounts create"* ]] || { echo "the pool and the account come before the provider"; return 1; }
+  fails grep -q '^gcloud iam .* create' "$p/fake.log"
+  absent "$p/.freelunch/oidc"
+  # run
+  out="$(ci_in "$p" ci oidc gcp --run --project my-proj --role roles/run.admin 2>&1)"
+  grep -q '^gcloud iam workload-identity-pools create freelunch --project my-proj' "$p/fake.log"
+  grep -q "^gcloud iam workload-identity-pools providers create-oidc github .*--attribute-condition assertion.repository == 'me/shop' && (assertion.ref == 'refs/heads/main' || assertion.event_name == 'pull_request')" "$p/fake.log"
+  grep -q '^gcloud iam service-accounts add-iam-policy-binding freelunch-ci@my-proj.iam.gserviceaccount.com .*--role roles/iam.workloadIdentityUser --member principalSet://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/freelunch/attribute.repository/me/shop' "$p/fake.log"
+  grep -q '^gcloud projects add-iam-policy-binding my-proj --member serviceAccount:freelunch-ci@my-proj.iam.gserviceaccount.com --role roles/run.admin' "$p/fake.log"
+  equals "$(cat "$p/gh/var-GCP_WORKLOAD_IDENTITY_PROVIDER")" "projects/123456789/locations/global/workloadIdentityPools/freelunch/providers/github"
+  grep -qx gcp "$p/.freelunch/oidc"
+  # the workflows sign in with it
+  ci_in "$p" ci init --print-secrets >/dev/null 2>&1
+  for w in freelunch freelunch-wait freelunch-provision; do
+    grep -q 'id-token: write' "$p/.github/workflows/$w.yml"
+    grep -q 'uses: google-github-actions/auth@v2' "$p/.github/workflows/$w.yml"
+  done
+  fails grep -q 'google-github-actions' "$p/.github/workflows/freelunch-ci.yml"
+  grep -q 'workload_identity_provider: \${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}' "$p/.github/workflows/freelunch.yml"
+  if command -v actionlint >/dev/null; then actionlint "$p"/.github/workflows/*.yml; fi
+  # what is there already is not made twice; the provider is updated
+  : > "$p/fake.log"
+  FAKE_GCP_EXISTS=1 ci_in "$p" ci oidc gcp --run --project my-proj >/dev/null 2>&1
+  fails grep -q 'pools create\|service-accounts create' "$p/fake.log"
+  grep -q 'providers update-oidc github' "$p/fake.log"
+  # the project from the stack's tfvars
+  mkdir -p "$p/.freelunch/gcp" && echo 'project_id = "from-tfvars"' > "$p/.freelunch/gcp/terraform.tfvars"
+  contains "$(ci_in "$p" ci oidc gcp --print 2>&1)" "--project from-tfvars"
+}
+
+# Keyless sign-in to Azure: an app registration with federated credentials for this repository's
+# main branch and pull requests, no roles unless --role says, and the variables azure/login reads.
+test_ci_oidc_azure_sets_up_keyless_sign_in() {
+  local p="$WORK/ci-oidc-azure" out w
+  doctor_project "$p"
+  state_store "$p"
+  # print: the commands, nothing run
+  out="$(ci_in "$p" ci oidc azure --print --role Contributor 2>&1)"
+  contains "$out" "az ad app create --display-name 'freelunch-me-shop'"
+  contains "$out" '"subject":"repo:me/shop:ref:refs/heads/main"'
+  contains "$out" '"subject":"repo:me/shop:pull_request"'
+  contains "$out" "az role assignment create --assignee \"\$APP_ID\" --role 'Contributor' --scope /subscriptions/sub-4444"
+  fails grep -q '^az ad app create' "$p/fake.log"
+  absent "$p/.freelunch/oidc"
+  # run
+  out="$(ci_in "$p" ci oidc azure --run --role Contributor 2>&1)"
+  grep -q '^az ad app create --display-name freelunch-me-shop' "$p/fake.log"
+  grep -q '^az ad sp create --id app-1111' "$p/fake.log"
+  equals "$(jq -r '.subject' "$p/gh/azure-cred-main.json")" "repo:me/shop:ref:refs/heads/main"
+  equals "$(jq -r '.subject' "$p/gh/azure-cred-pull-request.json")" "repo:me/shop:pull_request"
+  equals "$(jq -r '.audiences[0]' "$p/gh/azure-cred-main.json")" "api://AzureADTokenExchange"
+  grep -q '^az role assignment create --assignee app-1111 --role Contributor --scope /subscriptions/sub-4444' "$p/fake.log"
+  equals "$(cat "$p/gh/var-AZURE_CLIENT_ID")" app-1111
+  equals "$(cat "$p/gh/var-AZURE_TENANT_ID")" tenant-3333
+  equals "$(cat "$p/gh/var-AZURE_SUBSCRIPTION_ID")" sub-4444
+  grep -qx azure "$p/.freelunch/oidc"
+  # the workflows sign in with it
+  ci_in "$p" ci init --print-secrets >/dev/null 2>&1
+  for w in freelunch freelunch-wait freelunch-provision; do
+    grep -q 'id-token: write' "$p/.github/workflows/$w.yml"
+    grep -q 'uses: azure/login@v2' "$p/.github/workflows/$w.yml"
+  done
+  fails grep -q 'azure/login' "$p/.github/workflows/freelunch-ci.yml"
+  grep -q 'client-id: \${{ vars.AZURE_CLIENT_ID }}' "$p/.github/workflows/freelunch.yml"
+  if command -v actionlint >/dev/null; then actionlint "$p"/.github/workflows/*.yml; fi
+  # what is there already is not made twice, and the missing credential is added
+  : > "$p/fake.log"; rm "$p/gh/azure-cred-"*
+  FAKE_AZ_EXISTS=1 ci_in "$p" ci oidc azure --run >/dev/null 2>&1
+  fails grep -q '^az ad app create\|^az ad sp create' "$p/fake.log"
+  absent "$p/gh/azure-cred-main.json"
+  exists "$p/gh/azure-cred-pull-request.json"
+  # asked, with nobody to answer: print
+  : > "$p/fake.log"
+  ci_in "$p" ci oidc azure < /dev/null >/dev/null 2>&1
+  fails grep -q '^az ad app create' "$p/fake.log"
+  if out="$(ci_in "$p" ci oidc nonesuch 2>&1)"; then echo "an unknown cloud should fail"; return 1; fi
+  contains "$out" "aws, gcp or azure"
+}
+
+# ci init says where each secret comes from, passes on the state store's own credentials, puts
+# the settings that are no secret in the repository's variables, creates the state store when asked,
+# and starts a first doctor run in Actions only when asked.
+test_ci_init_guides_the_secrets_and_the_first_run() {
+  local p="$WORK/ci-guide" out
+  doctor_project "$p"
+  state_store "$p"
+  printf 'FREELUNCH_STATE_AWS_ACCESS_KEY_ID=ak-state\nCLOUDFLARE_ACCOUNT_ID=acc-123\n' >> "$p/.freelunch/.env"
+  # where to get each, in what is printed and in what is left unset
+  out="$(ci_in "$p" ci init --print-secrets 2>&1)"
+  contains "$out" "get it from: dash.cloudflare.com > My Profile > API Tokens"
+  # Terraform can't encrypt the state, so there is no passphrase to hand over.
+  if is_opentofu; then contains "$out" "get it from: the FREELUNCH_STATE_PASSPHRASE line in .freelunch/.env"; fi
+  # the state store's credentials are secrets of their own, and the account ID a variable
+  contains "$out" "FREELUNCH_STATE_AWS_ACCESS_KEY_ID: the state store's credential"
+  contains "$out" "CLOUDFLARE_ACCOUNT_ID (a variable, not a secret)"
+  grep -q 'FREELUNCH_STATE_AWS_ACCESS_KEY_ID: \${{ secrets.FREELUNCH_STATE_AWS_ACCESS_KEY_ID }}' "$p/.github/workflows/freelunch.yml"
+  grep -q 'CLOUDFLARE_ACCOUNT_ID: \${{ vars.CLOUDFLARE_ACCOUNT_ID }}' "$p/.github/workflows/freelunch.yml"
+  fails grep -q 'secrets.CLOUDFLARE_ACCOUNT_ID' "$p/.github/workflows/freelunch.yml"
+  if command -v actionlint >/dev/null; then actionlint "$p"/.github/workflows/*.yml; fi
+  rm -r "$p/.github"
+  out="$(ci_in "$p" ci init --set-secrets 2>&1)"
+  equals "$(cat "$p/gh/FREELUNCH_STATE_AWS_ACCESS_KEY_ID")" ak-state
+  equals "$(cat "$p/gh/var-CLOUDFLARE_ACCOUNT_ID")" acc-123
+  contains "$out" "Get it from: dash.cloudflare.com > My Profile > API Tokens"
+  # the first run: not unless asked; not before GitHub has the workflows
+  fails grep -q '^gh workflow run' "$p/fake.log"
+  rm -r "$p/.github"
+  out="$(ci_in "$p" ci init --print-secrets --first-run 2>&1)"
+  contains "$out" "GitHub doesn't have the workflows yet"
+  fails grep -q '^gh workflow run' "$p/fake.log"
+  rm -r "$p/.github"
+  FAKE_WORKFLOWS="freelunch-provision freelunch" ci_in "$p" ci init --print-secrets --first-run >/dev/null 2>&1
+  grep -qx 'gh workflow run freelunch-provision.yml --repo me/shop -f action=doctor' "$p/fake.log"
+  : > "$p/fake.log"; rm -r "$p/.github"
+  printf 'no\n' | FREELUNCH_INTERACTIVE=1 FAKE_WORKFLOWS="freelunch-provision" ci_in "$p" ci init --print-secrets >/dev/null 2>&1
+  fails grep -q '^gh workflow run' "$p/fake.log"
+  rm -r "$p/.github"
+  FAKE_WORKFLOWS="freelunch-provision" ci_in "$p" ci init --print-secrets --no-first-run >/dev/null 2>&1
+  fails grep -q '^gh workflow run' "$p/fake.log"
+}
+
+# With no state store, ci init creates one when told which (--state=git is a branch of the
+# repository), and its passphrase is then among the secrets.
+test_ci_init_creates_the_state_store_when_asked() {
+  local p="$WORK/ci-store" out
+  is_opentofu || return 0
+  git_project "$p"
+  # nothing asked, nobody to answer: no store, and it says what to run
+  out="$(ci_in "$p" ci init --print-secrets < /dev/null 2>&1)"
+  absent "$p/.freelunch/state.git.tfbackend"
+  contains "$out" "freelunch state init git (or oci, r2, b2, gitlab)"
+  rm -r "$p/.github"
+  out="$(ci_in "$p" ci init --print-secrets --state=git 2>&1)"
+  exists "$p/.freelunch/state.git.tfbackend"
+  contains "$out" "FREELUNCH_STATE_PASSPHRASE"
+  grep -q 'contents: write' "$p/.github/workflows/freelunch.yml"
+  if ci_in "$p" ci init --state=dropbox >/dev/null 2>&1; then echo "an unknown store should fail"; return 1; fi
 }
 
 # ci restore writes the files the secrets carry, and the key that goes with the profile.
@@ -3896,9 +4975,9 @@ test_up_checks_the_targets_it_is_given() {
   up_project "$p" cloudflare
   if out="$(up_in "$p" --dry-run 2>&1)"; then echo "up should have failed"; return 1; fi
   contains "$out" "targets in apps.tfvars: cloudflare is a glue stack, not a host or a container platform"
-  up_project "$p" oci koyeb
+  up_project "$p" oci linode
   if out="$(up_in "$p" --dry-run 2>&1)"; then echo "up should have failed"; return 1; fi
-  contains "$out" "targets in apps.tfvars: koyeb has no stack yet (status: planned)"
+  contains "$out" "targets in apps.tfvars: linode has no stack yet (status: planned)"
   up_project "$p" oci northflank
   rm "$p/.freelunch/northflank/terraform.tfvars"
   if out="$(up_in "$p" --dry-run 2>&1)"; then echo "up should have failed"; return 1; fi
@@ -4019,7 +5098,7 @@ setup_in() {
     printf '[DEFAULT]\nuser=ocid1.user.oc1..me\nfingerprint=aa:bb\nkey_file=~/.oci/key.pem\ntenancy=ocid1.tenancy.oc1..mytenancy\nregion=uk-london-1\n' > "$dir/home/.oci/config"
     [[ -f "$dir/home/.ssh/id_ed25519.pub" ]] || ssh-keygen -q -t ed25519 -N '' -C me@laptop -f "$dir/home/.ssh/id_ed25519"
   fi
-  (cd "$dir" && env -u CLOUDFLARE_API_TOKEN -u NORTHFLANK_API_TOKEN -u SCW_SECRET_KEY HOME="$dir/home" PATH="$WORK/bin:$PATH" "$CLI" setup "$@")
+  (cd "$dir" && env -u CLOUDFLARE_API_TOKEN -u NORTHFLANK_API_TOKEN -u SCW_SECRET_KEY -u RENDER_API_KEY HOME="$dir/home" PATH="$WORK/bin:$PATH" "$CLI" setup "$@")
 }
 
 # setup finds what the clouds' own config has and writes the project; what it can't find is
@@ -4095,7 +5174,7 @@ test_setup_says_what_is_wrong() {
   # The state goes in a branch of the project's repository, which has to be one.
   sed -i.bak 's/^NORTHFLANK_API_TOKEN=.*/NORTHFLANK_API_TOKEN=x/' "$p/.freelunch/.env" && rm "$p/.freelunch/.env.bak"
   if out="$(TEST_NO_HOME=1 setup_in "$p" --ci --no-doctor 2>&1)"; then echo "setup should have failed"; return 1; fi
-  if CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu; then
+  if is_opentofu; then
     contains "$out" "state init git: $p isn't a git repository"
   else
     contains "$out" "state init git: the state goes into your repository"
@@ -4139,7 +5218,7 @@ git_project() {
 # nothing else, shared with a clone through the remote, and nothing of it left in the checkout.
 test_git_state_store_keeps_the_state_in_a_branch() {
   local p="$WORK/gitstore" q="$WORK/gitstore-clone" out
-  CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu || return 0
+  is_opentofu || return 0
   git_project "$p"
   out="$(in_dir "$p" "$CLI" state init git 2>&1)"
   contains "$out" "state.git.tfbackend: the state goes to the branch freelunch-state of this repository, encrypted"
@@ -4180,7 +5259,7 @@ test_git_state_store_needs_a_repository_and_opentofu() {
   new_project "$p"
   if out="$(in_dir "$p" "$CLI" state init git 2>&1)"; then echo "state init should have failed"; return 1; fi
   # Terraform can't encrypt the state, so it stops before it looks at the repository.
-  if CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu; then
+  if is_opentofu; then
     contains "$out" "isn't a git repository (git init, commit, and add a remote)"
   else
     contains "$out" "takes OpenTofu"
@@ -4191,7 +5270,7 @@ test_git_state_store_needs_a_repository_and_opentofu() {
 # A state kept in the repository's own branch is pushed by the workflows, so they may write.
 test_ci_init_lets_the_workflows_push_the_git_state() {
   local p="$WORK/ci-git" wait
-  CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu || return 0
+  is_opentofu || return 0
   git_project "$p"
   in_dir "$p" "$CLI" state init git >/dev/null 2>&1
   ci_in "$p" ci init >/dev/null 2>&1
@@ -4208,7 +5287,7 @@ test_ci_init_lets_the_workflows_push_the_git_state() {
 # A state file changed in the branch is refused, not read: the encryption is authenticated.
 test_git_state_store_refuses_a_tampered_file() {
   local p="$WORK/gitstore-tamper" t="$WORK/gitstore-tamper-edit" out
-  CHECKPOINT_DISABLE=1 "$REAL_TF" version | grep -q OpenTofu || return 0
+  is_opentofu || return 0
   git_project "$p"
   in_dir "$p" "$CLI" state init git >/dev/null 2>&1
   in_dir "$p" "$CLI" state push >/dev/null 2>&1
@@ -4263,8 +5342,35 @@ test_up_with_no_domain_says_where_the_app_is() {
   contains "$out" "up: oci-main runs the app, but nothing serves it to the internet: a VM needs a domain on Cloudflare (freelunch setup --domain <name>) or an open port of its own"
 }
 
-# tests/cli.sh <pattern>: only the tests whose name matches the pattern (grep -E)
+# tests/cli.sh [-j N] [pattern]: only the tests whose name matches the pattern (grep -E), N at a
+# time (default: one per CPU; -j 1 runs them in turn, in order). Each test works in names of its
+# own under a temp folder, so they don't get in each other's way. SLOW=1 lists the slowest.
+jobs="${TEST_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
+if [[ "${1:-}" == -j ]]; then jobs="${2:?-j takes a number}"; shift 2; fi
 echo "tests/cli.sh"
-for t in $(declare -F | awk '{print $3}' | grep '^test_' | sed 's/^test_//' | grep -E "${1:-.}"); do run_test "$t"; done
+# shellcheck disable=SC2207 # bash 3.2 has no mapfile
+tests=($(declare -F | awk '{print $3}' | grep '^test_' | sed 's/^test_//' | grep -E "${1:-.}"))
+reported=" "
+if [[ $jobs -le 1 ]]; then
+  for t in "${tests[@]}"; do run_test "$t"; report_test "$t"; done
+else
+  # keep $jobs tests going; report each as it finishes
+  next=0
+  while [[ $next -lt ${#tests[@]} || $(jobs -r | wc -l) -gt 0 ]]; do
+    while [[ $next -lt ${#tests[@]} && $(jobs -r | wc -l) -lt $jobs ]]; do
+      run_test "${tests[$next]}" &
+      next=$((next + 1))
+    done
+    for t in "${tests[@]}"; do
+      [[ "$reported" != *" $t "* && -f "$WORK/results/$t" ]] && report_test "$t"
+    done
+    sleep 0.2
+  done
+  wait
+  for t in "${tests[@]}"; do [[ "$reported" == *" $t "* ]] || report_test "$t"; done
+fi
+if [[ -n "${SLOW:-}" && -f "$WORK/times" ]]; then
+  echo "slowest:"; sort -rn "$WORK/times" | head -8 | sed 's/^/  /'
+fi
 echo "$passed passed, $failed failed"
 [ "$failed" -eq 0 ]

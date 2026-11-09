@@ -346,6 +346,20 @@ that bucket alone. The AWS SDKs, boto3 and the aws CLI read the first four witho
 so the app uses `S3_BUCKET` and writes there instead of to disk. On a VM they go into the
 app's `.env`, so keep `env_file: .env` in the Compose service.
 
+### Use a managed database
+
+The same works for a database. Make one with a database stack (say [neon](../providers/neon/),
+which has a free tier and scales to zero) and name it in `apps.tfvars`:
+
+```hcl
+api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", database = "neon-main" }
+```
+
+`deploy` puts `DATABASE_URL`, the full connection string, into the app's environment, in the
+`.env` on a VM (keep `env_file: .env` in the Compose service) or the service's environment on a
+platform. It holds the password, so the dry run and the logs leave it out, and your own `env_file`
+can override it.
+
 ## 6. Deploy
 
 ```bash

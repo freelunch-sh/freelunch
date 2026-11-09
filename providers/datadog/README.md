@@ -9,6 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | no |
 | **Terraform provider** | [`DataDog/datadog`](https://registry.terraform.io/providers/DataDog/datadog/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

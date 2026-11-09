@@ -9,6 +9,7 @@
 | **Free tier** | ⏳ Trial credit (time-limited) |
 | **Card required** | yes |
 | **Terraform provider** | [`vultr/vultr`](https://registry.terraform.io/providers/vultr/vultr/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

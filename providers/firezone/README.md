@@ -9,6 +9,7 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | unknown |
 | **Terraform provider** | [`firezone/firezone`](https://registry.terraform.io/providers/firezone/firezone/latest) (community) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-19 |
 
 ## What's free

@@ -138,3 +138,16 @@ resource "cloudflare_account_token" "r2" {
     resources         = jsonencode({ "com.cloudflare.edge.r2.bucket.${local.account_id}_default_${cloudflare_r2_bucket.this[each.key].name}" = "*" })
   }]
 }
+
+# --- Workers and Pages -----------------------------------------------------------------
+
+module "edge" {
+  source = "../modules/edge"
+
+  account_id                     = local.account_id
+  zone                           = var.zone
+  name_prefix                    = var.name_prefix
+  workers                        = var.workers
+  pages                          = var.pages
+  acknowledge_billable_resources = var.acknowledge_billable_resources
+}

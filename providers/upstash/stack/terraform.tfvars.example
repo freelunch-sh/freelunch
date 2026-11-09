@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export UPSTASH_EMAIL (your account email) and UPSTASH_API_KEY (or put them in
+# .freelunch/.env). Make a key in the Upstash console under Account > Management API.
+
+# One Redis database per entry. The free plan has 250 MB of data, 500K commands a month and
+# 10 GB of bandwidth per database (the database count is checked: see provider.yaml).
+databases = {
+  cache = {}
+  # sessions = { primary_region = "eu-west-1", eviction = true }
+}

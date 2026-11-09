@@ -6,12 +6,13 @@ status: planned
 layer: platform
 terraform_provider: null
 iac: none
+engine: guided
 free_tier_type: always-free
 free_tier: "Hobby plan: 20 projects, 100k serverless invocations/month, 3 GB-hours compute, 2 GB transfer"
 card_required: "no"
 url: "https://leapcell.io/pricing"
-last_verified: "2026-10-18"
-notes: "Figures come from third-party trackers (May 2026). Verify on the pricing page."
+last_verified: "2026-11-08"
+notes: "Figures come from third-party trackers (May 2026). Verify on the pricing page. No public API reference for creating services was found (2026-11-08), so it cannot be automated yet. Declared guided: freelunch prints the manual steps and checks what it can, until an API exists."
 sources:
   - "agentdeals.dev/vendor/leapcell"
   - "freetier.co/directory/products/leapcell"

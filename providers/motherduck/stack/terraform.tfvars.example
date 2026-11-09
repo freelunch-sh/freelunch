@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export MOTHERDUCK_TOKEN (a token for your user, used for SQL) and
+# MOTHERDUCK_ADMIN_TOKEN (an organisation admin token, used for service accounts), or put them
+# in .freelunch/.env. Make tokens in the MotherDuck app under Settings.
+
+# One database per entry, each with a service account and a read_write token for it.
+# The Lite plan has 2 service accounts and 10 GB of storage in total.
+databases = {
+  main = {}
+  # analytics = { service_account = false }   # database only, no service account
+  # short     = { token_ttl_seconds = 86400 }
+}

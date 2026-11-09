@@ -2,18 +2,24 @@
 name: mongodb-atlas
 display_name: "MongoDB Atlas"
 category: databases
-status: planned
+status: ready
 layer: service
 terraform_provider: "mongodb/mongodbatlas"
 iac: partner
 free_tier_type: always-free
-free_tier: "M0 cluster with 512 MB storage"
+free_tier: "Free (M0) cluster: 512 MB storage, 500 connections, 100 ops/sec, 10 GB in and out per 7 days; one per project; paused after 30 days without a connection"
+behavior: pauses
 card_required: "no"
 url: "https://www.mongodb.com/pricing"
-last_verified: "2026-10-18"
+last_verified: "2026-11-08"
 notes: null
 sources:
+  - "mongodb.com/docs/atlas/reference/free-shared-limitations (checked 2026-11-08)"
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
 inspire:
   - "repos/terraform-providers/mongodb-terraform-provider-mongodbatlas"
+limits:
+  providers: [AWS, GCP, AZURE]
+  max_clusters: 5
+  storage_mb: 512

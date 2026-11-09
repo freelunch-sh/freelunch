@@ -9,6 +9,7 @@
 | **Free tier** | 💲 No free tier (paid) |
 | **Card required** | yes |
 | **Terraform provider** | [`exoscale/exoscale`](https://registry.terraform.io/providers/exoscale/exoscale/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

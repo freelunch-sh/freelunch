@@ -1,0 +1,10 @@
+# SnapDeploy has an API that deploys container images, but its own docs say a token cannot delete a
+# container, so freelunch destroy could not clean up what it made. It is refused for the api
+# engine (docs/api-adapter.md) and these steps are done by hand, deletion included.
+steps: |
+  1. Sign in at https://snapdeploy.dev (pricing: https://snapdeploy.dev/pricing).
+  2. Deploy your image from Docker Hub, ghcr.io, quay.io or ECR, with the port the app listens on
+     and its environment variables (your .freelunch env file).
+  3. The free plan sleeps containers after 15 minutes idle; the first request wakes them.
+  4. To remove a container, delete it in the dashboard: a token can deploy but not delete, so
+     freelunch has no way to do it.

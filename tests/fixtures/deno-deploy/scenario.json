@@ -1,0 +1,47 @@
+{
+  "token": "ddo_test_token_1234",
+  "ours_id": "11111111-1111-4111-8111-111111111111",
+  "foreign_id": "99999999-9999-4999-8999-999999999999",
+  "other_id": "33333333-3333-4333-8333-333333333333",
+  "source_files": {"main.ts": "Deno.serve(() => new Response('hi'));\n", "lib/util.ts": "export const x = 1;\n"},
+  "create": [
+    {"match": "GET /v2/apps", "status": 200, "body": []},
+    {"match": "POST /v2/apps", "status": 200, "body": {"id": "11111111-1111-4111-8111-111111111111", "slug": "freelunch-web", "labels": {"freelunch": "freelunch"}}},
+    {"match": "POST /v2/apps/11111111-1111-4111-8111-111111111111/deploy", "status": 202, "body": {"id": "rev1", "status": "queued"}},
+    {"match": "GET /v2/revisions/rev1", "status": 200, "body": {"id": "rev1", "status": "building", "timelines": []}},
+    {"match": "GET /v2/revisions/rev1", "status": 200, "body": {"id": "rev1", "status": "succeeded", "timelines": [{"name": "production", "context": "production", "hostnames": ["freelunch-web.me.deno.net"]}]}},
+    {"match": "GET /v2/apps", "status": 200, "body": [{"id": "11111111-1111-4111-8111-111111111111", "slug": "freelunch-web", "labels": {"freelunch": "freelunch"}, "layers": [], "created_at": "2026-11-08T00:00:00Z", "updated_at": "2026-11-08T00:00:00Z"}]}
+  ],
+  "update": [
+    {"match": "GET /v2/apps", "status": 200, "times": 2, "body": [{"id": "11111111-1111-4111-8111-111111111111", "slug": "freelunch-web", "labels": {"freelunch": "freelunch"}, "layers": [], "created_at": "2026-11-08T00:00:00Z", "updated_at": "2026-11-08T00:00:00Z"}]},
+    {"match": "PATCH /v2/apps/11111111-1111-4111-8111-111111111111", "status": 200, "body": {"id": "11111111-1111-4111-8111-111111111111", "slug": "freelunch-web"}},
+    {"match": "POST /v2/apps/11111111-1111-4111-8111-111111111111/deploy", "status": 202, "body": {"id": "rev2", "status": "queued"}},
+    {"match": "GET /v2/revisions/rev2", "status": 200, "body": {"id": "rev2", "status": "succeeded", "timelines": [{"name": "production", "context": "production", "hostnames": ["freelunch-web.me.deno.net"]}]}}
+  ],
+  "foreign": [
+    {"match": "GET /v2/apps", "status": 200, "body": [{"id": "99999999-9999-4999-8999-999999999999", "slug": "freelunch-web", "labels": {}, "layers": [], "created_at": "2026-11-08T00:00:00Z", "updated_at": "2026-11-08T00:00:00Z"}]}
+  ],
+  "failed": [
+    {"match": "GET /v2/apps", "status": 200, "body": []},
+    {"match": "POST /v2/apps", "status": 200, "body": {"id": "11111111-1111-4111-8111-111111111111", "slug": "freelunch-web"}},
+    {"match": "POST /v2/apps/11111111-1111-4111-8111-111111111111/deploy", "status": 202, "body": {"id": "rev1", "status": "queued"}},
+    {"match": "GET /v2/revisions/rev1", "status": 200, "body": {"id": "rev1", "status": "failed", "failure_reason": "error", "failure_detail": {"stage": "warmup", "code": "boot_failed", "message": "boom"}}}
+  ],
+  "failed_says": "is failed",
+  "rejected": [
+    {"match": "GET /v2/apps", "status": 200, "body": []},
+    {"match": "POST /v2/apps", "status": 400, "body": {"error": {"code": "INVALID_REQUEST", "message": "bad value supersecretvalue in env"}}}
+  ],
+  "destroy": [
+    {"match": "GET /v2/apps", "status": 200, "body": [
+      {"id": "11111111-1111-4111-8111-111111111111", "slug": "freelunch-web", "labels": {"freelunch": "freelunch"}, "layers": []},
+      {"id": "99999999-9999-4999-8999-999999999999", "slug": "freelunch-old", "labels": {}, "layers": []},
+      {"id": "33333333-3333-4333-8333-333333333333", "slug": "other-app", "labels": {"freelunch": "other"}, "layers": []}
+    ]},
+    {"match": "DELETE /v2/apps/11111111-1111-4111-8111-111111111111", "status": 404, "body": {"error": {"code": "NOT_FOUND", "message": "gone"}}}
+  ],
+  "record_only": [
+    {"match": "GET /v2/apps", "status": 200, "body": []},
+    {"match": "DELETE /v2/apps/11111111-1111-4111-8111-111111111111", "status": 204, "body": {}}
+  ]
+}

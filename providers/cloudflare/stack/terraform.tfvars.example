@@ -29,3 +29,12 @@ routes = {
 # buckets = {
 #   results = {}
 # }
+
+# Workers (one ES module each, 100,000 requests a day free) and Pages projects (the site's
+# files go up with `wrangler pages deploy`). Hostnames must be in the zone.
+# workers = {
+#   api = { script_file = "../apps/api/worker.js", hostname = "api.example.com" }
+# }
+# pages = {
+#   site = { hostname = "www.example.com" }
+# }

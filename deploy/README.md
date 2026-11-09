@@ -48,6 +48,14 @@ CLI read without any code. On a host they come first in the app's `.env`, so the
 `env_file` can override them, and the Compose service needs `env_file: .env` to see them;
 on a platform they are the service's environment, under the `env_file`'s values.
 
+`database` is `<provider>-<name>` of a managed database a stack made (`neon-main`,
+`supabase-app`). The app gets `DATABASE_URL`, the connection string, which most frameworks and
+ORMs read as it is. It goes where a bucket's settings go, on a host and on every platform, and
+an app can have both. The URL holds the password, so it is kept out of the dry run and the logs
+(in GitHub Actions it is also masked). A database that an engine without a state file made (an
+api or cli provider) is read from the outputs of that provider's record in the state store
+([architecture](../docs/architecture.md#database-contract)).
+
 ## Outputs
 
 | Output | Description |
@@ -67,7 +75,7 @@ The plan fails, before anything is copied, when:
 
 - an app names a host that is neither in the inventory nor given an `address` in `hosts`,
 - a `compose` or `env_file` path does not exist, or an app's `bucket` isn't one a storage
-  stack made,
+  stack made, or its `database` isn't one a database stack (or an engine's record) made,
 - an app is called `cloudflared`, or `password_env` is not a valid variable name,
 - on a platform: an app's Compose file has more than one service, has no image (only
   `build`), uses Compose variables in its image, or leaves an environment variable without

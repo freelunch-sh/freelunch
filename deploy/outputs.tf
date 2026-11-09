@@ -16,6 +16,11 @@ output "targets" {
     condition     = length(local.unknown_buckets) == 0
     error_message = "Apps use buckets that no storage stack has made: ${join(", ", local.unknown_buckets)}. Known buckets: ${length(local.buckets) > 0 ? join(", ", sort(keys(local.buckets))) : "none"}. Add the bucket to that stack's buckets and apply it (freelunch apply backblaze-b2)."
   }
+
+  precondition {
+    condition     = length(local.unknown_databases) == 0
+    error_message = "Apps use databases that no stack has made: ${join(", ", local.unknown_databases)}. Known databases: ${length(local.databases) > 0 ? join(", ", sort(keys(local.databases))) : "none"}. Add the database to that stack's databases and apply it (freelunch apply neon)."
+  }
 }
 
 output "platforms" {
@@ -73,7 +78,7 @@ output "tunnel_tokens" {
 }
 
 output "app_env" {
-  description = "Environment per app from its bucket: the S3 endpoint, region, bucket name and keys."
+  description = "Environment per app from its bucket (the S3 endpoint, region, bucket name and keys) and its database (DATABASE_URL)."
   value       = local.app_env
   sensitive   = true
 }

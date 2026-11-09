@@ -9,17 +9,18 @@
 | **Free tier** | ♾️ Always free (within limits) |
 | **Card required** | unknown |
 | **Terraform provider** | [`singlestore-labs/singlestoredb`](https://registry.terraform.io/providers/singlestore-labs/singlestoredb/latest) (partner) |
-| **Last verified** | 2026-10-18 |
+| **Engine** | `tofu` |
+| **Last verified** | 2026-11-08 |
 
 ## What's free
 
-Free shared tier
+Managed Shared edition: 1 free workspace (shared), for evaluation and non-production; storage and compute caps unverified
 
 > Free tiers change without notice. Check <https://www.singlestore.com/pricing/> before relying on this.
 
 ## Notes
 
-Limits not verified during research.
+Left planned: the singlestoredb provider (0.1.19) has no shared/free workspace resource. singlestoredb_workspace_group needs firewall_ranges and defaults to PRODUCTION deployment, and workspaces are sized S-00 and up, all billed. Caps, duration and card requirement of the free shared tier are unverified.
 
 ## Plan
 
@@ -28,6 +29,7 @@ Limits not verified during research.
 
 ## References
 
+- singlestore.com/pricing (checked 2026-11-08)
 - registry.terraform.io (checked 2026-10-18)
 
 ## Contributing

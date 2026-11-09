@@ -141,6 +141,35 @@ deployed stack that has them. An app names its bucket like a host, `bucket =
 "backblaze-b2-results"`, and gets its settings in its environment
 ([which](../deploy/README.md#appstfvars)).
 
+## Database contract
+
+A stack that makes databases (`neon`, `supabase` and the other managed databases) outputs
+`databases`, a list of objects with these attributes:
+
+| Attribute | Type | Example |
+|---|---|---|
+| `provider` | string | `neon` |
+| `name` | string | `main` (unique within the provider) |
+| `engine` | string | `postgres`, `mysql`, `redis`, `mongodb` ... |
+| `host` | string | the server's address |
+| `port` | number | `5432` |
+| `database` | string | the database's name |
+| `user` | string | the login |
+| `region` | string | where it runs |
+| `behavior` | string | what the free tier does when idle: `scale-to-zero`, `pauses`, `always-on` |
+
+and `database_credentials`, a sensitive map from `<provider>-<name>` to `{ password, url }`,
+where `url` is the full connection string. Read them with `freelunch output <provider> -json
+database_credentials`. An app names a database in `apps.tfvars` (`database = "neon-main"`, the
+way buckets work) and `deploy` puts `DATABASE_URL`, the connection string, in its environment on
+every host and platform; the URL is kept out of the dry run and the logs.
+
+An engine that has no state file (`api`, `cli`) gives the same contract through its
+[record](#engine-records): the record may hold `"outputs": { "databases": [...],
+"database_credentials": { "<provider>-<name>": { "url": "..." } } }`, with the same shape as the
+stack outputs, and `deploy` reads it from the state store. The record is encrypted like state, so
+the credentials are no more exposed there than a stack's are.
+
 ## Projects
 
 The CLI runs in one of two modes:
@@ -259,6 +288,24 @@ it is newer; apply, destroy and each attempt of a wait copy theirs back. Everyth
 `hybrid/` included, goes on reading the local files. push refuses an older serial or another
 lineage, so a copy never overwrites a newer one, and the CLI stops when both copies changed
 since the last sync ([how to use it](ci.md#1-keep-the-state-in-a-store)).
+
+### Engine records
+
+Engines that don't run tofu (`api`, `cli`, `guided`; see [engines.md](engines.md)) have no state
+file, so what they made is one JSON **record** per provider:
+
+```json
+{ "engine": "api", "lineage": "9e93...", "serial": 2,
+  "resources": [ { "id": "app-1", "name": "freelunch", "kind": "app", "marker": "freelunch", "created": "2026-11-08" } ] }
+```
+
+It goes to the same store as the stacks' state, under the name `record-<provider>`, wrapped as a
+state whose one output holds the record. That gives it the store's rules for free: a push is
+refused when the store has a newer serial or another lineage (`--force` keeps this machine's), and
+`FREELUNCH_STATE_PASSPHRASE` encrypts it like any state. The store is the truth. A job needs only
+the store's settings: `freelunch state record pull <provider>` prints the current record (nothing
+when there is none), `freelunch state record push <provider> <file>` writes the next serial, and
+`records/<provider>.json` in `.freelunch/` is a cache of the last one written, never read back.
 
 State holds secrets in plain text: the cloudflare stack's state has the tunnel tokens and
 service token secrets, and `terraform.tfstate.backup` keeps a copy. Both are git-ignored, and

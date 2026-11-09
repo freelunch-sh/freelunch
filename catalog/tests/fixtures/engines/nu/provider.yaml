@@ -1,0 +1,15 @@
+name: nu
+display_name: "Nu"
+category: vps
+status: ready
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "something"
+card_required: "no"
+url: "https://nu.example"
+last_verified: "2026-11-08"
+notes: null
+sources: []
+inspire: []

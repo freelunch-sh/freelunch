@@ -200,6 +200,23 @@ account API token, which R2 takes as an S3 key: its ID is the access key and the
 its value the secret. It is in the stack's state, like the tunnel tokens. Not live-tested
 yet. For buckets without a card, use [Backblaze B2](../backblaze-b2/).
 
+### Workers and Pages
+
+The free plan runs 100 Workers (100,000 requests a day and 10 ms of CPU per request, with a hard
+daily cap instead of billing) and 100 Pages projects. The stack makes them and their custom
+domains; it does not upload the code:
+
+```hcl
+# cloudflare/terraform.tfvars
+workers = { api = { script_file = "../apps/api/worker.js", hostname = "api.example.com" } }
+pages   = { site = { hostname = "www.example.com" } }
+```
+
+`script_file` is one ES module. Upload a Pages site with `wrangler pages deploy <dir>
+--project-name <name>` (`freelunch output cloudflare -json pages` shows the name). More than
+100 of either needs `acknowledge_billable_resources = true`. Hostnames must be in the zone and
+used once. The module is [`modules/edge`](modules/edge/).
+
 ### Inputs
 
 | Name | Default | Description |

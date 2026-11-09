@@ -107,6 +107,16 @@ Project:
 CI:
   ci init [github|gitlab] Write the CI workflows: one that waits for capacity on a schedule, and
                           one that runs deploy after a new image, or any command you start
+                          Then the secrets they pass on: --set-secrets runs gh secret set for each,
+                          --print-secrets only prints what to run; without either it asks (and
+                          prints when nobody can answer)
+                          --state=<git|oci|r2|b2|gitlab> creates the state store if there is none,
+                          --jobs=provision,ci,cd picks workflows, --first-run starts doctor in
+                          Actions (once the workflows are pushed)
+  ci oidc aws|gcp|azure [--run|--print] [--policy-arn <arn> | --role <role>]
+                          Sign in to AWS, Google Cloud or Azure from Actions without a stored key:
+                          an identity only this repository's main branch and pull requests can use. Asks whether to run the cloud's commands or print
+                          them; --run and --print skip the question
   ci secrets [--print]    Put what CI needs that git doesn't have (tfvars, .env, app env files,
                           known_hosts, the OCI API key, the SSH key deploy uses) in the secret
                           FREELUNCH_BUNDLE with gh, or print it for another CI system
@@ -197,14 +207,23 @@ EOF
 
 need_tf() { [[ -n "$TF" ]] || die "neither tofu nor terraform found in PATH (or use the runner image, see README)"; }
 
-meta() { # meta <provider> <field>
-  sed -n "s/^$2: *\"\{0,1\}\([^\"#]*\)\"\{0,1\}.*/\1/p" "$PROVIDERS_DIR/$1/provider.yaml" | head -1 | sed 's/ *$//'
+meta() { # meta <provider> <field>: the first "field: value" line of provider.yaml, read without spawning anything
+  local line v re="^$2: *\"?([^\"#]*)\"?" f="$PROVIDERS_DIR/$1/provider.yaml"
+  [[ -f "$f" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ $re ]]; then
+      v="${BASH_REMATCH[1]}"
+      printf '%s\n' "${v%"${v##*[! ]}"}"
+      return 0
+    fi
+  done < "$f"
+  return 0
 }
 
 all_providers() {
   local d
   for d in "$PROVIDERS_DIR"/*/; do
-    d="$(basename "$d")"
+    d="${d%/}"; d="${d##*/}"
     [[ "$d" == _* ]] && continue
     [[ -f "$PROVIDERS_DIR/$d/provider.yaml" ]] && echo "$d"
   done
@@ -882,6 +901,90 @@ sync_start() {
     else log "$s: $cmd goes on with the state here, as it doesn't work on $s"
     fi
   done
+}
+
+# --- engine records -------------------------------------------------------------------
+#
+# Engines that don't run tofu (api, cli, guided) have no state file, so what they made is a
+# record per provider: {engine, lineage, serial, resources[{id, name, kind, marker, created}]}.
+# It goes to the same store as the stacks' state, under the name record-<provider>, wrapped as
+# a state whose one output holds the record. So the store's own rules apply as they do to a
+# stack: push refuses a serial that isn't newer or another lineage, and OpenTofu's encryption
+# with FREELUNCH_STATE_PASSPHRASE covers it. The store is the truth; records/<provider>.json
+# in the project is a cache of the last one read or written, and nothing needs it.
+
+record_valid_name() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "record: '$1' is not a provider name"; }
+
+# record_wrap <record file> <serial>: the record as the state the store keeps, at that serial.
+# The store may raise the serial of what it takes, so the record keeps its own.
+record_wrap() {
+  jq -c --argjson wrapper "${2:-0}" '{version: 4, terraform_version: "1.0.0", serial: $wrapper, lineage: .lineage,
+          outputs: {record: {value: tojson, type: "string"}}, resources: []}' "$1"
+}
+
+# record_pull <provider>: the store's record on stdout, nothing when it has none
+record_pull() {
+  local p="$1" key wrapped
+  record_valid_name "$p"
+  [[ $STATE_ON -eq 1 ]] || state_setup
+  key="record-$p"
+  wrapped="$TMP/state/$key.pulled"
+  mkdir -p "$TMP/state"
+  state_pull_copy "$key" "$wrapped"
+  [[ -n "$(state_id "$wrapped")" ]] || return 0
+  jq -er '.outputs.record.value' "$wrapped" | jq -c .
+}
+
+# record_push <provider> <record file> [force]: the record into the store as the next serial.
+# The file is what record_pull gave, changed; a new record has no lineage or serial yet.
+# Returns 2, and pushes nothing, when the store has a newer one or another lineage.
+record_push() {
+  local p="$1" file="$2" force="${3:-}" key wrapped remote there out base lineage serial cache wserial
+  record_valid_name "$p"
+  [[ -f "$file" ]] && jq -e . "$file" >/dev/null 2>&1 || die "record: $file is not a JSON record"
+  [[ $STATE_ON -eq 1 ]] || state_setup
+  key="record-$p"
+  mkdir -p "$TMP/state"
+  remote="$TMP/state/$key.pulled"
+  state_pull_copy "$key" "$remote"
+  there=""; wserial=0
+  if [[ -n "$(state_id "$remote")" ]]; then
+    wserial="$(state_id "$remote" | cut -d' ' -f2)"
+    there="$(jq -er '.outputs.record.value' "$remote" | jq -r '"\(.lineage) \(.serial // 0)"')"
+  fi
+  base="$(jq -r '.serial // 0' "$file")"
+  lineage="$(jq -r '.lineage // empty' "$file")"
+  if [[ -n "$there" ]]; then
+    if [[ -z "$force" ]]; then
+      if [[ -n "$lineage" && "$lineage" != "${there% *}" ]]; then
+        log "$p: the store's record is another one (lineage ${there% *}), so this one isn't copied"; return 2
+      fi
+      if [[ ${there#* } -gt $base ]]; then
+        log "$p: the store has a newer record (serial ${there#* }; this one is from serial $base), from another machine or CI, so this one isn't copied"; return 2
+      fi
+    fi
+    [[ -n "$lineage" ]] || lineage="${there% *}"
+    serial=$(( ${there#* } > base ? ${there#* } + 1 : base + 1 ))
+  else
+    [[ -n "$lineage" ]] || lineage="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    serial=$((base + 1))
+  fi
+  jq --arg l "$lineage" --argjson s "$serial" '.lineage = $l | .serial = $s' "$file" > "$TMP/state/$key.record"
+  record_wrap "$TMP/state/$key.record" $((wserial + 1)) > "$TMP/state/$key.wrapped"
+  wrapped="$TMP/state/$key.push"
+  if ! state_try "$key" "$wrapped" state push -lock-timeout=120s ${force:+-force} "$TMP/state/$key.wrapped"; then
+    out="$(cat "$wrapped" "$wrapped.err" | strip_colors)"
+    case "$out" in
+      *"newer state"*|*"same serial"*|*"unrelated state"*)
+        log "$p: the store has a newer record than this one, so this one isn't copied"; return 2 ;;
+    esac
+    state_error "$out"
+    die "record: couldn't copy the record of $p to the store"
+  fi
+  if [[ "$(state_backend "$(state_config)")" == "git" ]]; then git_store_save "$key" || return 1; fi
+  cache="$(state_root)/records/$p.json"
+  mkdir -p "$(dirname "$cache")" && (umask 077 && cp "$TMP/state/$key.record" "$cache") || true
+  log "$p: copied the record to the store (serial $serial)"
 }
 
 # --- OCI sign-in ----------------------------------------------------------------------
@@ -1584,15 +1687,15 @@ hybrid_tf() {
 
 cmd_hybrid() {
   need_tf
-  local hosts platforms state=() vars=()
+  local hosts platforms state=() hyb_vars=()
   hosts="$(deployed_json host)"
   platforms="$(deployed_json platform)"
   check_checkout_tfvars "$ROOT/hybrid"
   if [[ -n "$PROJECT" || $SCRATCH_HYBRID -eq 1 ]]; then state=(-state="$(hybrid_state)"); fi
-  [[ -z "$PROJECT" ]] || vars=(-var "state_dir=$PROJECT")
+  [[ -z "$PROJECT" ]] || hyb_vars=(-var "state_dir=$PROJECT")
   log "hybrid: aggregating $hosts$([[ "$platforms" == "[]" ]] || echo ", platforms $platforms")"
   hybrid_tf init -input=false -upgrade=false >/dev/null
-  hybrid_tf apply -input=false -auto-approve ${state[@]+"${state[@]}"} ${vars[@]+"${vars[@]}"} -var "host_providers=$hosts" -var "platform_providers=$platforms" >/dev/null
+  hybrid_tf apply -input=false -auto-approve ${state[@]+"${state[@]}"} ${hyb_vars[@]+"${hyb_vars[@]}"} -var "host_providers=$hosts" -var "platform_providers=$platforms" >/dev/null
   hybrid_tf output ${state[@]+"${state[@]}"} hosts_by_provider
 }
 
@@ -1724,8 +1827,7 @@ cmd_lifecycle() { # plan|apply|destroy
       done
       # A platform stack declares the target; its API then makes it (the Northflank project).
       for a in ${platforms[@]+"${platforms[@]}"}; do
-        apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}
-        platform_up "$a"
+        engine_apply "$a" "$plan_file" ${extra[@]+"${extra[@]}"}
       done
       for a in ${services[@]+"${services[@]}"}; do apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; done
       [[ ${#hosts[@]} -eq 0 && ${#platforms[@]} -eq 0 ]] || cmd_hybrid
@@ -1734,7 +1836,7 @@ cmd_lifecycle() { # plan|apply|destroy
     destroy)
       for a in ${hosts[@]+"${hosts[@]}"}; do ci_wait_guard "$a" ""; done
       for a in ${glue[@]+"${glue[@]}"} ${services[@]+"${services[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
-      for a in ${platforms[@]+"${platforms[@]}"}; do destroy_platform "$a" ${extra[@]+"${extra[@]}"}; done
+      for a in ${platforms[@]+"${platforms[@]}"}; do engine_destroy "$a" ${extra[@]+"${extra[@]}"}; done
       for a in ${hosts[@]+"${hosts[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
       [[ ${#hosts[@]} -eq 0 && ${#platforms[@]} -eq 0 ]] || cmd_hybrid ;;
   esac
@@ -1895,11 +1997,7 @@ status_apps() {
   for host in $(jq -r 'keys[]' "$TMP/targets.json"); do
     # A platform says how its apps run through its API.
     if [[ "$(jq -r --arg h "$host" '.[$h].kind' "$TMP/targets.json")" == "platform" ]]; then
-      case "$(jq -r --arg h "$host" '.[$h].provider' "$TMP/targets.json")" in
-        northflank) northflank_status "$host" ;;
-        cloud-run)  cloud_run_status "$host" ;;
-        scaleway)   scaleway_status "$host" ;;
-      esac
+      engine_call "$(jq -r --arg h "$host" '.[$h].provider' "$TMP/targets.json")" status "$host"
       continue
     fi
     address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
@@ -2033,7 +2131,7 @@ image_workflow() {
   for s in "$@"; do
     case "$s" in
       oci) arm=1 ;;
-      gcp|aws|azure|northflank|cloud-run|scaleway) x86=1 ;;
+      gcp|aws|azure|northflank|cloud-run|scaleway|render) x86=1 ;;
     esac
   done
   if [[ $arm -eq $x86 ]]; then platforms="linux/amd64,linux/arm64"; elif [[ $arm -eq 1 ]]; then platforms="linux/arm64"; else platforms="linux/amd64"; fi
@@ -2511,7 +2609,43 @@ storage_states() {
   done | jq -Rsc 'split("\n") | map(select(length > 0))'
 }
 
-# deploy_plan: resolve apps.tfvars, the inventory, the tunnels and the buckets with deploy/
+# apps_use_database <apps file>: whether any app in it names a database
+apps_use_database() { [[ -f "$1" ]] && tfvars_map "$1" apps database | cut -f2 | grep -q .; }
+
+# database_states <apps file>: the state files of deployed stacks that make databases, as a JSON
+# list; empty unless an app names a database
+database_states() {
+  local p state
+  apps_use_database "$1" || { echo '[]'; return 0; }
+  for p in $(all_providers); do
+    if [[ ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
+    state="$(config_dir "$p")/terraform.tfstate"
+    if jq -e '.outputs.databases' "$state" >/dev/null 2>&1; then echo "$state"; fi
+  done | jq -Rsc 'split("\n") | map(select(length > 0))'
+}
+
+# database_records <apps file> <var file>: databases that engines without a state file (api, cli)
+# made, from the outputs of their records in the state store, as a var file for deploy/ (so
+# the credentials are never on a command line). A record holds them as
+# "outputs": { "databases": [...], "database_credentials": { "<provider>-<name>": { "url": ... } } }.
+# Writes nothing, and returns 1, when there are none.
+database_records() {
+  local p rec out='{"extra_databases":[],"extra_database_credentials":{}}' found=0
+  apps_use_database "$1" || return 1
+  [[ -n "$(state_config)" && $STATE_ON -eq 1 ]] || return 1
+  for p in $(cd "$PROVIDERS_DIR" && ls -d -- */ 2>/dev/null | sed 's|/$||' | grep -v '^_'); do
+    [[ -d "$PROJECT/$p" ]] || continue
+    [[ -f "$PROVIDERS_DIR/$p/api.yaml" || -f "$PROVIDERS_DIR/$p/cli.yaml" || -f "$PROVIDERS_DIR/$p/guided.yaml" ]] || continue
+    rec="$(record_pull "$p")"
+    [[ -n "$rec" ]] && jq -e '.outputs.databases' <<< "$rec" >/dev/null 2>&1 || continue
+    out="$(jq -c --argjson r "$rec" '.extra_databases += ($r.outputs.databases // []) | .extra_database_credentials += ($r.outputs.database_credentials // {})' <<< "$out")"
+    found=1
+  done
+  [[ $found -eq 1 ]] || return 1
+  (umask 077; printf '%s\n' "$out" > "$2")
+}
+
+# deploy_plan: resolve apps.tfvars, the inventory, the tunnels, the buckets and the databases with deploy/
 # into $TMP/targets.json, platforms.json, registries.json, tunnel_tokens.json and
 # app_env.json.
 deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
@@ -2520,6 +2654,8 @@ deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
   if [[ -f "$apps_file" ]]; then args+=(-var-file="$apps_file"); fi
   if [[ -n "$tunnel_state" ]]; then args+=(-var "tunnel_state_path=$tunnel_state"); fi
   args+=(-var "storage_state_paths=$(storage_states)")
+  args+=(-var "database_state_paths=$(database_states "$apps_file")")
+  if database_records "$apps_file" "$TMP/databases.tfvars.json"; then args+=(-var-file="$TMP/databases.tfvars.json"); fi
   default="$(default_host)"
   if [[ -n "$default" ]]; then args+=(-var "default_host=$default"); fi
   check_checkout_tfvars "$ROOT/deploy"
@@ -2528,12 +2664,16 @@ deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
   for o in targets platforms registries tunnel_tokens app_env; do
     TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" output -state="$TMP/deploy.tfstate" -json "$o" > "$TMP/$o.json" || return 1
   done
+  # in GitHub Actions, keep what a bucket or a database hands an app out of the job's log
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    jq -r '.[] | .[] | strings | select(length >= 8)' "$TMP/app_env.json" | while IFS= read -r value; do echo "::add-mask::$value"; done
+  fi
 }
 
 # remote_script <host> <redact>: the script deploy pipes to `sudo bash -s` on a host.
 # Files travel as base64 heredocs; with redact=1 (dry run) contents and secrets are left out.
 remote_script() {
-  local host="$1" redact="$2" name compose env_file server username var token
+  local host="$1" redact="$2" name compose env_file server username var token what
   local targets="$TMP/targets.json"
 
   cat <<EOF
@@ -2591,23 +2731,27 @@ EOF
   done < <(jq -r 'to_entries[] | [.key, .value.username, .value.password_env] | @tsv' "$TMP/registries.json")
 
   # Fields split at \x1f, which unlike a tab keeps an empty env_file in its place.
-  while IFS=$'\x1f' read -r name compose env_file bucket; do
+  while IFS=$'\x1f' read -r name compose env_file bucket database; do
     [[ -n "$name" ]] || continue
     echo "put \"\$apps/$name/compose.yaml\" 0640 <<'FREELUNCH_EOF'"
     if [[ "$redact" == 1 ]]; then echo "<$compose>"; else b64 < "$compose"; fi
     echo "FREELUNCH_EOF"
-    # The bucket's settings come first, so the env_file can override them.
-    if [[ -n "$env_file$bucket" ]]; then
+    # The bucket's settings and the database's URL come first, so the env_file can override them.
+    if [[ -n "$env_file$bucket$database" ]]; then
       echo "put \"\$apps/$name/.env\" 0600 <<'FREELUNCH_EOF'"
       if [[ "$redact" == 1 ]]; then
-        echo "<${bucket:+the S3 settings of $bucket}${bucket:+${env_file:+, then }}${env_file}, redacted>"
+        what=""
+        [[ -z "$bucket" ]] || what="the S3 settings of $bucket"
+        [[ -z "$database" ]] || what="${what:+$what, }DATABASE_URL of $database"
+        [[ -z "$env_file" ]] || what="${what:+$what, then }$env_file"
+        echo "<$what, redacted>"
       else
         { bucket_env "$name"; [[ -z "$env_file" ]] || cat "$env_file"; } | b64
       fi
       echo "FREELUNCH_EOF"
     fi
     echo "up $name"
-  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // "")] | join("\u001f")' "$targets")
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // ""), (.value.database // "")] | join("\u001f")' "$targets")
 
   if [[ "$(jq -r --arg h "$host" '.[$h].tunnel' "$targets")" == "true" ]]; then
     echo "put \"\$apps/cloudflared/compose.yaml\" 0640 <<'FREELUNCH_EOF'"
@@ -2753,7 +2897,7 @@ cmd_deploy() {
   if [[ "${FREELUNCH_SSH_STRICT:-0}" == "1" ]]; then ssh_options yes; else ssh_options accept-new; fi
   token_reminders
   for h in "${hosts[@]}"; do
-    if [[ "$(jq -r --arg h "$h" '.[$h].kind' "$TMP/targets.json")" == "platform" ]]; then deploy_platform "$h" "$dry_run"; else deploy_host "$h" "$dry_run"; fi
+    if [[ "$(jq -r --arg h "$h" '.[$h].kind' "$TMP/targets.json")" == "platform" ]]; then engine_deploy "$h" "$dry_run"; else deploy_host "$h" "$dry_run"; fi
   done
 }
 
@@ -2803,7 +2947,7 @@ set_tfvar() {
 placeholder() {
   local v; v="$(tfvar "$1" "$2")"
   case "$v" in
-    ""|"my-gcp-project"|"my-project-123456"|"ocid1.tenancy.oc1..aaaaaaaa..."|*"00000000-0000-0000-0000-000000000000") return 0 ;;
+    ""|"my-gcp-project"|"my-project-123456"|"ocid1.tenancy.oc1..aaaaaaaa..."|*"00000000-0000-0000-0000-000000000000"|usr-xxxx*) return 0 ;;
   esac
   return 1
 }
@@ -2836,43 +2980,12 @@ setup_value() {
 # setup_stack <provider> <name prefix>: terraform.tfvars from the example, with what can be
 # found filled in. Prints what is still to fill in.
 setup_stack() {
-  local s="$1" file value profile
+  local s="$1" file
   file="$(config_dir "$s")/terraform.tfvars"
   [[ -f "$file" ]] || cp "$(config_dir "$s")/terraform.tfvars.example" "$file"
-  case "$s" in
-    oci)
-      local cfg="$HOME/.oci/config"
-      profile=DEFAULT
-      if [[ -f "$cfg" ]] && ! grep -q '^\[DEFAULT\]' "$cfg" && grep -q '^\[freelunch\]' "$cfg"; then profile=freelunch; fi
-      if placeholder "$file" tenancy_ocid; then
-        value="$(setup_value "$(ini_value "$cfg" "$profile" tenancy)" "OCI tenancy OCID (grep tenancy ~/.oci/config):")"
-        [[ -z "$value" ]] || set_tfvar "$file" tenancy_ocid "$value"
-      fi
-      if grep -q '^region *= *"eu-frankfurt-1"' "$file"; then
-        value="$(ini_value "$cfg" "$profile" region)"
-        [[ -z "$value" ]] || set_tfvar "$file" region "$value"
-      fi
-      if [[ "$profile" != DEFAULT ]] && ! grep -q '^oci_config_profile' "$file"; then echo "oci_config_profile = \"$profile\"" >> "$file"; fi ;;
-    gcp|cloud-run)
-      if placeholder "$file" project_id; then
-        value="$(setup_value "$(command -v gcloud >/dev/null && gcloud config get-value project 2>/dev/null || true)" "Google Cloud project ID (gcloud projects list):")"
-        [[ -z "$value" ]] || set_tfvar "$file" project_id "$value"
-      fi ;;
-    scaleway)
-      if placeholder "$file" project_id; then
-        value="$(setup_value "${SCW_DEFAULT_PROJECT_ID:-}" "Scaleway project ID (console.scaleway.com > Project settings):")"
-        [[ -z "$value" ]] || set_tfvar "$file" project_id "$value"
-      fi ;;
-    azure)
-      if placeholder "$file" subscription_id; then
-        value="$(setup_value "$(command -v az >/dev/null && az account show --query id -o tsv 2>/dev/null || true)" "Azure subscription ID (az account show):")"
-        [[ -z "$value" ]] || set_tfvar "$file" subscription_id "$value"
-      fi ;;
-  esac
+  engine_call "$s" setup "$file"
   fill_ssh_keys "$file" || echo "$(rel "$file"): an SSH public key (ssh-keygen -t ed25519 makes one)"
-  if placeholder "$file" tenancy_ocid && [[ "$s" == oci ]]; then echo "$(rel "$file"): tenancy_ocid"; fi
-  if [[ "$s" =~ ^(gcp|cloud-run|scaleway)$ ]] && placeholder "$file" project_id; then echo "$(rel "$file"): project_id"; fi
-  if [[ "$s" == azure ]] && placeholder "$file" subscription_id; then echo "$(rel "$file"): subscription_id"; fi
+  engine_call "$s" todo "$file"
   return 0
 }
 
@@ -2971,10 +3084,7 @@ cmd_setup() {
   local todo=() line
   for t in "${targets[@]}"; do
     while IFS= read -r line; do [[ -z "$line" ]] || todo+=("$line"); done < <(setup_stack "$t")
-    case "$t" in
-      northflank) while IFS= read -r line; do [[ -z "$line" ]] || todo+=("$line"); done < <(setup_token NORTHFLANK_API_TOKEN "Northflank API token") ;;
-      scaleway)   while IFS= read -r line; do [[ -z "$line" ]] || todo+=("$line"); done < <(setup_token SCW_SECRET_KEY "Scaleway secret key") ;;
-    esac
+    while IFS= read -r line; do [[ -z "$line" ]] || todo+=("$line"); done < <(engine_call "$t" token)
   done
   if [[ -n "$domain" ]]; then
     local cf="$PROJECT/cloudflare/terraform.tfvars"
@@ -3267,6 +3377,995 @@ report_url() {
 # provider's API does the rest: apply makes the target, deploy puts a service per app in
 # it, destroy deletes both. Northflank is the first, then Cloud Run and Scaleway.
 
+# --- Engines --------------------------------------------------------------------------
+#
+# An engine makes and removes what a provider's stack or API declares. Every provider has one:
+# engine: in provider.yaml, or by default what its iac says (engine_of). The verbs are check,
+# apply, outputs, deploy, status and destroy; a provider's engine implements the ones it has as
+# engine_<provider>_<verb> (dashes become underscores), and engine_call runs them, so nothing
+# else names a provider. Hooks beyond the six: target (what destroy will need, read before the
+# stack is gone), setup and todo (tfvars to fill in), token and secrets (credentials).
+#
+# The tofu engine is the stack flow itself: apply and destroy run the stack through
+# run_stack, then the provider's hook does what the stack can't (the Northflank project, the
+# Scaleway registry namespace).
+
+# engine_of <provider> [kind]: tofu, api, cli or guided. A kind (database, platform) can have
+# its own: engine_<kind>: in provider.yaml.
+engine_of() {
+  local e=""
+  [[ -z "${2:-}" ]] || e="$(meta "$1" "engine_$2")"
+  [[ -n "$e" ]] || e="$(meta "$1" engine)"
+  if [[ -z "$e" ]]; then
+    case "$(meta "$1" iac)" in
+      stale|none) e=guided ;;
+      *)          e=tofu ;;
+    esac
+  fi
+  echo "$e"
+}
+
+engine_fn() { echo "engine_${1//-/_}_$2"; }
+engine_defined() { declare -F "$(engine_fn "$1" "$2")" >/dev/null; }
+# engine_call <provider> <verb> [args]: the provider's hook, nothing when it has none
+engine_call() {
+  local p="$1" v="$2"; shift 2
+  if engine_defined "$p" "$v"; then "$(engine_fn "$p" "$v")" "$@"; fi
+}
+
+# engine_providers: the providers with a stack in this checkout, oci first, then by name
+engine_providers() {
+  local p
+  echo oci
+  for p in $(all_providers); do [[ "$p" == oci ]] || echo "$p"; done
+}
+
+# platform_target <provider> <project field> <tfvars name>: id, region, project and label of a
+# platform's target, separated by \x1f, from its state, or from the tfvars when the state has
+# none yet (a destroy that was interrupted, or an apply that never finished)
+platform_target() {
+  local p="$1" id region label project tfvars
+  tfvars="$(config_dir "$p")/terraform.tfvars"
+  id="$(platform_field "$p" id)"
+  region="$(platform_field "$p" region)"; label="$(platform_field "$p" settings.label)"; project="$(platform_field "$p" "$2")"
+  if [[ -z "$id" && -f "$(config_dir "$p")/terraform.tfstate" ]]; then
+    id="$(tfvar "$tfvars" name_prefix 2>/dev/null || true)"; id="${id:-freelunch}"
+    region="$(tfvar "$tfvars" region 2>/dev/null || true)"; region="${region:-fr-par}"
+    project="$(tfvar "$tfvars" "$3" 2>/dev/null || true)"
+  fi
+  printf '%s\x1f%s\x1f%s\x1f%s\n' "$id" "$region" "$project" "$label"
+}
+
+# setup hooks: the questions a provider's terraform.tfvars needs answered, asked of whoever
+# is there (setup_value), with what can be found filled in. todo hooks say what is still empty.
+engine_oci_setup() {
+  local file="$1" value profile
+  local cfg="$HOME/.oci/config"
+  profile=DEFAULT
+  if [[ -f "$cfg" ]] && ! grep -q '^\[DEFAULT\]' "$cfg" && grep -q '^\[freelunch\]' "$cfg"; then profile=freelunch; fi
+  if placeholder "$file" tenancy_ocid; then
+    value="$(setup_value "$(ini_value "$cfg" "$profile" tenancy)" "OCI tenancy OCID (grep tenancy ~/.oci/config):")"
+    [[ -z "$value" ]] || set_tfvar "$file" tenancy_ocid "$value"
+  fi
+  if grep -q '^region *= *"eu-frankfurt-1"' "$file"; then
+    value="$(ini_value "$cfg" "$profile" region)"
+    [[ -z "$value" ]] || set_tfvar "$file" region "$value"
+  fi
+  if [[ "$profile" != DEFAULT ]] && ! grep -q '^oci_config_profile' "$file"; then echo "oci_config_profile = \"$profile\"" >> "$file"; fi
+}
+engine_cloud_run_setup() {
+  local file="$1" value profile
+  if placeholder "$file" project_id; then
+    value="$(setup_value "$(command -v gcloud >/dev/null && gcloud config get-value project 2>/dev/null || true)" "Google Cloud project ID (gcloud projects list):")"
+    [[ -z "$value" ]] || set_tfvar "$file" project_id "$value"
+  fi
+}
+engine_gcp_setup() { engine_cloud_run_setup "$@"; }
+engine_scaleway_setup() {
+  local file="$1" value profile
+  if placeholder "$file" project_id; then
+    value="$(setup_value "${SCW_DEFAULT_PROJECT_ID:-}" "Scaleway project ID (console.scaleway.com > Project settings):")"
+    [[ -z "$value" ]] || set_tfvar "$file" project_id "$value"
+  fi
+}
+engine_render_setup() {
+  local file="$1" value profile
+  if placeholder "$file" owner_id; then
+    value="$(setup_value "" "Render workspace ID (dashboard > workspace settings, usr-... or tea-...):")"
+    [[ -z "$value" ]] || set_tfvar "$file" owner_id "$value"
+  fi
+}
+engine_azure_setup() {
+  local file="$1" value profile
+  if placeholder "$file" subscription_id; then
+    value="$(setup_value "$(command -v az >/dev/null && az account show --query id -o tsv 2>/dev/null || true)" "Azure subscription ID (az account show):")"
+    [[ -z "$value" ]] || set_tfvar "$file" subscription_id "$value"
+  fi
+}
+engine_oci_todo()        { placeholder "$1" tenancy_ocid && echo "$(rel "$1"): tenancy_ocid"; return 0; }
+engine_gcp_todo()        { placeholder "$1" project_id && echo "$(rel "$1"): project_id"; return 0; }
+engine_cloud_run_todo()  { engine_gcp_todo "$@"; }
+engine_scaleway_todo()   { engine_gcp_todo "$@"; }
+engine_render_todo()     { placeholder "$1" owner_id && echo "$(rel "$1"): owner_id"; return 0; }
+engine_azure_todo()      { placeholder "$1" subscription_id && echo "$(rel "$1"): subscription_id"; return 0; }
+engine_oci_check()       { doctor_oci; }
+engine_oci_secrets() {
+  printf '%s\t%s\n' FREELUNCH_OCI_CONFIG "the profile block of ~/.oci/config (the console shows it when you add an API key)"
+  printf '%s\t%s\n' FREELUNCH_OCI_KEY "the OCI API private key (the .pem file the console gave you)"
+}
+engine_aws_secrets() {
+  ci_oidc_on aws && return 0
+  printf '%s\t%s\n' AWS_ACCESS_KEY_ID "AWS access key ID"
+  printf '%s\t%s\n' AWS_SECRET_ACCESS_KEY "AWS secret access key"
+}
+
+# Northflank
+engine_northflank_apply()   { northflank_up "$(platform_field northflank id)" "$(platform_field northflank region)"; }
+engine_northflank_target()  { platform_target northflank settings.project_id project_id; }
+engine_northflank_destroy() { northflank_down "$1"; }
+engine_northflank_status()  { northflank_status "$@"; }
+engine_northflank_deploy()  { northflank_deploy "$@"; }
+engine_northflank_check()   { doctor_northflank; }
+engine_northflank_token()   { setup_token NORTHFLANK_API_TOKEN "Northflank API token"; }
+engine_northflank_secrets() { printf '%s\t%s\n' NORTHFLANK_API_TOKEN "Northflank API token"; }
+
+# Cloud Run
+engine_cloud_run_apply()    { cloud_run_up "$(platform_field cloud-run id)" "$(platform_field cloud-run region)"; }
+engine_cloud_run_target() {
+  local id region label tfvars
+  id="$(platform_field cloud-run id)"; region="$(platform_field cloud-run region)"; label="$(platform_field cloud-run settings.label)"
+  if [[ -z "$id" && -f "$(config_dir cloud-run)/terraform.tfstate" ]]; then
+    tfvars="$(config_dir cloud-run)/terraform.tfvars"
+    id="$(tfvar "$tfvars" project_id 2>/dev/null || true)"
+    region="$(tfvar "$tfvars" region 2>/dev/null || true)"; region="${region:-us-central1}"
+    label="$(tfvar "$tfvars" name_prefix 2>/dev/null || true)"; label="${label:-freelunch}"
+  fi
+  printf '%s\x1f%s\x1f\x1f%s\n' "$id" "$region" "$label"
+}
+engine_cloud_run_destroy()  { cloud_run_down "$1" "$2" "$4"; }
+engine_cloud_run_status()   { cloud_run_status "$@"; }
+engine_cloud_run_deploy()   { cloud_run_deploy "$@"; }
+engine_cloud_run_check()    { doctor_cloud_run; }
+engine_cloud_run_secrets()  { printf '%s\t%s\n' CLOUD_RUN_ACCESS_TOKEN "Google access token for Cloud Run"; }
+
+# Scaleway
+engine_scaleway_apply()     { scaleway_up "$(platform_field scaleway id)" "$(platform_field scaleway region)" "$(platform_field scaleway settings.project_id)"; }
+engine_scaleway_target()    { platform_target scaleway settings.project_id project_id; }
+engine_scaleway_destroy()   { scaleway_down "$1" "$2" "$3"; }
+engine_scaleway_status()    { scaleway_status "$@"; }
+engine_scaleway_deploy()    { scaleway_deploy "$@"; }
+engine_scaleway_check()     { doctor_scaleway; }
+engine_scaleway_token()     { setup_token SCW_SECRET_KEY "Scaleway secret key"; }
+engine_scaleway_secrets()   { printf '%s\t%s\n' SCW_SECRET_KEY "Scaleway secret key"; }
+
+# Render
+engine_render_apply()       { render_up "$(platform_field render id)" "$(platform_field render settings.owner_id)"; }
+engine_render_target()      { platform_target render settings.owner_id owner_id; }
+engine_render_destroy()     { render_down "$1" "$3"; }
+engine_render_status()      { render_status "$@"; }
+engine_render_deploy()      { render_deploy "$@"; }
+engine_render_check()       { doctor_render; }
+engine_render_token()       { setup_token RENDER_API_KEY "Render API key"; }
+engine_render_secrets()     { printf '%s\t%s\n' RENDER_API_KEY "Render API key"; }
+
+# --- The api engine ----------------------------------------------------------------------
+#
+# A provider with an HTTP or GraphQL API and no Terraform provider adds providers/<name>/api.yaml
+# (docs/api-adapter.md). One driver reads it and runs the lifecycle: check, list, deploy (find,
+# then create or update, then an optional deploy step and a wait), status and destroy. What it
+# made is written to the provider's record in the state store, when the project has a store.
+
+# api_yaml_json <file>: the subset of YAML api.yaml uses as JSON: nested maps, scalars (plain,
+# 'single' or "double" quoted), one-line [lists] and {maps}, and | blocks. awk turns each leaf
+# into [path, value]; jq puts them together.
+api_yaml_json() {
+  awk '
+    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    function esc(s,   i, c, o) {
+      o = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == BS) o = o BS BS
+        else if (c == "\"") o = o BS "\""
+        else if (c == "\t") o = o BS "t"
+        else if (c != "\r") o = o c
+      }
+      return o
+    }
+    function scalar(v,   i, c, out) {
+      v = trim(v)
+      if (substr(v, 1, 1) == "\"") {
+        out = ""
+        for (i = 2; i <= length(v); i++) {
+          c = substr(v, i, 1)
+          if (c == "\\") { out = out c substr(v, i + 1, 1); i++; continue }
+          if (c == "\"") break
+          out = out c
+        }
+        return "\"" out "\""
+      }
+      if (substr(v, 1, 1) == "\x27") {
+        out = ""
+        for (i = 2; i <= length(v); i++) {
+          c = substr(v, i, 1)
+          if (c == "\x27") { if (substr(v, i + 1, 1) == "\x27") { out = out c; i++; continue } break }
+          out = out c
+        }
+        return "\"" esc(out) "\""
+      }
+      sub(/[ \t]+#.*$/, "", v)
+      v = trim(v)
+      if (v ~ /^-?[0-9]+$/ || v == "true" || v == "false" || v == "null") return v
+      return "\"" esc(v) "\""
+    }
+    # split_top: s into parts[] at commas outside quotes and brackets; returns the count
+    function split_top(s, parts,   n, i, c, q, depth, cur) {
+      n = 0; cur = ""; q = ""; depth = 0
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (q != "") { cur = cur c; if (c == "\\" && q == "\"") { cur = cur substr(s, i + 1, 1); i++ } else if (c == q) q = ""; continue }
+        if (c == "\"" || c == "\x27") { q = c; cur = cur c; continue }
+        if (c == "[" || c == "{") depth++
+        if (c == "]" || c == "}") depth--
+        if (c == "," && depth == 0) { parts[++n] = cur; cur = ""; continue }
+        cur = cur c
+      }
+      if (trim(cur) != "") parts[++n] = cur
+      return n
+    }
+    function flow(v,   inner, parts, n, i, out, k, p, colon, v2) {
+      v = trim(v); sub(/[ \t]+#.*$/, "", v)
+      inner = substr(v, 2, length(v) - 2)
+      n = split_top(inner, parts)
+      if (substr(v, 1, 1) == "[") {
+        out = "["
+        for (i = 1; i <= n; i++) out = out (i > 1 ? "," : "") scalar(parts[i])
+        return out "]"
+      }
+      out = "{"
+      for (i = 1; i <= n; i++) {
+        p = trim(parts[i]); colon = index(p, ":")
+        k = trim(substr(p, 1, colon - 1)); gsub(/^["\x27]|["\x27]$/, "", k)
+        v2 = trim(substr(p, colon + 1))
+        out = out (i > 1 ? "," : "") "\"" esc(k) "\":" ((substr(v2, 1, 1) == "[" || substr(v2, 1, 1) == "{") ? flow(v2) : scalar(v2))
+      }
+      return out "}"
+    }
+    function path(extra,   i, out) {
+      out = ""
+      for (i = 1; i <= depth; i++) out = out "\"" keys[i] "\","
+      return "[" out "\"" extra "\"]"
+    }
+    function endblock(   i, out) {
+      if (!inblock) return
+      while (nblock > 0 && blocklines[nblock] == "") nblock--
+      out = ""
+      for (i = 1; i <= nblock; i++) out = out esc(blocklines[i]) BS "n"
+      if (chomp) out = substr(out, 1, length(out) - 2)
+      print "[" blockpath ",\"" out "\"]"
+      inblock = 0
+    }
+    BEGIN { depth = 0; inblock = 0; BS = sprintf("%c", 92) }
+    {
+      line = $0
+      match(line, /^ */); ind = RLENGTH
+      if (inblock) {
+        if (trim(line) == "" ) { blocklines[++nblock] = ""; next }
+        if (ind > blockind) {
+          if (blockbase < 0) blockbase = ind
+          blocklines[++nblock] = substr(line, blockbase + 1)
+          next
+        }
+        endblock()
+      }
+      if (trim(line) == "" || trim(line) ~ /^#/) next
+      if (!match(trim(line), /^[A-Za-z0-9_-]+:([ \t]|$)/)) { print "api.yaml: cannot read line " NR ": " line > "/dev/stderr"; bad = 1; next }
+      t = trim(line)
+      key = substr(t, 1, index(t, ":") - 1)
+      rest = trim(substr(t, index(t, ":") + 1))
+      while (depth > 0 && indent[depth] >= ind) depth--
+      if (rest == "" ) { depth++; keys[depth] = key; indent[depth] = ind; next }
+      if (rest ~ /^\|[-+]?$/) { inblock = 1; blockind = ind; blockbase = -1; nblock = 0; chomp = (rest ~ /-/); blockpath = path(key); next }
+      if (substr(rest, 1, 1) == "[" || substr(rest, 1, 1) == "{") print "[" path(key) "," flow(rest) "]"
+      else print "[" path(key) "," scalar(rest) "]"
+    }
+    END { endblock(); exit bad }
+  ' "$1" | jq -cn 'reduce inputs as [$p, $v] ({}; setpath($p; $v))'
+}
+
+# api_load <provider>: api.yaml as JSON in $TMP/api/<provider>.json, checked for what the
+# driver needs. A provider whose API can't delete is refused: destroy could not clean up.
+api_load() {
+  local p="$1" j path f
+  f="$PROVIDERS_DIR/$p/api.yaml"
+  command -v jq >/dev/null || die "jq is required for the api engine"
+  command -v curl >/dev/null || die "curl is required for the api engine"
+  [[ -f "$f" ]] || die "api: $p has no api.yaml (providers/$p/)"
+  # steps the format can't express are bash in providers/<p>/api.sh (see api_step)
+  # shellcheck disable=SC1090
+  [[ ! -f "$PROVIDERS_DIR/$p/api.sh" ]] || source "$PROVIDERS_DIR/$p/api.sh"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  mkdir -p "$TMP/api"
+  j="$TMP/api/$p.json"
+  [[ -f "$j" ]] && return 0
+  api_yaml_json "$f" > "$j.new" || die "api: can't read providers/$p/api.yaml"
+  for path in base_url auth.env auth.header check.request list.request list.items list.fields.id list.fields.name create.request create.body create.id; do
+    jq -e --arg p "$path" 'getpath($p | split(".")) | strings | length > 0' "$j.new" >/dev/null 2>&1 || die "api: providers/$p/api.yaml needs $path"
+  done
+  jq -e '.delete.request | strings | length > 0' "$j.new" >/dev/null 2>&1 \
+    || die "api: $p is refused: its API has no way to delete, so freelunch destroy could not clean up what it makes (providers/$p/api.yaml has no delete)"
+  mv "$j.new" "$j"
+}
+
+# api_cfg <provider> <jq path or filter>: a value of api.yaml, nothing when it isn't there
+api_cfg() { jq -r "$2 // empty" "$TMP/api/$1.json"; }
+api_has() { jq -e "$2 | . != null" "$TMP/api/$1.json" >/dev/null 2>&1; }
+
+# api_token <provider>: the API token, from the variable api.yaml names
+api_token() {
+  local var
+  var="$(api_cfg "$1" .auth.env)"
+  [[ -n "${!var:-}" ]] || die "api: $var is not set: export it, or put it in $(rel "$(state_root)")/.env (providers/$1/README.md)"
+  printf '%s' "${!var}"
+}
+
+# api_base <provider>: the vars every request and body can use: name_prefix and the settings
+# api.yaml lists, read from the provider's terraform.tfvars
+api_base() {
+  local p="$1" tfvars key value prefix out
+  tfvars="$(config_dir "$p")/terraform.tfvars"
+  prefix=""; [[ ! -f "$tfvars" ]] || prefix="$(tfvar "$tfvars" name_prefix)"
+  prefix="${prefix:-freelunch}"
+  out="$(jq -cn --arg prefix "$prefix" '{prefix: $prefix, settings: {}}')"
+  for key in $(jq -r '.settings[]?' "$TMP/api/$p.json"); do
+    value=""; [[ ! -f "$tfvars" ]] || value="$(tfvar "$tfvars" "$key")"
+    [[ -n "$value" ]] || die "api: $key is not set in $(rel "$tfvars")"
+    out="$(jq -c --arg k "$key" --arg v "$value" '.settings[$k] = $v' <<< "$out")"
+  done
+  echo "$out"
+}
+
+# api_secrets <provider> <vars file>: the values to leave out of what is printed: the token and
+# the app's environment values
+api_secrets() {
+  local p="$1"
+  (
+    API_SECRET_TOKEN="$(api_token "$p")"; export API_SECRET_TOKEN
+    jq -c '[(.env // {} | .[]? | strings), env.API_SECRET_TOKEN | select(length >= 4)]' "$2"
+  ) > "$TMP/api/$p.secrets" 2>/dev/null || echo '[]' > "$TMP/api/$p.secrets"
+}
+
+# api_expand <string> <vars file>: {name} in the string with the vars' values, URL-encoded.
+# A name with no value stops the run.
+api_expand() {
+  local out
+  out="$(jq -rn --arg s "$1" --slurpfile v "$2" '
+    ($v[0] + ($v[0].settings // {})) as $x
+    | reduce ($x | to_entries[] | select(.value | type | . == "string" or . == "number")) as $e ($s; gsub("\\{" + $e.key + "\\}"; $e.value | tostring | @uri))')"
+  if [[ "$out" =~ \{([a-z_]+)\} ]]; then die "api: '$1' needs {${BASH_REMATCH[1]}}, which has no value here"; fi
+  echo "$out"
+}
+
+# api_call <provider> <request> <vars file> [body file]: send "METHOD /path" to the API and
+# print the HTTP status (000 when it can't be reached). The answer is in $TMP/api/<provider>.out.
+# The token goes in a curl config file, not on the command line.
+api_call() {
+  local p="$1" request="$2" vars="$3" body="${4:-}" method path header cfg code args=() token
+  method="${request%% *}"
+  path="$(api_expand "${request#* }" "$vars")"
+  token="$(api_token "$p")"
+  header="$(api_cfg "$p" .auth.header)"
+  header="${header//\{token\}/$token}"
+  cfg="$TMP/api/$p.curl"
+  (umask 077; {
+    printf 'header = "%s"\n' "$(printf '%s' "$header" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+    printf 'header = "Accept: application/json"\n'
+    [[ -z "$body" ]] || printf 'header = "Content-Type: application/json"\n'
+  } > "$cfg")
+  [[ -z "$body" ]] || args=(--data-binary "@$body")
+  code="$(curl -sS --max-time 60 -o "$TMP/api/$p.out" -w '%{http_code}' -X "$method" -K "$cfg" ${args[@]+"${args[@]}"} "$(api_cfg "$p" .base_url)$path")" || code=000
+  rm -f "$cfg"
+  # GraphQL answers 200 with the failure in errors
+  if [[ "$code" == 2?? ]] && api_has "$p" .graphql && jq -e '(.errors // []) | length > 0' "$TMP/api/$p.out" >/dev/null 2>&1; then code=400; fi
+  echo "$code"
+}
+
+# api_ok <provider> <section> <code> [default list]: whether the status is one api.yaml calls
+# a success for that section
+api_ok() {
+  jq -e --argjson c "$3" --argjson d "${4:-[200,201,202,204]}" --arg s "$2" '(.[$s].ok // $d) | index($c) != null' "$TMP/api/$1.json" >/dev/null 2>&1
+}
+
+# api_error <provider>: why the last call failed, as the API put it, without the secrets
+api_error() {
+  local m
+  m="$(jq -r --slurpfile secrets "$TMP/api/$1.secrets" '
+    (if type == "object" then (.message // .error.message // (.error | strings) // .errors[0].message // .detail // empty) else empty end)
+    | tostring | reduce $secrets[0][] as $s (.; split($s) | join("<redacted>"))' "$TMP/api/$1.out" 2>/dev/null)" || m=""
+  echo "${m:-no answer it could read}"
+}
+
+# api_render <provider> <section> <vars file> <out file> [redact]: the section's body template
+# as JSON. The template sees $prefix $app $name $id $image $port $env and $settings. With
+# redact, the env values are <redacted>.
+api_render() {
+  local p="$1" section="$2" vars="$3" out="$4" redact="${5:-}" template prelude src="$3"
+  template="$(api_cfg "$p" ".$section.body")"
+  [[ -n "$template" ]] || return 1
+  if [[ -n "$redact" ]]; then
+    src="$TMP/api/$p.redacted.vars"
+    jq -c '.env |= (. // {} | map_values("<redacted>"))' "$vars" > "$src"
+  fi
+  prelude='. as $v | $v.prefix as $prefix | $v.app as $app | $v.name as $name | $v.id as $id | $v.image as $image | $v.port as $port | ($v.env // {}) as $env | ($v.settings // {}) as $settings | $v.deploy_id as $deploy_id | '
+  jq -c "$prelude$template" "$src" > "$out" 2> "$out.err" || die "api: the $section body in providers/$p/api.yaml doesn't render: $(head -c 300 "$out.err")"
+}
+
+# api_do <provider> <section> <vars file>: the section's request, with its body when api.yaml
+# gives one (every GraphQL call has one). Prints the HTTP status.
+api_do() {
+  local p="$1" sec="$2" vars="$3" body=""
+  if api_has "$p" ".$sec.body"; then
+    body="$TMP/api/$p.$sec.body"
+    api_render "$p" "$sec" "$vars" "$body"
+  fi
+  api_call "$p" "$(api_cfg "$p" ".$sec.request")" "$vars" "$body"
+}
+
+# api_check <provider>: whether the token works
+api_check() {
+  local p="$1" vars="$TMP/api/$1.vars" code
+  api_load "$p"; api_base "$p" > "$vars"; api_secrets "$p" "$vars"
+  code="$(api_do "$p" check "$vars")"
+  api_ok "$p" check "$code" '[200]' || die "api: $p doesn't take the token in $(api_cfg "$p" .auth.env) ($code): $(api_error "$p")"
+  log "$p: the token works"
+}
+
+# api_list <provider>: what the account has, as [{id, name, url, marker}] in
+# $TMP/api/<provider>.items.json
+api_list() {
+  local p="$1" vars="$TMP/api/$1.vars" code f id name url marker
+  [[ -f "$vars" ]] || { api_base "$p" > "$vars"; api_secrets "$p" "$vars"; }
+  code="$(api_do "$p" list "$vars")"
+  api_ok "$p" list "$code" || die "api: can't list what $p has ($code): $(api_error "$p")"
+  id="$(api_cfg "$p" .list.fields.id)"; name="$(api_cfg "$p" .list.fields.name)"
+  url="$(api_cfg "$p" .list.fields.url)"; marker="$(api_cfg "$p" .list.fields.marker)"
+  jq -c "[ ($(api_cfg "$p" .list.items)) | {id: ($id), name: ($name), url: (${url:-null}), marker: (${marker:-null})} ]" \
+    "$TMP/api/$p.out" > "$TMP/api/$p.items.json" 2> "$TMP/api/$p.items.err" \
+    || die "api: the list fields in providers/$p/api.yaml don't read what $p answered: $(head -c 300 "$TMP/api/$p.items.err")"
+}
+
+# api_ours <provider>: the listed items freelunch made, one JSON object a line: the name starts
+# with the prefix and the marker holds it
+api_ours() {
+  jq -c --arg pre "$(jq -r .prefix "$TMP/api/$1.vars")" '.[] | select((.name | startswith($pre + "-")) and .marker == $pre)' "$TMP/api/$1.items.json"
+}
+
+# --- records
+
+# api_record <provider> add|remove <id> [name]: the provider's record in the store, when the
+# project has one
+api_record() {
+  local p="$1" op="$2" id="$3" name="${4:-}" cur prefix rc=0
+  [[ -n "$(state_config)" ]] || return 0
+  prefix="$(jq -r .prefix "$TMP/api/$p.vars")"
+  cur="$(record_pull "$p")"
+  if [[ -z "$cur" ]]; then
+    cur='{"engine":"api","resources":[]}'
+    [[ ! -f "$PROVIDERS_DIR/$p/cli.yaml" ]] || cur='{"engine":"cli","resources":[]}'
+  fi
+  case "$op" in
+    add)    jq -c --arg id "$id" --arg n "$name" --arg m "$prefix" --arg d "$(date -u +%Y-%m-%d)" \
+              '.resources = ((.resources // []) | map(select(.id != $id))) + [{id: $id, name: $n, kind: "app", marker: $m, created: $d}]' <<< "$cur" > "$TMP/api/$p.record" ;;
+    remove) jq -c --arg id "$id" '.resources |= map(select(.id != $id))' <<< "$cur" > "$TMP/api/$p.record" ;;
+  esac
+  record_push "$p" "$TMP/api/$p.record" || rc=$?
+  [[ $rc -ne 2 ]] || die "api: the store's record of $p changed while this ran (another machine or CI): run it again"
+  return $rc
+}
+
+# --- lifecycle
+
+# api_step <provider> <step> <vars file>: a custom function for the step when api.yaml names
+# one (custom: deno_deploy means api_custom_deno_deploy_<step>, defined in providers/<p>/api.sh,
+# which is handed the provider and the vars file and uses api_call itself); fails when there is
+# none, and the generic step runs
+api_step() {
+  local p="$1" step="$2" c; shift 2
+  c="$(api_cfg "$p" .custom)"
+  [[ -n "$c" ]] && declare -F "api_custom_${c}_$step" >/dev/null || return 1
+  "api_custom_${c}_$step" "$p" "$@"
+}
+
+# api_wait <provider> <vars file>: poll the deploy until api.yaml's done or failed statuses
+api_wait() {
+  local p="$1" vars="$2" name status code deadline timeout poll
+  api_has "$p" .wait.request || return 0
+  name="$(jq -r .name "$vars")"
+  timeout="${FREELUNCH_DEPLOY_TIMEOUT:-600}"; poll="${FREELUNCH_API_POLL:-5}"
+  deadline=$((SECONDS + timeout))
+  while true; do
+    code="$(api_do "$p" wait "$vars")"
+    api_ok "$p" wait "$code" || die "api: can't read the deploy of $name ($code): $(api_error "$p")"
+    status="$(jq -r "$(api_cfg "$p" .wait.status) | tostring" "$TMP/api/$p.out" 2>/dev/null)" || status=""
+    if jq -e --arg s "$status" '.wait.done | index($s) != null' "$TMP/api/$p.json" >/dev/null 2>&1; then
+      # where the app is, when the answer says (wait.url: a jq filter)
+      if api_has "$p" .wait.url; then jq -r "$(api_cfg "$p" .wait.url) // empty" "$TMP/api/$p.out" > "$TMP/api/$p.waiturl" 2>/dev/null || : > "$TMP/api/$p.waiturl"; fi
+      return 0
+    fi
+    if jq -e --arg s "$status" '(.wait.failed // []) | index($s) != null' "$TMP/api/$p.json" >/dev/null 2>&1; then
+      die "api: the deploy of $name is $status (see $p's dashboard for its logs)"
+    fi
+    [[ $SECONDS -lt $deadline ]] || die "api: $name is still ${status:-unknown} after ${timeout}s (FREELUNCH_DEPLOY_TIMEOUT)"
+    sleep "$poll"
+  done
+}
+
+# api_deploy <provider> <app> <image> <port> <env file> <dry run 0|1> [source folder]: find
+# <prefix>-<app>; create it when it isn't there, update it when freelunch made it, stop when
+# somebody else did. A provider that deploys source, not an image, gets the folder in the vars
+# (source), for its custom deploy step.
+api_deploy() {
+  local p="$1" app="$2" image="$3" port="$4" envfile="$5" dry="$6" source="${7:-}" vars name id found code env url
+  api_load "$p"
+  vars="$TMP/api/$p.vars"
+  api_base "$p" > "$vars.base"
+  env='{}'; [[ -z "$envfile" ]] || env="$(env_json "$envfile")"
+  printf '%s' "$env" > "$TMP/api/$p.env"
+  name="$(jq -r .prefix "$vars.base")-$app"
+  [[ -z "$source" ]] || source="$(abs_path "$source")"
+  jq -c --arg app "$app" --arg name "$name" --arg image "$image" --arg source "$source" --argjson port "${port:-8080}" --slurpfile env "$TMP/api/$p.env" \
+    '. + {app: $app, name: $name, image: $image, source: $source, port: $port, env: $env[0]}' "$vars.base" > "$vars"
+  if [[ "$dry" == 1 ]]; then
+    log "$p: $name: would, with the token left out and the environment's values as <redacted>:"
+    echo "  find:   $(api_cfg "$p" .list.request)"
+    api_render "$p" create "$vars" "$TMP/api/$p.dry" redact
+    echo "  create: $(api_cfg "$p" .create.request) (when $name isn't there)  $(cat "$TMP/api/$p.dry")"
+    if api_has "$p" .update.body; then
+      api_render "$p" update "$vars" "$TMP/api/$p.dry" redact
+      echo "  update: $(api_cfg "$p" .update.request) (when freelunch made it)  $(cat "$TMP/api/$p.dry")"
+    fi
+    if api_has "$p" .deploy.request; then echo "  deploy: $(api_cfg "$p" .deploy.request)"
+    elif [[ -n "$(api_cfg "$p" .custom)" ]]; then echo "  deploy: a custom step ($(api_cfg "$p" .custom)) uploads ${source:-the source folder}"; fi
+    if api_has "$p" .wait.request; then echo "  wait:   $(api_cfg "$p" .wait.request) until $(api_cfg "$p" '.wait.done | join(" or ")')"; fi
+    return 0
+  fi
+  api_secrets "$p" "$vars"
+  api_list "$p"
+  found="$(jq -c --arg n "$name" 'map(select(.name == $n)) | first // empty' "$TMP/api/$p.items.json")"
+  if [[ -n "$found" ]]; then
+    id="$(jq -r .id <<< "$found")"
+    if [[ "$(jq -r '.marker // ""' <<< "$found")" != "$(jq -r .prefix "$vars")" ]]; then
+      die "api: $p has a service $name already, which freelunch didn't make. Pick another name_prefix in $(rel "$(config_dir "$p")/terraform.tfvars"), or rename that service"
+    fi
+    jq -c --arg id "$id" '. + {id: $id}' "$vars" > "$vars.new" && mv "$vars.new" "$vars"
+    if api_step "$p" update "$vars"; then :
+    elif api_has "$p" .update.request; then
+      code="$(api_do "$p" update "$vars")"
+      api_ok "$p" update "$code" || die "api: can't update $name ($code): $(api_error "$p")"
+    fi
+    log "$p: $name: updated"
+  else
+    if api_step "$p" create "$vars"; then :
+    else
+      code="$(api_do "$p" create "$vars")"
+      api_ok "$p" create "$code" || die "api: can't make $name ($code): $(api_error "$p")"
+      id="$(jq -r "$(api_cfg "$p" .create.id) | tostring" "$TMP/api/$p.out" 2>/dev/null)" || id=""
+      [[ -n "$id" && "$id" != null ]] || die "api: $p made $name but its answer has no id at $(api_cfg "$p" .create.id)"
+      jq -c --arg id "$id" '. + {id: $id}' "$vars" > "$vars.new" && mv "$vars.new" "$vars"
+    fi
+    api_record "$p" add "$id" "$name"
+    log "$p: $name: made"
+  fi
+  if api_step "$p" deploy "$vars"; then :
+  elif api_has "$p" .deploy.request; then
+    code="$(api_do "$p" deploy "$vars")"
+    api_ok "$p" deploy "$code" || die "api: can't start the deploy of $name ($code): $(api_error "$p")"
+    if api_has "$p" .deploy.id; then
+      jq -c --arg d "$(jq -r "$(api_cfg "$p" .deploy.id) | tostring" "$TMP/api/$p.out")" '. + {deploy_id: $d}' "$vars" > "$vars.new" && mv "$vars.new" "$vars"
+    fi
+  fi
+  : > "$TMP/api/$p.waiturl"
+  api_wait "$p" "$vars"
+  api_list "$p"
+  url="$(jq -r --arg n "$name" 'map(select(.name == $n)) | first | .url // empty' "$TMP/api/$p.items.json")"
+  [[ -n "$url" ]] || url="$(cat "$TMP/api/$p.waiturl" 2>/dev/null || true)"
+  if [[ -n "$url" ]]; then
+    api_has "$p" .url && url="$(api_expand "$(api_cfg "$p" .url)" <(jq -cn --arg url "$url" '{url: $url}'))"
+    report_url "$p" "$url" "$app"
+  fi
+}
+
+# api_destroy <provider>: delete what freelunch made: the listed services with its prefix and
+# marker, and those its record names. A service of the same name that it didn't make stays.
+api_destroy() {
+  local p="$1" vars="$TMP/api/$1.vars" item id name code rec ids="" foreign
+  api_load "$p"
+  api_base "$p" > "$vars"; api_secrets "$p" "$vars"
+  api_list "$p"
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    id="$(jq -r .id <<< "$item")"; name="$(jq -r .name <<< "$item")"
+    api_delete_one "$p" "$id" "$name"
+    ids="$ids $id "
+  done < <(api_ours "$p")
+  foreign="$(jq -r --arg pre "$(jq -r .prefix "$vars")" '.[] | select((.name | startswith($pre + "-")) and .marker != $pre) | .name' "$TMP/api/$p.items.json")"
+  [[ -z "$foreign" ]] || log "$p: left alone, as freelunch didn't make them: $(paste -sd' ' - <<< "$foreign")"
+  if [[ -n "$(state_config)" ]]; then
+    rec="$(record_pull "$p")"; rec="${rec:-"{}"}"
+    while IFS=$'\t' read -r id name; do
+      [[ -n "$id" && "$ids" != *" $id "* ]] || continue
+      api_delete_one "$p" "$id" "$name"
+    done < <(jq -r '.resources[]? | [.id, .name] | @tsv' <<< "$rec")
+  fi
+  [[ -n "$ids" ]] || log "$p: nothing of freelunch's to delete"
+}
+
+# api_delete_one <provider> <id> <name>: delete it; already gone is a success
+api_delete_one() {
+  local p="$1" id="$2" name="$3" vars="$TMP/api/$1.vars" code
+  jq -c --arg id "$id" --arg name "$name" '. + {id: $id, name: $name}' "$vars" > "$vars.del"
+  if api_step "$p" delete "$vars.del"; then :
+  else
+    code="$(api_do "$p" delete "$vars.del")"
+    api_ok "$p" delete "$code" '[200,202,204,404]' || die "api: can't delete $name ($code): $(api_error "$p")"
+  fi
+  log "$p: deleted $name"
+  api_record "$p" remove "$id"
+}
+
+# api_status <provider>: what is there
+api_status() {
+  local p="$1" vars="$TMP/api/$1.vars" item rec id name
+  api_load "$p"
+  api_base "$p" > "$vars"; api_secrets "$p" "$vars"
+  api_list "$p"
+  echo "Apps on $p ($(jq -r .prefix "$vars")-*)"
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    printf '  %-20s %s\n' "$(jq -r '.name' <<< "$item")" "$(jq -r '.url // "no address yet"' <<< "$item")"
+  done < <(api_ours "$p")
+  [[ -n "$(api_ours "$p")" ]] || echo "  nothing deployed yet (freelunch api $p deploy)"
+  if [[ -n "$(state_config)" ]]; then
+    rec="$(record_pull "$p")"
+    if [[ -z "$rec" ]]; then echo "  record in the store: none"
+    else
+      echo "  record in the store: $(jq -r '.resources | length' <<< "$rec") resources"
+      while IFS=$'\t' read -r id name; do
+        jq -e --arg id "$id" 'any(.[]; .id == $id)' "$TMP/api/$p.items.json" >/dev/null || echo "  $name is in the record but $p doesn't list it"
+      done < <(jq -r '.resources[]? | [.id, .name] | @tsv' <<< "$rec")
+    fi
+  fi
+}
+
+# cmd_api <provider> check|list|status|destroy | deploy <app> --image <ref> | --source <folder> [--port n] [--env-file f] [--dry-run]
+cmd_api() {
+  local p="${1:-}" sub="${2:-}" app="" image="" port="" envfile="" dry=0 source=""
+  [[ -n "$p" && -n "$sub" ]] || die "api: freelunch api <provider> check | list | status | destroy | deploy <app> --image <ref>"
+  [[ -f "$PROVIDERS_DIR/$p/api.yaml" ]] || die "api: $p has no api.yaml"
+  shift 2
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if [[ -n "$(state_config)" ]]; then state_setup; fi
+  case "$sub" in
+    check)   api_check "$p" ;;
+    list)    api_load "$p"; api_base "$p" > "$TMP/api/$p.vars"; api_secrets "$p" "$TMP/api/$p.vars"; api_list "$p"; jq -r '.[] | [.id, .name, (.url // ""), (.marker // "")] | @tsv' "$TMP/api/$p.items.json" ;;
+    status)  api_status "$p" ;;
+    destroy) api_destroy "$p" ;;
+    deploy)
+      app="${1:-}"; [[ -n "$app" ]] || die "api deploy: give the app's name"; shift
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --image)    [[ $# -gt 1 ]] || die "api deploy: --image takes an image"; image="$2"; shift ;;
+          --port)     [[ $# -gt 1 && "$2" =~ ^[0-9]+$ ]] || die "api deploy: --port takes a number"; port="$2"; shift ;;
+          --env-file) [[ $# -gt 1 && -f "$2" ]] || die "api deploy: --env-file takes a file"; envfile="$2"; shift ;;
+          --source)   [[ $# -gt 1 && -d "$2" ]] || die "api deploy: --source takes the folder with the app's source"; source="$2"; shift ;;
+          --dry-run)  dry=1 ;;
+          *)          die "api deploy: unknown option $1" ;;
+        esac
+        shift
+      done
+      [[ -n "$image" || -n "$source" ]] || die "api deploy: --image (a container image) or --source (a folder of source code) is needed"
+      api_deploy "$p" "$app" "$image" "$port" "$envfile" "$dry" "$source" ;;
+    *) die "api: check, list, status, destroy or deploy" ;;
+  esac
+}
+
+# --- The cli engine ----------------------------------------------------------------------
+#
+# For a provider whose supported way in is its own command line tool (Turso's turso, say):
+# providers/<name>/cli.yaml declares the tool and one command per verb, each as a list of words
+# that is run without a shell, so what is substituted into it can't be taken for more words.
+#
+#   tool: turso                    # the program; doctor checks it is installed
+#   install: "brew install tursodatabase/tap/turso"
+#   auth:
+#     env: TURSO_API_TOKEN         # optional: the variable the tool reads; doctor checks it is set
+#   settings: [org]                # keys read from terraform.tfvars
+#   check: [turso, auth, whoami]   # does it sign in?
+#   list: { command: [turso, db, list], format: lines, skip: 1 }   # or format: json, items, fields
+#   create: [turso, db, create, "{name}"]
+#   deploy: [turso, db, shell, "{name}", ...]      # optional: after create or on a repeat
+#   delete: [turso, db, destroy, "{name}", --yes]
+#   gone: "not found"              # optional: text in a failed delete that means it was gone already
+#
+# {name} is <name_prefix>-<app>; {prefix}, {app} and each setting can be used too. A command line
+# tool has no label to mark what freelunch made, so the provider's record in the state store does:
+# something that exists and isn't in the record is never changed or deleted (--adopt says it is
+# yours). Without a store there is no record, so freelunch changes nothing that already exists.
+
+# yaml_load <provider> <file>: the provider's yaml as JSON in $TMP/api/<provider>.json
+yaml_load() {
+  local p="$1" f="$PROVIDERS_DIR/$1/$2"
+  command -v jq >/dev/null || die "jq is required for the $2 engine"
+  [[ -f "$f" ]] || die "$p has no $2 (providers/$p/)"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  mkdir -p "$TMP/api"
+  [[ -f "$TMP/api/$p.json" ]] || api_yaml_json "$f" > "$TMP/api/$p.json" || die "can't read providers/$p/$2"
+}
+
+# cli_load <provider>: cli.yaml, checked for what the driver needs
+cli_load() {
+  local p="$1" path
+  yaml_load "$p" cli.yaml
+  for path in tool check.0 list.command.0 create.0 delete.0; do
+    jq -e --arg p "$path" 'getpath($p | split(".") | map(tonumber? // .)) | . != null' "$TMP/api/$p.json" >/dev/null 2>&1 \
+      || die "cli: providers/$p/cli.yaml needs ${path%.0}"
+  done
+}
+
+# cli_words <provider> <verb> [json of the vars]: the verb's command as words, one a line, with
+# {name} and the other variables put in. A name with no value stops the run.
+cli_words() {
+  local p="$1" verb="$2" vars="${3:-$TMP/api/$1.vars}" out
+  out="$(jq -r --arg v "$verb" --slurpfile x "$vars" '
+    (if $v == "list" then .list.command else .[$v] end) as $words
+    | ($x[0] + ($x[0].settings // {})) as $vars
+    | $words[] | tostring
+    | reduce ($vars | to_entries[] | select(.value | type | . == "string" or . == "number")) as $e (.; gsub("\\{" + $e.key + "\\}"; $e.value | tostring))' "$TMP/api/$p.json")"
+  if [[ "$out" =~ \{([a-z_]+)\} ]]; then die "cli: the $verb command of $p needs {${BASH_REMATCH[1]}}, which has no value here"; fi
+  printf '%s\n' "$out"
+}
+
+# cli_run <provider> <verb> [vars file]: run the verb's command; its output is in
+# $TMP/api/<provider>.cli.out and the status is returned
+cli_run() {
+  local p="$1" verb="$2" words=() w
+  while IFS= read -r w; do words+=("$w"); done < <(cli_words "$p" "$verb" "${3:-}")
+  "${words[@]}" > "$TMP/api/$p.cli.out" 2>&1
+}
+
+# cli_tool <provider>: whether the tool is installed
+cli_tool() { command -v "$(api_cfg "$1" .tool)" >/dev/null; }
+
+# cli_need_tool <provider>: stop, saying how to get the tool, when it isn't there
+cli_need_tool() {
+  cli_tool "$1" || die "cli: $1 takes $(api_cfg "$1" .tool), which isn't installed$(api_cfg "$1" .install | sed 's/.*/ (&)/')"
+}
+
+# cli_names <provider>: the names the account has, one a line
+cli_names() {
+  local p="$1"
+  cli_run "$p" list "$TMP/api/$p.vars" || die "cli: $(api_cfg "$p" .tool) couldn't list what $p has: $(head -c 300 "$TMP/api/$p.cli.out")"
+  if [[ "$(api_cfg "$p" .list.format)" == json ]]; then
+    jq -r "($(api_cfg "$p" .list.items)) | ($(api_cfg "$p" .list.fields.name))" "$TMP/api/$p.cli.out"
+  else
+    awk -v skip="$(api_cfg "$p" .list.skip)" 'NR > skip + 0 && NF { print $1 }' "$TMP/api/$p.cli.out"
+  fi
+}
+
+# cli_prepare <provider> <app>: the vars of a command: prefix, settings, app and name
+cli_prepare() {
+  local p="$1" app="${2:-}"
+  cli_load "$p"
+  api_base "$p" > "$TMP/api/$p.vars.base"
+  jq -c --arg app "$app" '. + {app: $app, name: (.prefix + "-" + $app)}' "$TMP/api/$p.vars.base" > "$TMP/api/$p.vars"
+}
+
+# cli_recorded <provider> <name>: whether the provider's record in the store names it
+cli_recorded() {
+  local rec
+  [[ -n "$(state_config)" ]] || return 1
+  rec="$(record_pull "$1")"
+  [[ -n "$rec" ]] && jq -e --arg n "$2" 'any(.resources[]?; .name == $n)' <<< "$rec" >/dev/null
+}
+
+# cli_deploy <provider> <app> <adopt 0|1> <dry run 0|1>: make <prefix>-<app> if it isn't there; run
+# the deploy command when there is one; leave alone what freelunch didn't make
+cli_deploy() {
+  local p="$1" app="$2" adopt="$3" dry="$4" name w exists=0 names
+  cli_prepare "$p" "$app"
+  name="$(jq -r .name "$TMP/api/$p.vars")"
+  if [[ "$dry" == 1 ]]; then
+    log "$p: $name: would run, nothing sent:"
+    for w in create deploy; do
+      api_has "$p" ".$w" || continue
+      echo "  $w: $(cli_words "$p" "$w" | paste -sd' ' -)"
+    done
+    return 0
+  fi
+  cli_need_tool "$p"
+  # listed first, on its own: a list that fails must stop the run, not look like "not there"
+  names="$(cli_names "$p")" || exit 1
+  ! grep -qx "$name" <<< "$names" || exists=1
+  if [[ $exists -eq 1 ]]; then
+    if [[ "$adopt" == 1 ]] || cli_recorded "$p" "$name"; then :
+    elif [[ -z "$(state_config)" ]]; then
+      die "cli: $p has $name already, and with no state store there is no record to say freelunch made it, so it is left alone. freelunch state init keeps one; --adopt says it is yours"
+    else
+      die "cli: $p has $name already, which freelunch didn't make (it isn't in the record). Pick another name_prefix in $(rel "$(config_dir "$p")/terraform.tfvars"), or --adopt if it is yours"
+    fi
+  fi
+  if [[ $exists -eq 0 ]]; then
+    cli_run "$p" create || die "cli: can't make $name at $p: $(head -c 300 "$TMP/api/$p.cli.out")"
+    api_record "$p" add "$name" "$name"
+    log "$p: $name: made"
+  else
+    log "$p: $name: there already, and ours"
+    [[ "$adopt" != 1 ]] || api_record "$p" add "$name" "$name"
+  fi
+  if api_has "$p" .deploy; then
+    cli_run "$p" deploy || die "cli: the deploy of $name at $p failed: $(head -c 300 "$TMP/api/$p.cli.out")"
+    log "$p: $name: deployed"
+  fi
+}
+
+# cli_destroy <provider> <all with the prefix 0|1>: delete what the provider's record names
+# (with --all-with-prefix, with no record, everything that starts with the prefix)
+cli_destroy() {
+  local p="$1" byprefix="$2" rec names name done_any=0 gone
+  cli_prepare "$p"
+  cli_need_tool "$p"
+  names=""
+  if [[ -n "$(state_config)" ]]; then
+    rec="$(record_pull "$p")"
+    names="$(jq -r '.resources[]?.name' <<< "${rec:-"{}"}")"
+  elif [[ "$byprefix" == 1 ]]; then
+    names="$(cli_names "$p")" || exit 1
+    names="$(grep "^$(jq -r .prefix "$TMP/api/$p.vars")-" <<< "$names" || true)"
+  else
+    die "cli: with no state store there is no record of what freelunch made at $p. freelunch state init keeps one; --all-with-prefix deletes everything there that starts with $(jq -r .prefix "$TMP/api/$p.vars")-"
+  fi
+  gone="$(api_cfg "$p" .gone)"
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    jq -c --arg n "$name" '. + {name: $n}' "$TMP/api/$p.vars.base" > "$TMP/api/$p.vars.del"
+    if ! cli_run "$p" delete "$TMP/api/$p.vars.del"; then
+      if [[ -n "$gone" ]] && grep -qiF "$gone" "$TMP/api/$p.cli.out"; then log "$p: $name was gone already"
+      else die "cli: can't delete $name at $p: $(head -c 300 "$TMP/api/$p.cli.out")"; fi
+    else
+      log "$p: deleted $name"
+    fi
+    api_record "$p" remove "$name"
+    done_any=1
+  done <<< "$names"
+  [[ $done_any -eq 1 ]] || log "$p: nothing of freelunch's to delete"
+}
+
+# cli_status <provider>: what is there
+cli_status() {
+  local p="$1" pre name rec
+  cli_prepare "$p"
+  pre="$(jq -r .prefix "$TMP/api/$p.vars")"
+  echo "Apps on $p ($pre-*)"
+  if ! cli_tool "$p"; then echo "  not asked: $(api_cfg "$p" .tool) isn't installed"; return 0; fi
+  if ! (cli_names "$p") > "$TMP/api/$p.names" 2>"$TMP/api/$p.names.err"; then echo "  can't ask: $(sed 's/^freelunch: //' "$TMP/api/$p.names.err")"; return 0; fi
+  if [[ -n "$(state_config)" ]]; then
+    rec="$(record_pull "$p")"
+    while IFS= read -r name; do
+      [[ "$name" == "$pre-"* ]] || continue
+      if [[ -n "$rec" ]] && jq -e --arg n "$name" 'any(.resources[]?; .name == $n)' <<< "$rec" >/dev/null; then printf '  %-24s %s\n' "$name" "ours"
+      else printf '  %-24s %s\n' "$name" "not in the record (freelunch didn't make it)"; fi
+    done < "$TMP/api/$p.names"
+  else
+    grep "^$pre-" "$TMP/api/$p.names" | sed 's/^/  /' || true
+  fi
+}
+
+# doctor_cli <provider>: the tool is installed, its variable is set, and it signs in
+doctor_cli() {
+  local p="$1" tool var
+  cli_load "$p"; cli_prepare "$p" doctor
+  tool="$(api_cfg "$p" .tool)"
+  echo "$p (cli engine: $tool)"
+  if ! cli_tool "$p"; then check fail "$tool isn't installed$(api_cfg "$p" .install | sed 's/.*/ (&)/')"; return 0; fi
+  check ok "$tool is installed"
+  var="$(api_cfg "$p" .auth.env)"
+  if [[ -n "$var" && -z "${!var:-}" ]]; then check fail "$var is not set: export it or put it in $(rel "$(state_root)")/.env (providers/$p/README.md)"; return 0; fi
+  if cli_run "$p" check; then check ok "$tool signs in"; else check fail "$tool doesn't sign in: $(head -c 200 "$TMP/api/$p.cli.out")"; fi
+}
+
+cmd_cli() {
+  local p="${1:-}" sub="${2:-}" app="" adopt=0 dry=0 byprefix=0
+  [[ -n "$p" && -n "$sub" ]] || die "cli: freelunch cli <provider> check | status | destroy | deploy <app> [--adopt] [--dry-run]"
+  [[ -f "$PROVIDERS_DIR/$p/cli.yaml" ]] || die "cli: $p has no cli.yaml"
+  shift 2
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if [[ -n "$(state_config)" ]]; then state_setup; fi
+  case "$sub" in
+    check)   doctor_cli "$p"; [[ $FAILS -eq 0 ]] ;;
+    status)  cli_status "$p" ;;
+    destroy) [[ "${1:-}" != --all-with-prefix ]] || byprefix=1; cli_destroy "$p" "$byprefix" ;;
+    deploy)
+      app="${1:-}"; [[ -n "$app" ]] || die "cli deploy: give the app's name"; shift
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --adopt)   adopt=1 ;;
+          --dry-run) dry=1 ;;
+          *)         die "cli deploy: unknown option $1" ;;
+        esac
+        shift
+      done
+      cli_deploy "$p" "$app" "$adopt" "$dry" ;;
+    *) die "cli: check, status, destroy or deploy" ;;
+  esac
+}
+
+# --- The guided engine -------------------------------------------------------------------
+#
+# For a provider with no usable API or command line: providers/<name>/guided.yaml holds the
+# steps to do by hand and, if the provider has any way to ask, how to check the token:
+#
+#   steps: |
+#     1. Sign in at ...
+#   base_url: https://api.example.com      # optional, with auth and check, as api.yaml has them
+#   auth: { env: EXAMPLE_TOKEN, header: "Authorization: Bearer {token}" }
+#   check: { request: GET /me, ok: [200] }
+#
+# freelunch guided <provider> prints the steps and checks the token when it can; doctor checks
+# it for every guided provider the project has a folder for.
+
+guided_load() { yaml_load "$1" guided.yaml; jq -e '.steps | strings | length > 0' "$TMP/api/$1.json" >/dev/null 2>&1 || die "guided: providers/$1/guided.yaml needs steps"; }
+
+# guided_check <provider>: 0 with a line saying how the token stands, 1 when it is wrong
+guided_check() {
+  local p="$1" var code vars="$TMP/api/$1.vars"
+  guided_load "$p"
+  if ! api_has "$p" .check.request; then check warn "$p has no way to check a token: the steps above are the whole of it"; return 0; fi
+  var="$(api_cfg "$p" .auth.env)"
+  if [[ -n "$var" && -z "${!var:-}" ]]; then check fail "$var is not set: export it or put it in $(rel "$(state_root)")/.env (providers/$p/README.md)"; return 1; fi
+  api_base "$p" > "$vars"; api_secrets "$p" "$vars"
+  code="$(api_do "$p" check "$vars")"
+  if api_ok "$p" check "$code" '[200]'; then check ok "$p takes the token in $var"; return 0; fi
+  check fail "$p doesn't take the token in $var ($code): $(api_error "$p")"; return 1
+}
+
+doctor_guided() {
+  echo "$1 (guided engine: steps by hand)"
+  guided_check "$1" || true
+}
+
+cmd_guided() {
+  local p="${1:-}"
+  [[ -n "$p" ]] || die "guided: freelunch guided <provider>"
+  [[ -f "$PROVIDERS_DIR/$p/guided.yaml" ]] || die "guided: $p has no guided.yaml"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  guided_load "$p"
+  echo "$p has no API or command line freelunch can drive, so these steps are yours:"
+  echo
+  api_cfg "$p" .steps
+  echo
+  guided_check "$p" >&2
+}
+
+# doctor_engines: the api, cli and guided providers the project has a folder for
+doctor_engines() {
+  local p
+  [[ -n "$PROJECT" ]] || return 0
+  for p in $(cd "$PROVIDERS_DIR" && ls -d -- */ 2>/dev/null | sed 's|/$||' | grep -v '^_'); do
+    [[ -d "$PROJECT/$p" ]] || continue
+    if [[ -f "$PROVIDERS_DIR/$p/api.yaml" ]]; then
+      echo "$p (api engine)"
+      api_load "$p"; api_base "$p" > "$TMP/api/$p.vars"
+      local var; var="$(api_cfg "$p" .auth.env)"
+      if [[ -z "${!var:-}" ]]; then check fail "$var is not set: export it or put it in $(rel "$(state_root)")/.env (providers/$p/README.md)"; continue; fi
+      api_secrets "$p" "$TMP/api/$p.vars"
+      local code; code="$(api_do "$p" check "$TMP/api/$p.vars")"
+      if api_ok "$p" check "$code" '[200]'; then check ok "$p takes the token in $var"; else check fail "$p doesn't take the token in $var ($code): $(api_error "$p")"; fi
+    elif [[ -f "$PROVIDERS_DIR/$p/cli.yaml" ]]; then doctor_cli "$p"
+    elif [[ -f "$PROVIDERS_DIR/$p/guided.yaml" ]]; then doctor_guided "$p"
+    fi
+  done
+}
+
 is_platform() { [[ "$(meta "$1" layer)" == "platform" ]]; }
 
 # platform_field <provider> <field>: a field of the stack's target (the platform contract),
@@ -3275,53 +4374,33 @@ platform_field() {
   jq -r --arg f "$2" '.outputs.platforms.value[0] | getpath($f | split(".")) // empty' "$(config_dir "$1")/terraform.tfstate" 2>/dev/null || true
 }
 
-platform_up() { # platform_up <provider>: make the target the stack declares
-  case "$1" in
-    northflank) northflank_up "$(platform_field northflank id)" "$(platform_field northflank region)" ;;
-    cloud-run)  cloud_run_up "$(platform_field cloud-run id)" "$(platform_field cloud-run region)" ;;
-    scaleway)   scaleway_up "$(platform_field scaleway id)" "$(platform_field scaleway region)" "$(platform_field scaleway settings.project_id)" ;;
-  esac
+# engine_apply <provider> <plan file> [args]: the tofu engine's apply: the stack declares the
+# target, then the provider's hook makes it (the Northflank project)
+engine_apply() {
+  local p="$1" plan="$2"; shift 2
+  apply_once "$p" "$plan" "$@"
+  engine_call "$p" apply
 }
 
-# destroy_platform <provider> [extra args]: destroy the stack, then what apply and deploy
+# engine_destroy <provider> [extra args]: destroy the stack, then what apply and deploy
 # made at the provider. tofu/terraform fail when you decline, so that only happens after
 # a yes. A destroyed stack keeps its state file and tfvars, so a second run finishes what
 # an interrupted one left.
-destroy_platform() {
-  local p="$1" id state region="" label="" project=""; shift
-  state="$(config_dir "$p")/terraform.tfstate"
-  id="$(platform_field "$p" id)"
-  region="$(platform_field "$p" region)"; label="$(platform_field "$p" settings.label)"; project="$(platform_field "$p" settings.project_id)"
-  if [[ -z "$id" && -f "$state" ]]; then
-    if [[ "$p" == cloud-run ]]; then
-      id="$(tfvar "$(config_dir "$p")/terraform.tfvars" project_id 2>/dev/null || true)"
-      region="$(tfvar "$(config_dir "$p")/terraform.tfvars" region 2>/dev/null || true)"; region="${region:-us-central1}"
-      label="$(tfvar "$(config_dir "$p")/terraform.tfvars" name_prefix 2>/dev/null || true)"; label="${label:-freelunch}"
-    else
-      id="$(tfvar "$(config_dir "$p")/terraform.tfvars" name_prefix 2>/dev/null || true)"
-      id="${id:-freelunch}"
-      region="$(tfvar "$(config_dir "$p")/terraform.tfvars" region 2>/dev/null || true)"; region="${region:-fr-par}"
-      project="$(tfvar "$(config_dir "$p")/terraform.tfvars" project_id 2>/dev/null || true)"
-    fi
-  fi
+engine_destroy() {
+  local p="$1" target id region project label; shift
+  # What to delete at the provider is read first: the stack's state goes with the destroy.
+  target="$(engine_call "$p" target)"
+  IFS=$'\x1f' read -r id region project label <<< "$target" || true
   run_stack destroy "$p" "$@"
   [[ -n "$id" ]] || return 0
-  case "$p" in
-    northflank) northflank_down "$id" ;;
-    cloud-run)  cloud_run_down "$id" "$region" "$label" ;;
-    scaleway)   scaleway_down "$id" "$region" "$project" ;;
-  esac
+  engine_call "$p" destroy "$id" "$region" "$project" "$label"
 }
 
-deploy_platform() { # deploy_platform <target> <dry run 0|1>
+engine_deploy() { # engine_deploy <target> <dry run 0|1>
   local provider
   provider="$(jq -r --arg h "$1" '.[$h].provider' "$TMP/targets.json")"
-  case "$provider" in
-    northflank) northflank_deploy "$@" ;;
-    cloud-run)  cloud_run_deploy "$@" ;;
-    scaleway)   scaleway_deploy "$@" ;;
-    *)          die "$1: freelunch can't deploy to $provider yet" ;;
-  esac
+  engine_defined "$provider" deploy || die "$1: freelunch can't deploy to $provider yet"
+  engine_call "$provider" deploy "$@"
 }
 
 # env_json <dotenv file>: its KEY=value lines as a JSON object, read the way docker compose
@@ -3880,7 +4959,7 @@ northflank_deploy() {
   fi
 
   # Fields split at \x1f, which unlike a tab keeps an empty env_file in its place.
-  while IFS=$'\x1f' read -r name compose env_file bucket; do
+  while IFS=$'\x1f' read -r name compose env_file bucket database; do
     [[ -n "$name" ]] || continue
     jq --arg h "$host" --arg n "$name" '.[$h].services[$n]' "$TMP/platforms.json" > "$TMP/spec.json"
     image="$(jq -r '.image' "$TMP/spec.json")"
@@ -3928,13 +5007,13 @@ northflank_deploy() {
       fi
       code="$(nf PUT "/projects/$project/services/deployment" "$TMP/service.json")"
       nf_ok "$code" || die "northflank: can't update the service $name ($code): $(nf_error)"
-      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}"
+      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}${database:+, with the database $database}"
       service="$(jq -r --arg n "$name" '.data.id // $n' "$TMP/nf.json")"
       services+=("$service")
       northflank_attach "$project" "$service" ${volumes[@]+"${volumes[@]}"}
     fi
     rm -f "$TMP/service.json"
-  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // "")] | join("\u001f")' "$TMP/targets.json")
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // ""), (.value.database // "")] | join("\u001f")' "$TMP/targets.json")
 
   if [[ "$(jq -r --arg h "$host" '.[$h].tunnel' "$TMP/targets.json")" == "true" ]]; then
     ( umask 077; jq -r --arg h "$host" '.[$h]' "$TMP/tunnel_tokens.json" > "$TMP/tunnel.token" )
@@ -4266,7 +5345,7 @@ cloud_run_deploy() {
   fi
   svc="$CR_API/projects/$project/locations/$region/services"
   # Fields split at \x1f, which unlike a tab keeps an empty env_file in its place.
-  while IFS=$'\x1f' read -r name compose env_file bucket; do
+  while IFS=$'\x1f' read -r name compose env_file bucket database; do
     [[ -n "$name" ]] || continue
     jq --arg h "$host" --arg n "$name" '.[$h].services[$n]' "$TMP/platforms.json" > "$TMP/spec.json"
     image="$(jq -r '.image' "$TMP/spec.json")"
@@ -4290,12 +5369,12 @@ cloud_run_deploy() {
         code="$(cr PATCH "$svc/$name" "$TMP/service.json")"
       fi
       cr_ok "$code" || die "cloud-run: can't deploy the service $name ($code): $(cr_error)"
-      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}"
+      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}${database:+, with the database $database}"
       services+=("$name")
       cr_operation "deploying $name"
     fi
     rm -f "$TMP/service.json"
-  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // "")] | join("\u001f")' "$TMP/targets.json")
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // ""), (.value.database // "")] | join("\u001f")' "$TMP/targets.json")
   [[ "$dry_run" == 0 ]] || return 0
 
   for name in ${services[@]+"${services[@]}"}; do
@@ -4573,7 +5652,7 @@ scaleway_deploy() {
     [[ -n "$ns" && "$ns" != foreign ]] || die "scaleway: there is no namespace $namespace yet: freelunch apply scaleway makes it"
   fi
   local ids=() names=()
-  while IFS=$'\x1f' read -r name compose env_file bucket; do
+  while IFS=$'\x1f' read -r name compose env_file bucket database; do
     [[ -n "$name" ]] || continue
     jq --arg h "$host" --arg n "$name" '.[$h].services[$n]' "$TMP/platforms.json" > "$TMP/spec.json"
     image="$(jq -r '.image' "$TMP/spec.json")"
@@ -4600,11 +5679,11 @@ scaleway_deploy() {
       fi
       sw_ok "$code" || die "scaleway: can't deploy the container $name ($code): $(sw_error)"
       id="$(jq -r '.id' "$TMP/sw.json")"
-      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}"
+      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}${database:+, with the database $database}"
       ids+=("$id"); names+=("$name")
     fi
     rm -f "$TMP/service.json"
-  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // "")] | join("\u001f")' "$TMP/targets.json")
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // ""), (.value.database // "")] | join("\u001f")' "$TMP/targets.json")
   [[ "$dry_run" == 0 ]] || return 0
 
   local i
@@ -4657,6 +5736,319 @@ doctor_scaleway() {
     2??) check ok "SCW_SECRET_KEY signs in, and Serverless Containers answers in $region" ;;
     401|403) check fail "Scaleway doesn't take SCW_SECRET_KEY for the project $project ($code): $(sw_error)" ;;
     *) check fail "can't reach Scaleway ($code): $(sw_error)" ;;
+  esac
+}
+
+# --- Render ---------------------------------------------------------------------------
+
+# A Render workspace holds the web services freelunch deploy makes, one per app, named
+# <name_prefix>-<app>, through Render's public API. apply checks the workspace, deploy makes
+# the services from the apps' images, and destroy deletes them. freelunch marks what it makes
+# with the environment variable FREELUNCH_MANAGED, and leaves other services alone. A free
+# service is public at <name>.onrender.com and sleeps after 15 minutes without a request.
+RD_API="https://api.render.com/v1"
+RD_MARK="FREELUNCH_MANAGED"
+
+rd_key() {
+  [[ -n "${RENDER_API_KEY:-}" ]] || die "render: RENDER_API_KEY is not set: export it, or put it in $(rel "$(state_root)")/.env (providers/render/README.md#api-key)"
+}
+
+# rd <method> <path> [JSON file]: call Render's API with that key, and print the HTTP status
+# (000 when it can't be reached). The answer is in $TMP/rd.json. A body travels in a file, and
+# its secret values go to $TMP/rd.secrets for rd_error to leave out.
+rd() {
+  local code args=()
+  rd_key
+  echo '[]' > "$TMP/rd.secrets"
+  if [[ $# -ge 3 ]]; then
+    args=(--data-binary "@$3")
+    jq -c '[(.envVars // . | if type == "array" then .[] else empty end | .value? | strings), (.authToken? | strings) | select(length >= 4)]' "$3" > "$TMP/rd.secrets" 2>/dev/null || echo '[]' > "$TMP/rd.secrets"
+  fi
+  code="$(curl -sS --max-time 60 -o "$TMP/rd.json" -w '%{http_code}' -X "$1" -H "Authorization: Bearer $RENDER_API_KEY" \
+    -H "Accept: application/json" -H "Content-Type: application/json" ${args[@]+"${args[@]}"} "$RD_API$2")" || code=000
+  echo "$code"
+}
+
+rd_ok() { [[ "$1" == 2?? ]]; }
+
+# rd_error: why the last call failed, as Render put it, without the request's secrets
+rd_error() {
+  local m
+  m="$(jq -r --slurpfile secrets "$TMP/rd.secrets" '(.message // empty) | reduce $secrets[0][] as $s (.; split($s) | join("<redacted>"))' "$TMP/rd.json" 2>/dev/null)" || m=""
+  echo "${m:-no answer it could read}"
+}
+
+# render_has_owner <owner>: succeeds when the key can see the workspace
+render_has_owner() {
+  local code
+  code="$(rd GET "/owners?limit=100")"
+  rd_ok "$code" || die "render: can't list the workspaces ($code): $(rd_error)"
+  jq -e --arg o "$1" 'any(.[]?; .owner.id == $o)' "$TMP/rd.json" >/dev/null
+}
+
+# render_services <owner>: the workspace's services as lines of "id name url suspended"
+render_services() {
+  local code
+  code="$(rd GET "/services?ownerId=$1&limit=100&includePreviews=false")"
+  rd_ok "$code" || die "render: can't list the services of $1 ($code): $(rd_error)"
+  jq -r '.[]?.service | [.id, .name, (.serviceDetails.url // ""), (.suspended // "not_suspended")] | join("\u001f")' "$TMP/rd.json"
+}
+
+# render_mine <service ID> <name prefix>: succeeds when freelunch made the service, which
+# carries the variable FREELUNCH_MANAGED with the prefix as its value
+render_mine() {
+  local code
+  code="$(rd GET "/services/$1/env-vars?limit=100")"
+  rd_ok "$code" || die "render: can't read the variables of the service $1 ($code): $(rd_error)"
+  jq -e --arg k "$RD_MARK" --arg v "$2" 'any(.[]?; .envVar.key == $k and .envVar.value == $v)' "$TMP/rd.json" >/dev/null
+}
+
+# render_up <name prefix> <owner>: check that the key reaches the workspace
+render_up() {
+  local id="$1" owner="$2"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  rd_key
+  [[ -n "$owner" ]] || die "render: owner_id is not set in $(rel "$(config_dir render)")/terraform.tfvars"
+  render_has_owner "$owner" || die "render: RENDER_API_KEY can't see the workspace $owner. Check owner_id in $(rel "$(config_dir render)")/terraform.tfvars, and that the key is from that workspace's account"
+  log "render: workspace $owner (services are named $id-<app>)"
+}
+
+# render_forget_registries <owner> <name prefix>: delete the logins deploy saved
+render_forget_registries() {
+  local code rid rname
+  code="$(rd GET "/registrycredentials?ownerId=$1&limit=100")"
+  rd_ok "$code" || { log "render: can't list the registry logins ($code): $(rd_error)"; return 0; }
+  jq -r --arg p "freelunch $2 " '.[]? | select(.name | startswith($p)) | [.id, .name] | join("\u001f")' "$TMP/rd.json" > "$TMP/rd-registries.txt"
+  while IFS=$'\x1f' read -r rid rname; do
+    [[ -n "$rid" ]] || continue
+    code="$(rd DELETE "/registrycredentials/$rid")"
+    if rd_ok "$code"; then log "render: deleted the registry login $rname"; else log "render: can't delete the registry login $rname ($code): $(rd_error)"; fi
+  done < "$TMP/rd-registries.txt"
+}
+
+# render_down <name prefix> <owner>: delete the services freelunch made and the logins
+render_down() {
+  local id="$1" owner="$2" sid name url suspended code
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  [[ -n "$owner" ]] || { log "render: no owner_id, so nothing to delete at Render"; return 0; }
+  render_services "$owner" > "$TMP/rd-services.txt"
+  while IFS=$'\x1f' read -r sid name url suspended; do
+    [[ -n "$sid" && "$name" == "$id-"* ]] || continue
+    if ! render_mine "$sid" "$id"; then log "render: the service $name wasn't made by freelunch, so it stays"; continue; fi
+    code="$(rd DELETE "/services/$sid")"
+    rd_ok "$code" || [[ "$code" == 404 ]] || die "render: can't delete the service $name ($code): $(rd_error)"
+    log "render: deleted the service $name"
+  done < "$TMP/rd-services.txt"
+  render_forget_registries "$owner" "$id"
+}
+
+# render_registry <name prefix> <owner> <server>: the ID of the login Render pulls images from
+# that registry with, saved or updated from apps.tfvars
+render_registry() {
+  local id="$1" owner="$2" server="$3" name user var kind rid code
+  name="freelunch $id $server"
+  user="$(jq -r --arg s "$server" '.[$s].username' "$TMP/registries.json")"
+  var="$(jq -r --arg s "$server" '.[$s].password_env' "$TMP/registries.json")"
+  case "$server" in
+    ghcr.io)             kind=GITHUB ;;
+    docker.io)           kind=DOCKER ;;
+    registry.gitlab.com) kind=GITLAB ;;
+    *-docker.pkg.dev|gcr.io|*.gcr.io) kind=GOOGLE_ARTIFACT ;;
+    *) die "render: Render takes logins for ghcr.io, docker.io, registry.gitlab.com and Google registries, not $server" ;;
+  esac
+  code="$(rd GET "/registrycredentials?ownerId=$owner&name=$(jq -rn --arg n "$name" '$n | @uri')&limit=20")"
+  rd_ok "$code" || die "render: can't list the registry logins ($code): $(rd_error)"
+  rid="$(jq -r --arg n "$name" 'first(.[]? | select(.name == $n) | .id) // empty' "$TMP/rd.json")"
+  printf '%s' "${!var:-}" | jq -Rs --arg n "$name" --arg u "$user" --arg o "$owner" --arg k "$kind" \
+    '{name: $n, registry: $k, username: $u, authToken: ., ownerId: $o}' > "$TMP/registry.json"
+  if [[ -n "$rid" ]]; then
+    jq 'del(.name, .registry, .ownerId)' "$TMP/registry.json" > "$TMP/registry.new" && mv "$TMP/registry.new" "$TMP/registry.json"
+    code="$(rd PATCH "/registrycredentials/$rid" "$TMP/registry.json")"
+  else
+    code="$(rd POST /registrycredentials "$TMP/registry.json")"
+    rid="$(jq -r '.id // empty' "$TMP/rd.json")"
+  fi
+  rm -f "$TMP/registry.json"
+  if ! rd_ok "$code" || [[ -z "$rid" ]]; then die "render: can't save the login to $server ($code): $(rd_error)"; fi
+  echo "$rid"
+}
+
+# render_body <name prefix> <owner> <name> <image path> <credential ID> <plan> <region> <spec file> <env file>:
+# the body that makes the app's service: its image, command, plan and environment. The
+# marker and PORT join the environment.
+render_body() {
+  local c
+  c="$(jq -r '.command // empty' "$8")"
+  jq -n --arg id "$1" --arg owner "$2" --arg name "$3" --arg image "$4" --arg cred "$5" --arg plan "$6" --arg region "$7" --arg cmd "$c" \
+    --arg mark "$RD_MARK" --slurpfile spec "$8" --slurpfile env "$9" '$spec[0] as $s | ($env[0] + $s.environment) as $e | {
+      type: "web_service",
+      name: "\($id)-\($name)",
+      ownerId: $owner,
+      autoDeploy: "no",
+      image: ({ownerId: $owner, imagePath: $image} + (if $cred != "" then {registryCredentialId: $cred} else {} end)),
+      serviceDetails: ({
+        runtime: "image",
+        plan: $plan,
+        region: $region,
+        numInstances: 1
+      } + (if $cmd != "" then {envSpecificDetails: {dockerCommand: $cmd}} else {} end)),
+      envVars: ([{key: $mark, value: $id}, {key: "PORT", value: ($e.PORT // ($s.ports[0] | tostring))}]
+        + [$e | del(.PORT) | to_entries[] | {key: .key, value: (.value | tostring)}])
+    }'
+}
+
+# render_check <target>: stop before anything is sent for an app Render can't run as its
+# Compose file says
+render_check() {
+  local host="$1" name problems=""
+  while IFS= read -r name; do
+    jq --arg h "$host" --arg n "$name" '.[$h].services[$n]' "$TMP/platforms.json" > "$TMP/check.spec"
+    [[ "$(jq -r '.ports | length' "$TMP/check.spec")" -ge 1 ]] || problems="$problems  $name: Render sends requests to a port, and its Compose file lists none under ports or expose"$'\n'
+    [[ -z "$(jq -r '.entrypoint // empty' "$TMP/check.spec")" ]] || problems="$problems  $name: Render can run another command in an image, but can't replace its entrypoint"$'\n'
+    if jq -e '.healthcheck != null' "$TMP/check.spec" >/dev/null; then
+      log "$host: $name: Render can't run a healthcheck command; it waits for the service to listen on its port instead"
+    fi
+  done < <(jq -r --arg h "$host" '.[$h].apps | keys[]' "$TMP/targets.json")
+  rm -f "$TMP"/check.*
+  [[ -z "$problems" ]] || die "$host: these apps can't run on Render, so nothing was sent:"$'\n'"${problems%$'\n'}"
+}
+
+# render_wait <host> <service ID> <deploy ID> <name>: wait until the deploy is live
+render_wait() {
+  local host="$1" sid="$2" did="$3" name="$4" code status timeout="${FREELUNCH_DEPLOY_TIMEOUT:-420}" deadline
+  deadline=$((SECONDS + timeout))
+  while :; do
+    code="$(rd GET "/services/$sid/deploys/$did")"
+    rd_ok "$code" || die "render: can't read the deploy of $name ($code): $(rd_error)"
+    status="$(jq -r '.status // "unknown"' "$TMP/rd.json")"
+    case "$status" in
+      live) log "$host: $name is running"; return 0 ;;
+      build_failed|update_failed|pre_deploy_failed|canceled|deactivated) die "render: the deploy of $name is $status (see the logs at dashboard.render.com)" ;;
+    esac
+    [[ $SECONDS -lt $deadline ]] || die "render: $name is still $status after ${timeout}s (FREELUNCH_DEPLOY_TIMEOUT)"
+    sleep 4
+  done
+}
+
+# render_deploy <target> <dry run 0|1>: make or update a web service per app, then wait
+# until each one is live
+render_deploy() {
+  local host="$1" dry_run="$2" id owner region plan name compose env_file bucket image path digest var server cred sid code creds=""
+  id="$(jq -r --arg h "$host" '.[$h].id' "$TMP/platforms.json")"
+  owner="$(jq -r --arg h "$host" '.[$h].settings.owner_id' "$TMP/platforms.json")"
+  region="$(jq -r --arg h "$host" '.[$h].region' "$TMP/platforms.json")"
+  plan="$(jq -r --arg h "$host" '.[$h].settings.plan // "free"' "$TMP/platforms.json")"
+  render_check "$host"
+  if [[ "$dry_run" == 1 ]]; then
+    log "$host: would send this to Render, workspace $owner in $region (dry run, secrets left out)"
+  else
+    log "$host: deploying to the Render workspace $owner in $region"
+    rd_key
+    render_has_owner "$owner" || die "render: RENDER_API_KEY can't see the workspace $owner"
+  fi
+  local sids=() dids=() names=()
+  while IFS=$'\x1f' read -r name compose env_file bucket database; do
+    [[ -n "$name" ]] || continue
+    jq --arg h "$host" --arg n "$name" '.[$h].services[$n]' "$TMP/platforms.json" > "$TMP/spec.json"
+    image="$(jq -r '.image' "$TMP/spec.json")"
+    server="$(image_parts "$image" | cut -f1)"
+    var="$(jq -r --arg s "$server" '.[$s].password_env // empty' "$TMP/registries.json")"
+    cred=""
+    if [[ -n "$var" ]]; then
+      if [[ "$dry_run" == 1 ]]; then
+        echo "save the login to $server for $(jq -r --arg s "$server" '.[$s].username' "$TMP/registries.json") (password from \$$var)"
+        cred="<login to $server>"
+      else
+        cred="$(awk -v s="$server" '$1 == s { print $2 }' <<< "$creds")"
+        if [[ -z "$cred" ]]; then cred="$(render_registry "$id" "$owner" "$server")"; creds="$creds$server $cred"$'\n'; fi
+      fi
+      digest="$(image_digest "$image" "$(jq -r --arg s "$server" '.[$s].username' "$TMP/registries.json")" "${!var:-}")"
+    else
+      digest="$(image_digest "$image")"
+    fi
+    if [[ -n "$digest" ]]; then path="$(image_name "$image")@$digest"; else path="$image"; log "$host: the registry doesn't say what $image points to, so Render pulls the tag again only when something else changes"; fi
+    if [[ "$(jq -r '.ports | length' "$TMP/spec.json")" -gt 1 ]]; then log "$host: $name: Render sends requests to one port; it uses $(jq -r '.ports[0]' "$TMP/spec.json")"; fi
+    app_env_json "$name" "$env_file" > "$TMP/env.json"
+    render_body "$id" "$owner" "$name" "$path" "$cred" "$plan" "$region" "$TMP/spec.json" "$TMP/env.json" > "$TMP/service.json"
+    rm -f "$TMP/env.json"
+    if [[ "$dry_run" == 1 ]]; then
+      echo "POST /v1/services, or PATCH /v1/services/<id> and PUT its env-vars, then POST /v1/services/<id>/deploys"
+      jq '.envVars |= map(.value = "<redacted>")' "$TMP/service.json"
+    else
+      render_services "$owner" > "$TMP/rd-services.txt"
+      sid="$(awk -F $'\x1f' -v n="$id-$name" '$2 == n { print $1; exit }' "$TMP/rd-services.txt")"
+      if [[ -z "$sid" ]]; then
+        code="$(rd POST /services "$TMP/service.json")"
+        rd_ok "$code" || die "render: can't make the service $id-$name ($code): $(rd_error)"
+        sid="$(jq -r '.service.id' "$TMP/rd.json")"
+        sids+=("$sid"); dids+=("$(jq -r '.deployId' "$TMP/rd.json")")
+      else
+        render_mine "$sid" "$id" || die "render: there is a service $id-$name that freelunch didn't make. Rename the app, set another name_prefix, or delete that service"
+        jq '{image: .image, serviceDetails: (.serviceDetails | del(.runtime, .region))}' "$TMP/service.json" > "$TMP/service.patch"
+        code="$(rd PATCH "/services/$sid" "$TMP/service.patch")"
+        rd_ok "$code" || die "render: can't update the service $id-$name ($code): $(rd_error)"
+        jq '.envVars' "$TMP/service.json" > "$TMP/service.env"
+        code="$(rd PUT "/services/$sid/env-vars" "$TMP/service.env")"
+        rd_ok "$code" || die "render: can't set the variables of $id-$name ($code): $(rd_error)"
+        echo '{}' > "$TMP/service.deploy"
+        code="$(rd POST "/services/$sid/deploys" "$TMP/service.deploy")"
+        rd_ok "$code" || die "render: can't start the deploy of $id-$name ($code): $(rd_error)"
+        sids+=("$sid"); dids+=("$(jq -r '.id' "$TMP/rd.json")")
+        rm -f "$TMP"/service.patch "$TMP"/service.env "$TMP"/service.deploy
+      fi
+      log "$host: $name: $image${digest:+ = $digest}${bucket:+, with the bucket $bucket}${database:+, with the database $database}"
+      names+=("$name")
+    fi
+    rm -f "$TMP/service.json"
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // ""), (.value.database // "")] | join("\u001f")' "$TMP/targets.json")
+  [[ "$dry_run" == 0 ]] || return 0
+
+  local i url
+  for i in "${!sids[@]}"; do
+    render_wait "$host" "${sids[$i]}" "${dids[$i]}" "${names[$i]}"
+    code="$(rd GET "/services/${sids[$i]}")"
+    rd_ok "$code" || die "render: can't read the service ${names[$i]} ($code): $(rd_error)"
+    url="$(jq -r '.serviceDetails.url // empty' "$TMP/rd.json")"
+    report_url "$host" "https://${url#https://}" "${names[$i]}"
+  done
+  log "$host: done"
+}
+
+# render_status <target>: each service of the workspace freelunch made and whether it serves
+render_status() {
+  local host="$1" id owner region sid name url suspended seen="" s expected state
+  id="$(jq -r --arg h "$host" '.[$h].id' "$TMP/platforms.json")"
+  owner="$(jq -r --arg h "$host" '.[$h].settings.owner_id' "$TMP/platforms.json")"
+  region="$(jq -r --arg h "$host" '.[$h].region' "$TMP/platforms.json")"
+  expected="$(jq -r --arg h "$host" '.[$h].apps | keys[]' "$TMP/targets.json")"
+  echo "Apps on $host (Render workspace $owner, $region)"
+  if [[ -z "${RENDER_API_KEY:-}" ]]; then echo "  not asked without RENDER_API_KEY"; return 0; fi
+  render_services "$owner" > "$TMP/rd-services.txt" 2>"$TMP/rd-services.err" || { echo "  can't ask Render: $(sed 's/^freelunch: //' "$TMP/rd-services.err")"; return 0; }
+  while IFS=$'\x1f' read -r sid name url suspended; do
+    [[ -n "$sid" && "$name" == "$id-"* ]] || continue
+    s="${name#"$id-"}"
+    seen="$seen $s "
+    if [[ "$suspended" == suspended ]]; then state="suspended"; else state="serving at https://${url#https://} (asleep after 15 minutes idle on the free plan)"; fi
+    printf '  %-20s %s\n' "$s" "$state"
+  done < "$TMP/rd-services.txt"
+  for s in $expected; do
+    [[ "$seen" == *" $s "* ]] || printf '  %-20s %s\n' "$s" "not deployed yet (freelunch deploy)"
+  done
+}
+
+doctor_render() {
+  local tfvars owner code
+  tfvars="$(config_dir render)/terraform.tfvars"
+  owner="$(tfvar "$tfvars" owner_id)"
+  echo "Render ($(rel "$tfvars"))"
+  if [[ -z "$owner" || "$owner" == usr-xxxx* ]]; then check fail "owner_id is not set in $(rel "$tfvars")"; return 0; fi
+  if [[ -z "${RENDER_API_KEY:-}" ]]; then check fail "RENDER_API_KEY is not set: export it or put it in $(rel "$(state_root)")/.env (providers/render/README.md#api-key)"; return 0; fi
+  code="$(rd GET "/owners?limit=100")"
+  case "$code" in
+    2??) if jq -e --arg o "$owner" 'any(.[]?; .owner.id == $o)' "$TMP/rd.json" >/dev/null; then check ok "RENDER_API_KEY signs in and sees the workspace $owner"
+         else check fail "RENDER_API_KEY signs in but doesn't see the workspace $owner"; fi ;;
+    401|403) check fail "Render doesn't take RENDER_API_KEY ($code): $(rd_error)" ;;
+    *) check fail "can't reach Render ($code): $(rd_error)" ;;
   esac
 }
 
@@ -5459,10 +6851,11 @@ cmd_doctor() {
   doctor_config
   if [[ ${#ENV_REFS[@]} -gt 0 ]]; then echo "Secrets ($(rel "$(state_root)")/.env)"; resolve_env_refs report; fi
   doctor_state
-  if [[ -d "$(stack_dir oci)" ]] && is_configured oci; then doctor_oci; fi
-  if [[ -d "$(stack_dir northflank)" ]] && is_configured northflank; then doctor_northflank; fi
-  if [[ -d "$(stack_dir cloud-run)" ]] && is_configured cloud-run; then doctor_cloud_run; fi
-  if [[ -d "$(stack_dir scaleway)" ]] && is_configured scaleway; then doctor_scaleway; fi
+  local engine
+  for engine in $(engine_providers); do
+    if engine_defined "$engine" check && [[ -d "$(stack_dir "$engine")" ]] && is_configured "$engine"; then engine_call "$engine" check; fi
+  done
+  doctor_engines
   doctor_ssh
   doctor_images
   doctor_cloudflare
@@ -5813,14 +7206,31 @@ state_where() {
   fi
 }
 
+# cmd_state_record pull <provider> | push <provider> <file> [--force]: an engine's record in
+# the store (see engine records)
+cmd_state_record() {
+  local sub="${1:-}" p="${2:-}" file="${3:-}" force="" out
+  [[ -n "$(state_config)" ]] || die "state record: this project has no state store (freelunch state init)"
+  [[ -n "$p" ]] || die "state record: pull <provider> or push <provider> <file>"
+  state_setup
+  case "$sub" in
+    pull) out="$(record_pull "$p")"; [[ -z "$out" ]] || printf '%s\n' "$out" ;;
+    push) [[ -n "$file" ]] || die "state record push: give the record's file"
+          [[ "${4:-}" != "--force" ]] || force=force
+          record_push "$p" "$file" "$force" ;;
+    *)    die "state record: pull <provider> or push <provider> <file>" ;;
+  esac
+}
+
 cmd_state() {
   local sub="${1:-status}" force="" s a cfg rc=0 stacks=()
   [[ $# -eq 0 ]] || shift
   [[ -n "$PROJECT" ]] || die "state: run it in a project, where its .freelunch/ folder is (freelunch init makes one)"
   case "$sub" in
     init)             state_init_store "$@"; return ;;
+    record)           cmd_state_record "$@"; return ;;
     status|push|pull) ;;
-    *)                die "state: status, push, pull or init <store> (freelunch help)" ;;
+    *)                die "state: status, push, pull, record or init <store> (freelunch help)" ;;
   esac
   for a in "$@"; do
     case "$a" in
@@ -6177,7 +7587,7 @@ SSH_KEY_BUNDLED=""
 
 # ci_secret_names: the secrets this project's workflows need, one per line: NAME, then what it is
 ci_secret_names() {
-  local s var seen=" "
+  local s var what seen=" "
   emit() { [[ "$seen" != *" $1 "* ]] || return 0; seen="$seen$1 "; printf '%s\t%s\n' "$1" "$2"; }
   if [[ -n "$(state_config)" && "${FREELUNCH_STATE_PASSPHRASE:-}" != "none" ]]; then
     emit FREELUNCH_STATE_PASSPHRASE "the passphrase that encrypts the state (the line in .freelunch/.env)"
@@ -6185,34 +7595,81 @@ ci_secret_names() {
   for s in $(project_stacks); do
     case "$s" in
       cloudflare)   emit CLOUDFLARE_API_TOKEN "Cloudflare API token" ;;
-      northflank)   emit NORTHFLANK_API_TOKEN "Northflank API token" ;;
-      scaleway)     emit SCW_SECRET_KEY "Scaleway secret key" ;;
-      cloud-run)    emit CLOUD_RUN_ACCESS_TOKEN "Google access token for Cloud Run" ;;
+      neon)         emit NEON_API_KEY "Neon API key" ;;
+      supabase)     emit SUPABASE_ACCESS_TOKEN "Supabase access token" ;;
+      upstash)           emit UPSTASH_EMAIL "Upstash account email"; emit UPSTASH_API_KEY "Upstash API key" ;;
+      mongodb-atlas)     emit MONGODB_ATLAS_PUBLIC_KEY "MongoDB Atlas public API key"; emit MONGODB_ATLAS_PRIVATE_KEY "MongoDB Atlas private API key" ;;
+      cockroachdb)       emit COCKROACH_API_KEY "CockroachDB Cloud API key" ;;
+      tidb-cloud)        emit TIDBCLOUD_PUBLIC_KEY "TiDB Cloud public API key"; emit TIDBCLOUD_PRIVATE_KEY "TiDB Cloud private API key" ;;
+      aiven)             emit AIVEN_TOKEN "Aiven API token" ;;
+      redis-cloud)       emit REDISCLOUD_ACCESS_KEY "Redis Cloud access key"; emit REDISCLOUD_SECRET_KEY "Redis Cloud secret key" ;;
+      couchbase-capella) emit CAPELLA_AUTHENTICATION_TOKEN "Couchbase Capella API token" ;;
+      datastax-astra)    emit ASTRA_API_TOKEN "DataStax Astra token" ;;
+      yugabyte)          emit YBM_API_KEY "YugabyteDB Aeon API key" ;;
+      neo4j-aura)        emit AURA_CLIENT_ID "Neo4j Aura client ID"; emit AURA_CLIENT_SECRET "Neo4j Aura client secret" ;;
+      motherduck)        emit MOTHERDUCK_TOKEN "MotherDuck token"; emit MOTHERDUCK_ADMIN_TOKEN "MotherDuck admin token" ;;
       backblaze-b2) emit B2_APPLICATION_KEY_ID "Backblaze key ID"; emit B2_APPLICATION_KEY "Backblaze application key" ;;
-      oci)          emit FREELUNCH_OCI_CONFIG "the profile block of ~/.oci/config (the console shows it when you add an API key)"
-                    emit FREELUNCH_OCI_KEY "the OCI API private key (the .pem file the console gave you)" ;;
-      aws)          emit AWS_ACCESS_KEY_ID "AWS access key ID"; emit AWS_SECRET_ACCESS_KEY "AWS secret access key" ;;
     esac
+    while IFS=$'\t' read -r var what; do [[ -z "$var" ]] || emit "$var" "$what"; done < <(engine_call "$s" secrets)
     [[ "$(meta "$s" layer)" != "host" ]] || emit FREELUNCH_SSH_PRIVATE_KEY "the private SSH key deploy signs in to the hosts with (without a passphrase)"
   done
   for var in $(tfvars_map "$PROJECT/apps.tfvars" registries password_env | cut -f2); do
     emit "$var" "the read-only token for a private registry (apps.tfvars)"
   done
+  # what the state store itself needs to be reached (FREELUNCH_STATE_AWS_ACCESS_KEY_ID, ...)
+  if [[ -n "$(state_config)" ]]; then
+    for var in $(compgen -v FREELUNCH_STATE_ || true); do
+      [[ "$var" != FREELUNCH_STATE_PASSPHRASE && "$var" != FREELUNCH_STATE_KEY_MADE && -n "${!var:-}" ]] || continue
+      emit "$var" "the state store's credential (freelunch state init made it)"
+    done
+  fi
+}
+
+# ci_variable_names: the settings the workflows pass on that are not secrets, which go in the
+# repository's variables: NAME, then what it is. Only those that are set here.
+ci_variable_names() {
+  [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]] || printf '%s\t%s\n' CLOUDFLARE_ACCOUNT_ID "your Cloudflare account ID (not a secret)"
+}
+
+# ci_token_help <name>: where to get the secret and what it needs to be allowed to do, from the
+# provider READMEs, as one line
+ci_token_help() {
+  case "$1" in
+    FREELUNCH_STATE_PASSPHRASE) echo "the FREELUNCH_STATE_PASSPHRASE line in .freelunch/.env (16 characters or more); keep a copy somewhere safe too, as without it nobody can read the state" ;;
+    CLOUDFLARE_API_TOKEN)   echo "dash.cloudflare.com > My Profile > API Tokens > Create Token, a custom one with Zone:Read, DNS:Edit and Cloudflare Tunnel:Edit (and Access or R2 only if a route uses them), limited to your zone and account (providers/cloudflare/README.md#api-token)" ;;
+    NORTHFLANK_API_TOKEN)   echo "your Northflank team's settings > API > Tokens, with a role that can create, read, update and delete projects and services, and update their secrets (providers/northflank/README.md#api-token)" ;;
+    SCW_SECRET_KEY)         echo "console.scaleway.com > IAM > API keys, for a user or application that can manage Serverless Containers in the project; the secret key (providers/scaleway/README.md#api-key)" ;;
+    RENDER_API_KEY)         echo "dashboard.render.com > Account settings > API Keys (providers/render/README.md#api-key)" ;;
+    NEON_API_KEY)           echo "the Neon console > Account settings > API keys (providers/neon/README.md#api-key)" ;;
+    SUPABASE_ACCESS_TOKEN)  echo "supabase.com/dashboard/account/tokens (providers/supabase/README.md#access-token)" ;;
+    CLOUD_RUN_ACCESS_TOKEN) echo "gcloud auth application-default print-access-token, from an account that can use Cloud Run in the project; it expires within the hour, so for CI freelunch ci oidc gcp is better (providers/cloud-run/README.md)" ;;
+    AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY) echo "AWS console > IAM > Users > Security credentials > Create access key; or better, no key at all: freelunch ci oidc aws" ;;
+    FREELUNCH_OCI_CONFIG)   echo "the profile block the OCI console shows when you add an API key (Profile > API keys > Add API key); ci init takes it from ~/.oci/config" ;;
+    FREELUNCH_OCI_KEY)      echo "the .pem private key the OCI console gave you when you added the API key; ci init takes it from the profile's key_file" ;;
+    FREELUNCH_SSH_PRIVATE_KEY) echo "a key without a passphrase (ssh-keygen -t ed25519 -N ''), whose .pub is in ssh_public_keys; ci init takes ~/.ssh/id_* when it matches" ;;
+    FREELUNCH_STATE_*)      echo "the state store's key, which freelunch state init wrote to .freelunch/.env" ;;
+    B2_APPLICATION_KEY_ID|B2_APPLICATION_KEY) echo "backblaze.com > App Keys > Add a New Application Key (providers/backblaze-b2/README.md)" ;;
+    *)                      echo "see the provider's README under providers/ for where to get it and what it may do" ;;
+  esac
 }
 
 # ci_env_block <indent>: the env: lines that hand those secrets to a step
 ci_env_block() {
-  local name what
+  local indent="$1" first_line="${2:-}" name what env_lines=()
+  [[ -z "$first_line" ]] || env_lines+=("$first_line")
   while IFS=$'\t' read -r name what; do
     [[ -n "$name" ]] || continue
-    printf '%senv:\n' "$1"
-    break
+    # shellcheck disable=SC2016 # a GitHub expression, not ours
+    env_lines+=("$(printf '%s: ${{ secrets.%s }}' "$name" "$name")")
   done < <(ci_secret_names)
   while IFS=$'\t' read -r name what; do
     [[ -n "$name" ]] || continue
     # shellcheck disable=SC2016 # a GitHub expression, not ours
-    printf '%s  %s: ${{ secrets.%s }}\n' "$1" "$name" "$name"
-  done < <(ci_secret_names)
+    env_lines+=("$(printf '%s: ${{ vars.%s }}' "$name" "$name")")
+  done < <(ci_variable_names)
+  [[ ${#env_lines[@]} -gt 0 ]] || return 0
+  printf '%senv:\n' "$indent"
+  for name in "${env_lines[@]}"; do printf '%s  %s\n' "$indent" "$name"; done
 }
 
 # ci_restore_env: write the files that secrets carry as text: the OCI profile and key, and the
@@ -6273,22 +7730,25 @@ action_ref() {
 # tool_version: the version of tofu/terraform here, for CI to use the same
 tool_version() { CHECKPOINT_DISABLE=1 "$TF" version -json 2>/dev/null | jq -r '.terraform_version // empty' 2>/dev/null || true; }
 
-# ci_uses <command>: the steps of a job that runs freelunch with the action
+# ci_uses <command> [env line]: the steps of a job that runs freelunch with the action, with
+# the secrets as its environment and one more line of it when given (NAME: value)
 ci_uses() {
+  echo "      - uses: actions/checkout@v7"
+  # keyless sign-in to the clouds the project set up (freelunch ci oidc), before freelunch runs
+  if [[ -z "${CI_CHECK_ONLY:-}" ]]; then ci_oidc_steps; fi
   cat <<EOF
-      - uses: actions/checkout@v7
       - uses: $(action_ref)
         with:
           run: $1
 EOF
   # shellcheck disable=SC2016 # a GitHub expression, not ours
-  if [[ "$CI_BUNDLE_MODE" == 1 ]]; then echo '          bundle: ${{ secrets.FREELUNCH_BUNDLE }}'; fi
+  if [[ "$CI_BUNDLE_MODE" == 1 && -z "${CI_CHECK_ONLY:-}" ]]; then echo '          bundle: ${{ secrets.FREELUNCH_BUNDLE }}'; fi
   cat <<EOF
           tool: $(tool_name)
           version: "$(tool_version)"
 EOF
   # Each secret goes to this one step, as an environment variable of its own name.
-  if [[ "$CI_BUNDLE_MODE" != 1 ]]; then ci_env_block "        "; fi
+  if [[ "$CI_BUNDLE_MODE" != 1 && -z "${CI_CHECK_ONLY:-}" ]]; then ci_env_block "        " "${2:-}"; fi
 }
 github_workflows() {
   local base="$1" cron="11,41 * * * *" every="half hour" visibility trigger="" contents=read waitenv=""
@@ -6321,7 +7781,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: $contents # write when the state is kept in a branch of this repository
+  contents: $contents # write when the state is kept in a branch of this repository$(ci_oidc_perm)
   actions: write # to turn this workflow off when the wait is over
 
 # One attempt at a time. A run of freelunch.yml may go alongside: a deploy only reads the
@@ -6357,7 +7817,7 @@ on:$trigger
         default: up
 
 permissions:
-  contents: $contents # write when the state is kept in a branch of this repository
+  contents: $contents # write when the state is kept in a branch of this repository$(ci_oidc_perm)
 
 # One run at a time; a second waits for the first.
 concurrency:
@@ -6374,6 +7834,94 @@ EOF
   } | write_new "$base/.github/workflows/$CI_WORKFLOW"
   if [[ "$(action_ref)" == *@main ]]; then
     log "the workflows use freelunch-sh/freelunch@main; pin the project to a release with freelunch upgrade, then run ci init again"
+  fi
+}
+
+CI_PROVISION_WORKFLOW="freelunch-provision.yml"
+CI_CHECK_WORKFLOW="freelunch-ci.yml"
+
+# job_workflows <project root> <jobs: provision,ci,cd>: the workflows of the jobs engines.md
+# names. cd is freelunch.yml and the wait workflow github_workflows writes; the others are here.
+job_workflows() {
+  local base="$1" jobs=",$2," contents=read
+  mkdir -p "$base/.github/workflows"
+  [[ "$(state_backend "$(state_config)")" != "git" ]] || contents="write"
+  if [[ "$jobs" == *,provision,* && -n "$(project_stacks)" ]]; then
+    {
+      cat <<EOF
+# Written by freelunch ci init. The provision job: makes what .freelunch/ declares.
+#   pull request  freelunch plan all: what the change would do, nothing applied
+#   merge to main freelunch apply all
+#   by hand       Run workflow > plan, apply or destroy (destroy also needs the repository's name typed),
+#                 or doctor: it names the secrets that are missing and checks the ones that are there
+# A pull request from a fork gets no secrets and never provisions: the job is skipped for it.
+# One run at a time with freelunch.yml (the deploy), which would otherwise change the same state.
+name: freelunch-provision
+
+on:
+  pull_request:
+    paths: [".freelunch/**", ".github/workflows/$CI_PROVISION_WORKFLOW"]
+  push:
+    branches: [main]
+    paths: [".freelunch/**"]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do with every stack; doctor checks the secrets and the tools instead
+        type: choice
+        options: [plan, apply, destroy, doctor]
+        default: plan
+      confirm:
+        description: To destroy, type this repository's name
+        default: ""
+
+permissions:
+  contents: $contents # write when the state is kept in a branch of this repository$(ci_oidc_perm)
+
+concurrency:
+  group: freelunch
+
+jobs:
+  provision:
+    # A fork's pull request is never trusted with the secrets this job holds
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy' && inputs.confirm != github.event.repository.name
+        shell: bash
+        run: |
+          echo "::error::To destroy, type the repository's name (\${{ github.event.repository.name }}) in the confirm box."
+          exit 1
+EOF
+      # shellcheck disable=SC2016 # GitHub expressions, not ours
+      ci_uses "\${{ github.event_name == 'pull_request' && 'plan all' || github.event_name == 'push' && 'apply all' || inputs.action == 'doctor' && 'doctor' || format('{0} all', inputs.action) }}" "FREELUNCH_AUTO_APPROVE: \${{ github.event_name != 'pull_request' && inputs.action != 'plan' && inputs.action != 'doctor' && '1' || '' }}"
+    } | write_new "$base/.github/workflows/$CI_PROVISION_WORKFLOW"
+  fi
+  if [[ "$jobs" == *,ci,* ]]; then
+    {
+      cat <<EOF
+# Written by freelunch ci init. The CI job: checks the config in git, with no secret, on every
+# pull request and push to main: it is complete, its targets are real, and it holds no secret.
+# Building the image is the image workflow's job (freelunch init --image-workflow).
+name: freelunch-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+EOF
+      CI_CHECK_ONLY=1 ci_uses check
+    } | write_new "$base/.github/workflows/$CI_CHECK_WORKFLOW"
   fi
 }
 
@@ -6444,10 +7992,57 @@ pipeline_workflow() {
   fi
 }
 
+# ci_offer_state_store <kind>: CI needs the state in a store both it and this machine reach. When
+# the project has none, create one: the kind that was asked for, or whichever whoever is there
+# picks (git is a branch of this repository; the others are buckets, which take an account). With
+# nobody to answer it only says what to run.
+ci_offer_state_store() {
+  local kind="$1"
+  [[ -z "$(state_config)" ]] || return 0
+  if [[ -z "$kind" ]] && interactive; then
+    kind="$(ask "CI needs the state in a store, and this project has none. Create one now? (git, oci, r2, b2, gitlab, or no)" no)"
+    [[ "$kind" =~ ^(git|oci|r2|b2|gitlab)$ ]] || kind=""
+  fi
+  [[ -n "$kind" ]] || return 0
+  # shellcheck disable=SC2046 # the store's own words
+  cmd_state init "$kind"
+}
+
+# ci_offer_first_run <yes|no|ask>: run doctor in Actions, so the first run shows the secrets and
+# tools are right. It needs the workflows on the repository's default branch, so it only starts
+# when gh can see them there. Asks first; nothing runs unasked.
+ci_offer_first_run() {
+  local how="$1" base repo a
+  [[ "$how" != no ]] || return 0
+  if [[ "$how" == ask ]]; then
+    interactive || return 0
+    a="$(ask "Run freelunch doctor in GitHub Actions now, to see it work? (yes/no)" no)"
+    [[ "$a" =~ ^(y|yes)$ ]] || return 0
+  fi
+  base="$(dirname "$PROJECT")"
+  command -v gh >/dev/null || { log "ci init: the first run takes gh (https://cli.github.com); or Actions > freelunch-provision > Run workflow > doctor"; return 0; }
+  repo="$(cd "$base" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" || { log "ci init: gh can't tell which repository this is, so no first run"; return 0; }
+  if ! (cd "$base" && gh workflow list --repo "$repo" --json name -q '.[].name' 2>/dev/null) | grep -qx freelunch-provision; then
+    log "ci init: GitHub doesn't have the workflows yet: commit and push them, then freelunch ci init --first-run (or Actions > freelunch-provision > Run workflow > doctor)"
+    return 0
+  fi
+  (cd "$base" && gh workflow run "$CI_PROVISION_WORKFLOW" --repo "$repo" -f action=doctor) >/dev/null \
+    || { log "ci init: gh couldn't start the workflow (see above)"; return 0; }
+  log "started freelunch doctor in $repo; watch it with: gh run watch --repo $repo, or on the Actions tab"
+}
+
 ci_init() {
-  local where="github" base a given=0 pipeline=0
+  local where="github" base a given=0 pipeline=0 secrets=ask jobs="provision,ci,cd" state_kind="" first_run=ask
   for a in "$@"; do
     case "$a" in
+      --state=*)       state_kind="${a#--state=}"
+                       [[ "$state_kind" =~ ^(git|oci|r2|b2|gitlab)$ ]] || die "ci init: --state takes git, oci, r2, b2 or gitlab" ;;
+      --first-run)     first_run=yes ;;
+      --no-first-run)  first_run=no ;;
+      --jobs=*)        jobs="${a#--jobs=}"
+                       [[ "$jobs" =~ ^(provision|ci|cd)(,(provision|ci|cd))*$ ]] || die "ci init: --jobs takes provision, ci and cd, separated by commas" ;;
+      --set-secrets)   secrets="set" ;;
+      --print-secrets) secrets=print ;;
       --bundle) CI_BUNDLE_MODE=1 ;;
       --pipeline) pipeline=1 ;;
       -*)       die "ci init: unknown option $a" ;;
@@ -6457,8 +8052,9 @@ ci_init() {
   [[ -n "$PROJECT" ]] || die "ci init: run it in a project, where its .freelunch/ folder is (freelunch init makes one)"
   need_tf
   base="$(dirname "$PROJECT")"
+  ci_offer_state_store "$state_kind"
   case "$where" in
-    github) if [[ $pipeline -eq 1 ]]; then [[ $CI_BUNDLE_MODE -eq 0 ]] || die "ci init: --pipeline hands secrets over one by one, not as a bundle"; pipeline_workflow "$base"; else github_workflows "$base"; fi ;;
+    github) if [[ $pipeline -eq 1 ]]; then [[ $CI_BUNDLE_MODE -eq 0 ]] || die "ci init: --pipeline hands secrets over one by one, not as a bundle"; pipeline_workflow "$base"; else [[ ",$jobs," != *,cd,* ]] || github_workflows "$base"; job_workflows "$base" "$jobs"; fi ;;
     gitlab) CI_BUNDLE_MODE=1; gitlab_pipeline "$base" ;;
     *)      die "ci init: github or gitlab (other CI systems: docs/ci.md#other-ci-systems)" ;;
   esac
@@ -6466,9 +8062,10 @@ ci_init() {
   local i=1
   if [[ -z "$(state_config)" ]]; then echo "  $i. freelunch state init git (or oci, r2, b2, gitlab): the state where CI reaches it" >&2; i=$((i + 1)); fi
   if [[ "$where" == "github" && $CI_BUNDLE_MODE -eq 0 ]]; then
-    echo "  $i. add these as secrets of the repository (Settings > Secrets and variables > Actions):" >&2
-    while IFS=$'\t' read -r a g; do [[ -z "$a" ]] || echo "       $a: $g" >&2; done < <(ci_secret_names)
+    echo "  $i. the secrets:" >&2
+    ci_hand_over_secrets "$secrets"
     echo "  $((i + 1)). commit and push .freelunch/ and the workflows" >&2
+    ci_offer_first_run "$first_run"
   elif [[ "$where" == "github" ]]; then
     echo "  $i. freelunch ci secrets: what CI needs and git doesn't have, in the secret FREELUNCH_BUNDLE" >&2
     echo "  $((i + 1)). commit and push the workflows, then freelunch ci wait <stack> --plan <file> to wait for capacity there" >&2
@@ -6476,6 +8073,437 @@ ci_init() {
     echo "  $i. freelunch ci secrets --print, into the CI/CD variable FREELUNCH_BUNDLE" >&2
     echo "  $((i + 1)). commit and push the pipeline" >&2
   fi
+}
+
+# --- keyless sign-in from Actions (OIDC) -------------------------------------------------
+#
+# Instead of a long-lived key in a secret, a workflow asks GitHub for a short-lived token that
+# says which repository and ref it runs for, and the cloud trades it for credentials, if a trust
+# set up beforehand allows that repository and ref. freelunch ci oidc <cloud> sets the trust up
+# (asking first: it runs the cloud's CLI against your account, or prints what to run) and
+# remembers it in .freelunch/oidc, which the workflows read: they get id-token: write, a sign-in
+# step, and no key secret for that cloud.
+
+# ci_oidc_on <cloud>: whether the project signs in to the cloud keylessly
+ci_oidc_on() { [[ -n "$PROJECT" ]] && grep -qx "$1" "$PROJECT/oidc" 2>/dev/null; }
+
+# ci_oidc_perm: the permission a workflow needs for it, as the end of a permissions line
+ci_oidc_perm() {
+  if [[ -n "$PROJECT" && -s "$PROJECT/oidc" ]]; then printf '\n  id-token: write # keyless sign-in to the cloud (freelunch ci oidc)'; fi
+}
+
+# ci_oidc_steps: the sign-in steps of a job, for each cloud with OIDC
+ci_oidc_steps() {
+  if ci_oidc_on aws; then
+    # shellcheck disable=SC2016 # GitHub expressions, not ours
+    cat <<'EOF'
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+EOF
+  fi
+  if ci_oidc_on gcp; then
+    # shellcheck disable=SC2016 # GitHub expressions, not ours
+    cat <<'EOF'
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+EOF
+  fi
+  if ci_oidc_on azure; then
+    # shellcheck disable=SC2016 # GitHub expressions, not ours
+    cat <<'EOF'
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+EOF
+  fi
+}
+
+# ci_oidc_remember <cloud>: the project signs in keylessly to it from now on
+ci_oidc_remember() {
+  ci_oidc_on "$1" || echo "$1" >> "$PROJECT/oidc"
+}
+
+# sh_quote <string>: it as one word for a shell, in single quotes
+sh_quote() { local q="'\\''"; printf "'%s'" "${1//\'/$q}"; }
+
+# ci_oidc_run <how: run|print> <command...>: run a command of the cloud's CLI, or print it
+ci_oidc_run() {
+  local how="$1"; shift
+  if [[ "$how" == print ]]; then
+    local arg line=""
+    for arg in "$@"; do
+      if [[ "$arg" =~ ^[A-Za-z0-9_./:=@%+,-]+$ ]]; then line="$line $arg"; else line="$line $(sh_quote "$arg")"; fi
+    done
+    printf ' %s\n' "$line" >&2
+    return 0
+  fi
+  "$@"
+}
+
+# ci_oidc_choose <how> <question>: run or print. ask lets whoever is there choose, and prints
+# when nobody can answer: nothing is created in a cloud account unasked.
+ci_oidc_choose() {
+  local how="$1" a
+  if [[ "$how" == ask ]]; then
+    if interactive; then
+      a="$(ask "$2 (run/print)" print)"
+      case "$a" in run|r|y|yes) how=run ;; *) how=print ;; esac
+    else
+      how=print
+    fi
+  fi
+  echo "$how"
+}
+
+ci_oidc() {
+  local cloud="${1:-}"
+  [[ $# -eq 0 ]] || shift
+  case "$cloud" in
+    aws) ci_oidc_aws "$@" ;;
+    gcp) ci_oidc_gcp "$@" ;;
+    azure) ci_oidc_azure "$@" ;;
+    *) die "ci oidc: aws, gcp or azure: freelunch ci oidc aws|gcp|azure [--run|--print] ..." ;;
+  esac
+}
+
+# ci_oidc_aws: an IAM OIDC provider for GitHub and a role that only this repository's main branch
+# and its own pull requests can take, then the repository variables the sign-in step reads. The
+# role gets the permissions of --policy-arn and none without it: freelunch won't guess how much
+# of your account the workflows may change.
+ci_oidc_aws() {
+  local how=ask a repo owner policy="" region="" role="" branch=main account provider trust arn tfvars existing
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run)        how=run ;;
+      --print)      how=print ;;
+      --policy-arn) [[ $# -gt 1 ]] || die "ci oidc: --policy-arn takes an ARN"; policy="$2"; shift ;;
+      --region)     [[ $# -gt 1 ]] || die "ci oidc: --region takes a region"; region="$2"; shift ;;
+      --role-name)  [[ $# -gt 1 ]] || die "ci oidc: --role-name takes a name"; role="$2"; shift ;;
+      --branch)     [[ $# -gt 1 ]] || die "ci oidc: --branch takes a branch"; branch="$2"; shift ;;
+      *)            die "ci oidc aws: unknown option $1" ;;
+    esac
+    shift
+  done
+  [[ -n "$PROJECT" ]] || die "ci oidc: run it in a project, where its .freelunch/ folder is (freelunch init makes one)"
+  command -v jq >/dev/null || die "jq is required for ci oidc"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  command -v gh >/dev/null || die "ci oidc: the role's ARN goes to the repository as a variable with gh (https://cli.github.com), signed in"
+  repo="$(cd "$(dirname "$PROJECT")" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" \
+    || die "ci oidc: gh can't tell which GitHub repository this is (gh auth login, and an origin on github.com)"
+  tfvars="$(config_dir aws)/terraform.tfvars"
+  [[ -n "$region" ]] || { [[ ! -f "$tfvars" ]] || region="$(tfvar "$tfvars" region)"; }
+  region="${region:-${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}}"
+  role="${role:-freelunch-${repo//\//-}}"
+  account="<ACCOUNT_ID>"
+  if command -v aws >/dev/null && account="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" && [[ -n "$account" ]]; then :
+  else
+    account="<ACCOUNT_ID>"
+    [[ "$how" == print ]] || { [[ "$how" != run ]] || die "ci oidc: the aws CLI can't reach an account (aws configure, or aws sso login); or --print"; }
+    how=print
+  fi
+  how="$(ci_oidc_choose "$how" "Create the IAM role $role in AWS account $account now with the aws CLI, or print the commands for you to run?")"
+  provider="arn:aws:iam::$account:oidc-provider/token.actions.githubusercontent.com"
+  arn="arn:aws:iam::$account:role/$role"
+  trust="$TMP/aws-trust.json"
+  jq -n --arg p "$provider" --arg r "$repo" --arg b "$branch" '{
+    Version: "2012-10-17",
+    Statement: [{
+      Effect: "Allow",
+      Principal: {Federated: $p},
+      Action: "sts:AssumeRoleWithWebIdentity",
+      Condition: {
+        StringEquals: {"token.actions.githubusercontent.com:aud": "sts.amazonaws.com"},
+        StringLike: {"token.actions.githubusercontent.com:sub": ["repo:\($r):ref:refs/heads/\($b)", "repo:\($r):pull_request"]}
+      }
+    }]}' > "$trust"
+  if [[ "$how" == print ]]; then
+    log "run these in AWS account $account (the trust policy is in $trust, and below):"
+    cat "$trust" >&2
+  fi
+  existing=""
+  if [[ "$how" == run ]]; then
+    existing="$(aws iam list-open-id-connect-providers --query 'OpenIDConnectProviderList[].Arn' --output text 2>/dev/null || true)"
+  fi
+  if [[ "$existing" == *"oidc-provider/token.actions.githubusercontent.com"* ]]; then
+    log "aws: the OIDC provider for GitHub is there already"
+  else
+    ci_oidc_run "$how" aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com >/dev/null
+  fi
+  if [[ "$how" == run ]] && aws iam get-role --role-name "$role" >/dev/null 2>&1; then
+    ci_oidc_run "$how" aws iam update-assume-role-policy --role-name "$role" --policy-document "file://$trust"
+    log "aws: the role $role is there already; its trust is now this repository's $branch and pull requests"
+  else
+    ci_oidc_run "$how" aws iam create-role --role-name "$role" --assume-role-policy-document "file://$trust" >/dev/null
+  fi
+  if [[ -n "$policy" ]]; then
+    ci_oidc_run "$how" aws iam attach-role-policy --role-name "$role" --policy-arn "$policy"
+  else
+    log "aws: the role has no permissions yet: attach what freelunch's aws stack needs (aws iam attach-role-policy --role-name $role --policy-arn <arn>), or run this again with --policy-arn"
+  fi
+  if [[ "$how" == run ]]; then
+    (cd "$(dirname "$PROJECT")" && gh variable set AWS_ROLE_ARN --repo "$repo" --body "$arn" && gh variable set AWS_REGION --repo "$repo" --body "$region") >/dev/null \
+      || die "ci oidc: gh couldn't set the variables AWS_ROLE_ARN and AWS_REGION in $repo (see above)"
+    ci_oidc_remember aws
+    log "aws: $repo signs in as $arn from now on: the workflows get id-token: write and a sign-in step, and need no AWS key secrets. Run freelunch ci init again to rewrite them"
+  else
+    echo "  gh variable set AWS_ROLE_ARN --repo $repo --body $arn" >&2
+    echo "  gh variable set AWS_REGION --repo $repo --body $region" >&2
+    echo "  echo aws >> $(rel "$PROJECT")/oidc   # then freelunch ci init, to rewrite the workflows" >&2
+  fi
+}
+
+# ci_oidc_gcp: a Workload Identity pool and a provider for GitHub that only accept this
+# repository's main branch and its own pull requests, a service account the workflows act as, and
+# the permission for that identity to be used as it, then the repository variables the sign-in
+# step reads. The service account gets the roles of --role (repeatable) and none without: how
+# much of your project CI may change is yours to say.
+ci_oidc_gcp() {
+  local how=ask repo project="" sa_name="" pool="freelunch" roles=() num sa cond provider tfvars existing r member
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run)     how=run ;;
+      --print)   how=print ;;
+      --project) [[ $# -gt 1 ]] || die "ci oidc: --project takes a project ID"; project="$2"; shift ;;
+      --role)    [[ $# -gt 1 ]] || die "ci oidc: --role takes a role such as roles/editor"; roles+=("$2"); shift ;;
+      --service-account) [[ $# -gt 1 ]] || die "ci oidc: --service-account takes a name"; sa_name="$2"; shift ;;
+      *)         die "ci oidc gcp: unknown option $1" ;;
+    esac
+    shift
+  done
+  [[ -n "$PROJECT" ]] || die "ci oidc: run it in a project, where its .freelunch/ folder is (freelunch init makes one)"
+  command -v gh >/dev/null || die "ci oidc: the identity's names go to the repository as variables with gh (https://cli.github.com), signed in"
+  repo="$(cd "$(dirname "$PROJECT")" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" \
+    || die "ci oidc: gh can't tell which GitHub repository this is (gh auth login, and an origin on github.com)"
+  for r in gcp cloud-run; do
+    tfvars="$(config_dir "$r")/terraform.tfvars"
+    [[ -n "$project" || ! -f "$tfvars" ]] || project="$(tfvar "$tfvars" project_id)"
+  done
+  [[ -n "$project" && "$project" != *xxxx* ]] || die "ci oidc gcp: which Google Cloud project? Pass --project, or set project_id in the gcp or cloud-run stack's terraform.tfvars"
+  sa_name="${sa_name:-freelunch-ci}"
+  sa="$sa_name@$project.iam.gserviceaccount.com"
+  num="<PROJECT_NUMBER>"
+  if command -v gcloud >/dev/null && num="$(gcloud projects describe "$project" --format='value(projectNumber)' 2>/dev/null)" && [[ -n "$num" ]]; then :
+  else
+    num="<PROJECT_NUMBER>"
+    [[ "$how" != run ]] || die "ci oidc gcp: gcloud can't reach the project $project (gcloud auth login, and check the project ID); or --print"
+    how=print
+  fi
+  how="$(ci_oidc_choose "$how" "Create the Workload Identity pool and the service account $sa in $project now with gcloud, or print the commands for you to run?")"
+  cond="assertion.repository == '$repo' && (assertion.ref == 'refs/heads/main' || assertion.event_name == 'pull_request')"
+  provider="projects/$num/locations/global/workloadIdentityPools/$pool/providers/github"
+  member="principalSet://iam.googleapis.com/projects/$num/locations/global/workloadIdentityPools/$pool/attribute.repository/$repo"
+  if [[ "$how" == run ]]; then
+    if gcloud iam workload-identity-pools describe "$pool" --project "$project" --location global >/dev/null 2>&1; then
+      log "gcp: the pool $pool is there already"
+    else
+      gcloud iam workload-identity-pools create "$pool" --project "$project" --location global --display-name "freelunch" >/dev/null
+    fi
+    if gcloud iam workload-identity-pools providers describe github --workload-identity-pool "$pool" --project "$project" --location global >/dev/null 2>&1; then
+      existing=update-oidc
+    else
+      existing=create-oidc
+    fi
+    if gcloud iam service-accounts describe "$sa" --project "$project" >/dev/null 2>&1; then
+      log "gcp: the service account $sa is there already"
+    else
+      gcloud iam service-accounts create "$sa_name" --project "$project" --display-name "freelunch CI" >/dev/null
+    fi
+  else
+    existing=create-oidc
+    log "run these for the project $project (if the pool, provider or service account exist already, skip that command, or use update-oidc for the provider):"
+    ci_oidc_run print gcloud iam workload-identity-pools create "$pool" --project "$project" --location global --display-name freelunch
+    ci_oidc_run print gcloud iam service-accounts create "$sa_name" --project "$project" --display-name "freelunch CI"
+  fi
+  ci_oidc_run "$how" gcloud iam workload-identity-pools providers "$existing" github --workload-identity-pool "$pool" --project "$project" --location global \
+    --issuer-uri https://token.actions.githubusercontent.com \
+    --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref" \
+    --attribute-condition "$cond"
+  ci_oidc_run "$how" gcloud iam service-accounts add-iam-policy-binding "$sa" --project "$project" --role roles/iam.workloadIdentityUser --member "$member"
+  for r in ${roles[@]+"${roles[@]}"}; do
+    ci_oidc_run "$how" gcloud projects add-iam-policy-binding "$project" --member "serviceAccount:$sa" --role "$r"
+  done
+  [[ ${#roles[@]} -gt 0 ]] || log "gcp: the service account has no roles yet: grant what freelunch's gcp or cloud-run stack needs (gcloud projects add-iam-policy-binding $project --member serviceAccount:$sa --role <role>), or run this again with --role"
+  if [[ "$how" == run ]]; then
+    (cd "$(dirname "$PROJECT")" && gh variable set GCP_WORKLOAD_IDENTITY_PROVIDER --repo "$repo" --body "$provider" && gh variable set GCP_SERVICE_ACCOUNT --repo "$repo" --body "$sa") >/dev/null \
+      || die "ci oidc: gh couldn't set the variables GCP_WORKLOAD_IDENTITY_PROVIDER and GCP_SERVICE_ACCOUNT in $repo (see above)"
+    ci_oidc_remember gcp
+    log "gcp: $repo signs in as $sa from now on: the workflows get id-token: write and a sign-in step. Run freelunch ci init again to rewrite them"
+  else
+    echo "  gh variable set GCP_WORKLOAD_IDENTITY_PROVIDER --repo $repo --body $provider" >&2
+    echo "  gh variable set GCP_SERVICE_ACCOUNT --repo $repo --body $sa" >&2
+    echo "  echo gcp >> $(rel "$PROJECT")/oidc   # then freelunch ci init, to rewrite the workflows" >&2
+  fi
+}
+
+# ci_oidc_azure: an app registration in Microsoft Entra with federated credentials that only
+# accept this repository's main branch and its own pull requests, a service principal for it, and
+# the repository variables azure/login reads. The principal gets the roles of --role (repeatable),
+# scoped to the subscription, and none without: how much of the subscription CI may change is yours
+# to say.
+ci_oidc_azure() {
+  local how=ask repo subscription="" tenant="" app_name="" roles=() tfvars app_id obj_id names r subj n creds
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run)          how=run ;;
+      --print)        how=print ;;
+      --subscription) [[ $# -gt 1 ]] || die "ci oidc: --subscription takes a subscription ID"; subscription="$2"; shift ;;
+      --role)         [[ $# -gt 1 ]] || die "ci oidc: --role takes a role such as Contributor"; roles+=("$2"); shift ;;
+      --app-name)     [[ $# -gt 1 ]] || die "ci oidc: --app-name takes a name"; app_name="$2"; shift ;;
+      *)              die "ci oidc azure: unknown option $1" ;;
+    esac
+    shift
+  done
+  [[ -n "$PROJECT" ]] || die "ci oidc: run it in a project, where its .freelunch/ folder is (freelunch init makes one)"
+  command -v jq >/dev/null || die "jq is required for ci oidc"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  command -v gh >/dev/null || die "ci oidc: the identity's IDs go to the repository as variables with gh (https://cli.github.com), signed in"
+  repo="$(cd "$(dirname "$PROJECT")" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" \
+    || die "ci oidc: gh can't tell which GitHub repository this is (gh auth login, and an origin on github.com)"
+  tfvars="$(config_dir azure)/terraform.tfvars"
+  [[ -n "$subscription" || ! -f "$tfvars" ]] || subscription="$(tfvar "$tfvars" subscription_id)"
+  if command -v az >/dev/null && tenant="$(az account show --query tenantId -o tsv 2>/dev/null)" && [[ -n "$tenant" ]]; then
+    [[ -n "$subscription" && "$subscription" != *xxxx* ]] || subscription="$(az account show --query id -o tsv 2>/dev/null)"
+  else
+    tenant="<TENANT_ID>"
+    [[ "$how" != run ]] || die "ci oidc azure: the az CLI isn't signed in (az login); or --print"
+    how=print
+  fi
+  subscription="${subscription:-<SUBSCRIPTION_ID>}"
+  app_name="${app_name:-freelunch-${repo//\//-}}"
+  how="$(ci_oidc_choose "$how" "Create the app registration $app_name in Microsoft Entra tenant $tenant now with az, or print the commands for you to run?")"
+  creds=("main:repo:$repo:ref:refs/heads/main" "pull-request:repo:$repo:pull_request")
+  if [[ "$how" == print ]]; then
+    log "run these in a shell where az is signed in (az login):"
+    {
+      echo "  APP_ID=\$(az ad app create --display-name $(sh_quote "$app_name") --query appId -o tsv)"
+      echo "  az ad sp create --id \"\$APP_ID\""
+      for r in "${creds[@]}"; do
+        n="${r%%:*}"; subj="${r#*:}"
+        echo "  az ad app federated-credential create --id \"\$APP_ID\" --parameters $(sh_quote "$(jq -cn --arg n "$n" --arg s "$subj" '{name: $n, issuer: "https://token.actions.githubusercontent.com", subject: $s, audiences: ["api://AzureADTokenExchange"]}')")"
+      done
+      for r in ${roles[@]+"${roles[@]}"}; do
+        echo "  az role assignment create --assignee \"\$APP_ID\" --role $(sh_quote "$r") --scope /subscriptions/$subscription"
+      done
+      echo "  gh variable set AZURE_CLIENT_ID --repo $repo --body \"\$APP_ID\""
+      echo "  gh variable set AZURE_TENANT_ID --repo $repo --body $tenant"
+      echo "  gh variable set AZURE_SUBSCRIPTION_ID --repo $repo --body $subscription"
+      echo "  echo azure >> $(rel "$PROJECT")/oidc   # then freelunch ci init, to rewrite the workflows"
+    } >&2
+    [[ ${#roles[@]} -gt 0 ]] || log "azure: the principal would have no roles: add --role (say Contributor) or assign what freelunch's azure stack needs yourself"
+    return 0
+  fi
+  app_id="$(az ad app list --display-name "$app_name" --query '[0].appId' -o tsv 2>/dev/null || true)"
+  if [[ -n "$app_id" ]]; then
+    log "azure: the app registration $app_name is there already"
+  else
+    app_id="$(az ad app create --display-name "$app_name" --query appId -o tsv)"
+  fi
+  obj_id="$(az ad app show --id "$app_id" --query id -o tsv)"
+  az ad sp show --id "$app_id" >/dev/null 2>&1 || az ad sp create --id "$app_id" >/dev/null
+  names="$(az ad app federated-credential list --id "$obj_id" --query '[].name' -o tsv 2>/dev/null || true)"
+  for r in "${creds[@]}"; do
+    n="${r%%:*}"; subj="${r#*:}"
+    if grep -qx "$n" <<< "$names"; then continue; fi
+    jq -n --arg n "$n" --arg s "$subj" '{name: $n, issuer: "https://token.actions.githubusercontent.com", subject: $s, audiences: ["api://AzureADTokenExchange"]}' > "$TMP/azure-cred-$n.json"
+    az ad app federated-credential create --id "$obj_id" --parameters "@$TMP/azure-cred-$n.json" >/dev/null
+  done
+  for r in ${roles[@]+"${roles[@]}"}; do
+    az role assignment create --assignee "$app_id" --role "$r" --scope "/subscriptions/$subscription" >/dev/null
+  done
+  [[ ${#roles[@]} -gt 0 ]] || log "azure: the principal has no roles yet: assign what freelunch's azure stack needs (az role assignment create --assignee $app_id --role <role> --scope /subscriptions/$subscription), or run this again with --role"
+  (cd "$(dirname "$PROJECT")" && gh variable set AZURE_CLIENT_ID --repo "$repo" --body "$app_id" && gh variable set AZURE_TENANT_ID --repo "$repo" --body "$tenant" && gh variable set AZURE_SUBSCRIPTION_ID --repo "$repo" --body "$subscription") >/dev/null \
+    || die "ci oidc: gh couldn't set the variables AZURE_CLIENT_ID, AZURE_TENANT_ID and AZURE_SUBSCRIPTION_ID in $repo (see above)"
+  ci_oidc_remember azure
+  log "azure: $repo signs in as $app_name ($app_id) from now on: the workflows get id-token: write and a sign-in step. Run freelunch ci init again to rewrite them"
+}
+
+# ci_secret_value <name> <file>: what the secret holds, into the file. The secrets that carry a
+# file (the OCI profile and key, the SSH key deploy signs in with) hold its text; any other is
+# the variable of that name, from the shell or .freelunch/.env. Fails, and says why, when
+# there is nothing to put in it.
+ci_secret_value() {
+  local name="$1" file="$2" key
+  : > "$file"
+  case "$name" in
+    FREELUNCH_OCI_CONFIG) oci_ci_files && cp "$TMP/oci.config" "$file" ;;
+    FREELUNCH_OCI_KEY)    oci_ci_files && cp "$OCI_CI_KEY" "$file" ;;
+    FREELUNCH_SSH_PRIVATE_KEY)
+      [[ -f "$TMP/bundle" ]] || echo "freelunch-bundle 1" > "$TMP/bundle"
+      bundle_ssh_key
+      [[ -n "$SSH_KEY_BUNDLED" ]] && cp "$SSH_KEY_BUNDLED" "$file" ;;
+    *) [[ -n "${!name:-}" ]] && printf '%s' "${!name}" > "$file" ;;
+  esac
+  [[ -s "$file" ]]
+}
+
+# ci_hand_over_secrets <how: ask|set|print>: get the secrets the workflows pass on into the
+# repository. set runs gh secret set for each, the value read from a file by gh, never on a
+# command line; print only says what to run. ask lets whoever is there choose, and prints
+# when nobody can answer: putting secrets in a repository is not something to do unasked.
+ci_hand_over_secrets() {
+  local how="$1" base repo name what n=0 v=0 answer set=0 left_over="" cmd
+  base="$(dirname "$PROJECT")"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  while IFS=$'\t' read -r name what; do [[ -z "$name" ]] || n=$((n + 1)); done < <(ci_secret_names)
+  while IFS=$'\t' read -r name what; do [[ -z "$name" ]] || v=$((v + 1)); done < <(ci_variable_names)
+  [[ $n -gt 0 || $v -gt 0 ]] || return 0
+  if [[ "$how" == ask ]]; then
+    if interactive && command -v gh >/dev/null; then
+      answer="$(ask "Set the $n secrets and $v variables the workflows pass on in the GitHub repository now with gh, or print the commands for you to run? (set/print)" print)"
+      case "$answer" in set|s|S|y|yes) how="set" ;; *) how=print ;; esac
+    else
+      how=print
+    fi
+  fi
+  if [[ "$how" == set ]]; then
+    command -v gh >/dev/null || die "ci init: setting secrets takes gh (https://cli.github.com), signed in; or --print-secrets"
+    repo="$(cd "$base" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" \
+      || die "ci init: gh can't tell which GitHub repository this is (gh auth login, and an origin on github.com); or --print-secrets"
+    resolve_env_refs
+    while IFS=$'\t' read -r name what; do
+      [[ -n "$name" ]] || continue
+      if ci_secret_value "$name" "$TMP/secret.value"; then
+        (cd "$base" && gh secret set "$name" --repo "$repo" < "$TMP/secret.value") >/dev/null \
+          || die "ci init: gh couldn't set the secret $name in $repo (see above)"
+        log "set the secret $name in $repo ($what)"
+        set=$((set + 1))
+      else
+        left_over="$left_over $name"
+        log "$name: nothing to put in it here ($what). Get it from: $(ci_token_help "$name"). Then put it in the shell or $(rel "$PROJECT")/.env and run ci init again, or gh secret set $name"
+      fi
+      rm -f "$TMP/secret.value"
+    done < <(ci_secret_names)
+    while IFS=$'\t' read -r name what; do
+      [[ -n "$name" ]] || continue
+      (cd "$base" && gh variable set "$name" --repo "$repo" --body "${!name}") >/dev/null \
+        || die "ci init: gh couldn't set the variable $name in $repo (see above)"
+      log "set the variable $name in $repo ($what)"
+    done < <(ci_variable_names)
+    log "$set of $n secrets set in $repo${left_over:+; still to set:$left_over}"
+    return 0
+  fi
+  echo "  add these as secrets of the repository (Settings > Secrets and variables > Actions), or run each command:" >&2
+  while IFS=$'\t' read -r name what; do
+    [[ -n "$name" ]] || continue
+    cmd="gh secret set $name"
+    case "$name" in
+      FREELUNCH_OCI_CONFIG|FREELUNCH_OCI_KEY|FREELUNCH_SSH_PRIVATE_KEY) cmd="freelunch ci init --set-secrets  # sets $name from its file" ;;
+    esac
+    echo "       $name: $what" >&2
+    echo "           get it from: $(ci_token_help "$name")" >&2
+    echo "           $cmd" >&2
+  done < <(ci_secret_names)
+  while IFS=$'\t' read -r name what; do
+    [[ -n "$name" ]] || continue
+    echo "       $name (a variable, not a secret): $what" >&2
+    echo "           gh variable set $name --body \"\$$name\"" >&2
+  done < <(ci_variable_names)
 }
 
 # bundle_put <path in the bundle> <file>: add a file to the bundle in TMP, as one line of
@@ -6525,8 +8553,16 @@ bundle_ssh_key() {
 # bundle_oci: the OCI profile the oci stack signs in with, and its API key. A session token
 # can't go: CI couldn't refresh it past the session's end.
 bundle_oci() {
+  oci_ci_files || return 0
+  bundle_put home/.oci/config "$TMP/oci.config"
+  bundle_put home/.oci/freelunch_api_key.pem "$OCI_CI_KEY"
+}
+
+# oci_ci_files: the OCI profile the oci stack signs in with, as CI gets it, in $TMP/oci.config,
+# and the path of its API key in OCI_CI_KEY. Fails quietly when the project has no oci stack.
+oci_ci_files() {
   local tfvars profile key
-  if [[ ! -d "$(stack_dir oci)" ]] || ! is_configured oci; then return 0; fi
+  if [[ ! -d "$(stack_dir oci)" ]] || ! is_configured oci; then return 1; fi
   tfvars="$(config_dir oci)/terraform.tfvars"
   [[ -z "$(oci_session_profile "$tfvars")" ]] \
     || die "ci: the oci stack signs in with a session token (oci_auth = \"SecurityToken\"), which CI can't refresh past the session's end. Make an API key (oci setup bootstrap --profile-name freelunch), set oci_config_profile = \"freelunch\" and drop oci_auth in $(rel "$tfvars"), then run this again"
@@ -6536,8 +8572,7 @@ bundle_oci() {
   [[ -n "$key" && -f "$key" ]] || die "ci: the key_file of OCI profile $profile isn't there: ${key:-none set}"
   awk -v p="[$profile]" '$0 == p { s = 1; print; next } /^\[/ { s = 0 } s && !/^(key_file|security_token_file)[ \t]*=/ { print }' "$HOME/.oci/config" > "$TMP/oci.config"
   echo "key_file=~/.oci/freelunch_api_key.pem" >> "$TMP/oci.config"
-  bundle_put home/.oci/config "$TMP/oci.config"
-  bundle_put home/.oci/freelunch_api_key.pem "$key"
+  OCI_CI_KEY="$key"
 }
 
 # bundle_env: the project's .env as CI gets it: secrets from 1Password or the keychain as
@@ -6919,11 +8954,12 @@ cmd_ci() {
   case "$sub" in
     init)    ci_init "$@" ;;
     secrets) ci_secrets "$@" ;;
+    oidc)    ci_oidc "$@" ;;
     wait)    ci_wait "$@" ;;
     restore) [[ $# -le 1 ]] || die "ci restore takes --force at most"; ci_restore "$@" ;;
     resume)  [[ $# -eq 0 ]] || die "ci resume takes no arguments"; ci_resume ;;
     needs)   [[ $# -eq 0 ]] || die "ci needs takes no arguments"; ci_needs ;;
-    *)       die "ci: init, secrets, wait, or in a CI job restore and resume (freelunch help)" ;;
+    *)       die "ci: init, secrets, oidc, wait, or in a CI job restore and resume (freelunch help)" ;;
   esac
 }
 
@@ -6977,6 +9013,11 @@ cmd_test() { # cmd_test [folder...]: folders are relative to the checkout; `test
   fi
   if [[ ${#roots[@]} -gt 0 ]]; then
     while IFS= read -r dir; do
+      # A suite whose mocks only OpenTofu understands says so with tests/.tofu-only
+      if [[ -f "$dir/tests/.tofu-only" && "$(tool_name)" != tofu ]]; then
+        log "test ${dir#"$ROOT"/}: skipped, its mocks need OpenTofu"
+        continue
+      fi
       log "test ${dir#"$ROOT"/}"
       init_dir "$dir"
       tf_in "$dir" test || failed=1
@@ -7036,6 +9077,10 @@ main() {
     inventory)            cmd_inventory ;;
     output)               cmd_output "$@" ;;
     catalog)              cmd_catalog ;;
+    api)                  resolve_state_refs; cmd_api "$@" ;;
+    cli)                  resolve_state_refs; cmd_cli "$@" ;;
+    guided)               resolve_state_refs; cmd_guided "$@" ;;
+    engine)               [[ -d "$PROVIDERS_DIR/${1:-}" ]] || die "engine: freelunch engine <provider> [kind]"; engine_of "$@" ;;
     test)                 cmd_test "$@" ;;
     fmt)                  cmd_fmt "$@" ;;
     help|-h|--help)       usage ;;

@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export NEON_API_KEY (or put it in .freelunch/.env). Make a key in the Neon
+# console under Account settings > API keys.
+
+# One Postgres project per entry. The free plan has 100 projects, 100 compute-hours a month
+# each, 1 GB of storage each (20 GB in total); a project scales to zero after 5 minutes idle.
+databases = {
+  main = {}
+  # staging = { region_id = "aws-eu-central-1", pg_version = 16 }
+}
+
+# org_id = "org-..."   # only when the key belongs to an organisation

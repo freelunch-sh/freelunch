@@ -7,6 +7,9 @@ status: planned                   # ready | planned | excluded
 layer: host                       # host (Docker hosts) | service (managed service) | glue (consumes hybrid inventory)
 terraform_provider: "example/example"   # registry address, or null when none exists
 iac: partner                      # official | partner | community | stale | none (must be none when terraform_provider is null)
+engine: tofu                      # optional: tofu | api | cli | guided. Default: tofu, or guided when iac is stale or none
+# jobs: [provision, ci, cd]       # optional: what the provider supports in a workflow
+# verified: fake-api              # optional, once implemented: fake-api (a test double) | live (a real account has run it)
 free_tier_type: always-free       # always-free | monthly-credit | trial | startup-credits | none
 free_tier: "One-line summary of what is free, with numbers"
 card_required: "unknown"          # "yes" | "no" | "unknown"

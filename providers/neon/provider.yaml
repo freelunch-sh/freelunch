@@ -2,18 +2,24 @@
 name: neon
 display_name: "Neon"
 category: databases
-status: planned
+status: ready
 layer: service
 terraform_provider: "kislerdm/neon"
 iac: community
 free_tier_type: always-free
-free_tier: "0.5 GB storage per project, up to 100 projects, 100 CU-hours/project/month, scales to zero after 5 min"
+free_tier: "100 projects, each with 1 GB Postgres storage (20 GB total) and 100 CU-hours/month; scales to zero after 5 min; 10 branches per project"
+behavior: scale-to-zero
 card_required: "no"
 url: "https://neon.com/pricing"
-last_verified: "2026-10-18"
-notes: "An official neondatabase/neon provider exists in source but is not yet published to the Terraform Registry."
+last_verified: "2026-11-08"
+notes: "Neon's FAQ (updated 2026-10-01) says 1 GB per project; some older pages say 0.5 GB. Suspended projects still count toward the storage cap. An official neondatabase/neon provider exists in source but is not yet published to the Terraform Registry."
 sources:
+  - "neon.com/faqs/free-plan-limits-and-quotas (checked 2026-11-08)"
   - "inspire/listing/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
 inspire:
   - "repos/terraform-providers/neondatabase-terraform-provider-neon"
+limits:
+  max_projects: 100
+  max_cu: 2
+  pg_versions: [14, 15, 16, 17]

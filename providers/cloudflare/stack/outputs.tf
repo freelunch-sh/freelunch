@@ -47,3 +47,13 @@ output "bucket_keys" {
   } }
   sensitive = true
 }
+
+output "workers" {
+  description = "Each Worker's name and custom hostname."
+  value       = module.edge.workers
+}
+
+output "pages" {
+  description = "Each Pages project's name, pages.dev subdomain and custom hostname. Upload a site with `wrangler pages deploy <dir> --project-name <name>`."
+  value       = module.edge.pages
+}

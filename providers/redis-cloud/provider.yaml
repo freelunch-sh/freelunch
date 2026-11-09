@@ -2,16 +2,20 @@
 name: redis-cloud
 display_name: "Redis Cloud"
 category: databases
-status: planned
+status: ready
 layer: service
 terraform_provider: "RedisLabs/rediscloud"
 iac: partner
 free_tier_type: always-free
-free_tier: "Free 30 MB database"
+free_tier: "One free 30 MB database (Redis Cloud Essentials free plan), shared cloud, best-effort SLA, community support"
 card_required: "no"
 url: "https://redis.io/pricing/"
-last_verified: "2026-10-18"
-notes: "Limit not re-verified during research."
+last_verified: "2026-11-08"
+notes: "Card requirement not stated on the pricing page (unverified)."
 sources:
   - "registry.terraform.io (checked 2026-10-18)"
+  - "redis.io/pricing (checked 2026-11-08)"
 inspire: []
+limits:
+  max_databases: 1
+  size_mb: 30

@@ -1,0 +1,16 @@
+name: eta
+display_name: "Eta"
+category: vps
+status: planned
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "something"
+card_required: "no"
+url: "https://eta.example"
+last_verified: "2026-11-08"
+notes: null
+sources: []
+inspire: []
+engine: ansible

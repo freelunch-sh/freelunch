@@ -7,11 +7,12 @@ layer: service
 terraform_provider: "singlestore-labs/singlestoredb"
 iac: partner
 free_tier_type: always-free
-free_tier: "Free shared tier"
+free_tier: "Managed Shared edition: 1 free workspace (shared), for evaluation and non-production; storage and compute caps unverified"
 card_required: "unknown"
 url: "https://www.singlestore.com/pricing/"
-last_verified: "2026-10-18"
-notes: "Limits not verified during research."
+last_verified: "2026-11-08"
+notes: "Left planned: the singlestoredb provider (0.1.19) has no shared/free workspace resource. singlestoredb_workspace_group needs firewall_ranges and defaults to PRODUCTION deployment, and workspaces are sized S-00 and up, all billed. Caps, duration and card requirement of the free shared tier are unverified."
 sources:
+  - "singlestore.com/pricing (checked 2026-11-08)"
   - "registry.terraform.io (checked 2026-10-18)"
 inspire: []

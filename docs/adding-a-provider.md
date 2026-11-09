@@ -23,6 +23,10 @@ Schema (enforced by `catalog/`):
 | `free_tier_type` | `always-free`, `monthly-credit`, `trial`, `startup-credits`, `none` |
 | `card_required` | `"yes"`, `"no"`, `"unknown"` |
 | `free_tier`, `display_name`, `url`, `last_verified` | strings |
+| `behavior` | optional, for always-free tiers: `always-on`, `scale-to-zero`, `sleeps`, `pauses` or `capped`. The checklist shows it, so "free forever" and "free but asleep" are told apart |
+| `engine` | optional: `tofu`, `api`, `cli` or `guided` ([engines](engines.md)). Without it, `tofu`, or `guided` when `iac` is `stale` or `none`. `engine_<kind>` (say `engine_database: api`) overrides it for one kind of resource. A provider that is `ready` (or says `engine:`) with `tofu` needs a `stack/`; with `api`, an `api.yaml` ([api-adapter](api-adapter.md)). `bin/freelunch engine <name>` prints the result |
+| `jobs` | optional list of `provision`, `ci`, `cd`: what the provider supports in a workflow |
+| `verified` | optional, for a provider that is `ready`: `fake-api` (only a test double has run it) or `live` (a real account has run apply, deploy and destroy). New `api` providers start as `fake-api`. The checklist shows the engine, jobs and this for implemented providers |
 | `notes`, `sources`, `inspire` | optional |
 | `recommended` | optional `true` for the provider to start with when a category has several; at most one per category, never an excluded one. The checklist marks it, and `freelunch domain suggest` lists it first |
 | `suffixes` | free domain providers (category `domains`) only: a one-line list such as `["dpdns.org", "us.kg"]`, which `freelunch domain suggest` checks. List only suffixes on the [Public Suffix List](https://publicsuffix.org/): Cloudflare's free plan treats names under any other suffix as subdomains and won't add them |
@@ -46,10 +50,15 @@ Use [`providers/oci`](../providers/oci/) as the reference.
       apps) and no `apps` in cloud-init (`freelunch deploy` runs them)
 - [ ] Platform providers: the stack outputs `platforms` following the
       [platform contract](architecture.md#platform-contract), with the free-tier limits as
-      preconditions. `bin/freelunch` does the rest through the provider's API: `platform_up`
-      after `apply`, `deploy_platform` (a service per app, from `deploy/`'s `platforms`
-      output), `status` and `doctor` checks, and `destroy_platform`. Northflank is the
+      preconditions. `bin/freelunch` does the rest through the provider's API: the engine hooks
+      `engine_<provider>_apply` (after the stack's apply), `_deploy` (a service per app, from
+      `deploy/`'s `platforms` output), `_status`, `_check` (doctor) and `_destroy`, which
+      `engine_call` finds by name ([engines.md](engines.md)). Northflank is the
       reference; `tests/cli.sh` runs it against a fake API
+- [ ] API-only providers: `api.yaml` instead of a `stack/` ([api-adapter](api-adapter.md)), a
+      fixture in `tests/fixtures/<name>/scenario.json`, `engine: api` and `verified: fake-api`.
+      Providers with a command line tool use `cli.yaml`, and providers with neither a
+      `guided.yaml` of steps ([engines](engines.md#the-cli-engine))
 - [ ] Glue providers: the stack takes `inventory_state_path` and checks its hosts against the
       inventory, following the [glue contract](architecture.md#glue-contract)
 - [ ] Offline tests (`tests/*.tftest.hcl`) using `mock_provider`: the default layout plans,

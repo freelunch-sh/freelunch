@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export TIDBCLOUD_PUBLIC_KEY and TIDBCLOUD_PRIVATE_KEY (or put them in
+# .freelunch/.env). Make a key pair in the TiDB Cloud console under Organization settings >
+# API keys.
+
+# One Starter cluster per entry. The free quota is 5 clusters per organisation, each with
+# 5 GiB row storage, 5 GiB columnar storage and 50M request units a month.
+databases = {
+  main = {}
+  # eu = { region = "regions/aws-eu-central-1" }
+}
+
+# project_id = "..."   # only to use a project other than the default one

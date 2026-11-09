@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Credentials: export SUPABASE_ACCESS_TOKEN (or put it in .freelunch/.env). Make a token at
+# supabase.com/dashboard/account/tokens.
+
+# The organisation's slug (dashboard > organisation settings).
+organization_id = "my-org-slug"
+
+# The free plan has 2 active projects, 500 MB of database each. A project pauses after a
+# week without use and has to be restored from the dashboard.
+databases = {
+  main = {}
+  # staging = { region = "eu-central-1" }
+}

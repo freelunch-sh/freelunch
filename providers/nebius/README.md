@@ -9,6 +9,7 @@
 | **Free tier** | 🎓 Startup / research programs only |
 | **Card required** | yes |
 | **Terraform provider** | [`nebius/nebius`](https://registry.terraform.io/providers/nebius/nebius/latest) (community) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

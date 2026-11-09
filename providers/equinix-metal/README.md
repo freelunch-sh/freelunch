@@ -9,6 +9,7 @@
 | **Free tier** | 💲 No free tier (paid) |
 | **Card required** | yes |
 | **Terraform provider** | [`equinix/equinix`](https://registry.terraform.io/providers/equinix/equinix/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-19 |
 
 ## What's free

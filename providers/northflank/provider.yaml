@@ -10,6 +10,7 @@ terraform_provider: null
 iac: none
 free_tier_type: always-free
 free_tier: "Sandbox: 2 services, 2 jobs and 1 database, always on with no sleeping, plans up to nf-compute-20 (0.2 vCPU, 512 MB) and up to $20/month of resources; no card"
+behavior: always-on
 card_required: "no"
 url: "https://northflank.com/pricing"
 last_verified: "2026-10-24"

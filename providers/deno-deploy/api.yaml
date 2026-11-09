@@ -1,0 +1,39 @@
+# Deno Deploy (the apps model at api.deno.com/v2). Read from its OpenAPI spec, not yet run
+# against a live account (verified: fake-api).
+#
+# An app is made by slug, with a label freelunch=<name_prefix> that marks it as ours. A deploy
+# uploads the source files inline (the custom step in api.sh) and returns a revision, which is
+# polled until it has succeeded. The app's address comes from the revision, not the app.
+custom: deno_deploy
+base_url: https://api.deno.com
+auth:
+  env: DENO_DEPLOY_TOKEN
+  header: "Authorization: Bearer {token}"
+check:
+  request: GET /v2/apps?limit=1
+  ok: [200]
+list:
+  request: GET /v2/apps?limit=100
+  items: ".[]"
+  fields: { id: ".id", name: ".slug", marker: ".labels.freelunch" }
+create:
+  request: POST /v2/apps
+  body: |
+    { slug: $name,
+      labels: { freelunch: $prefix },
+      env_vars: ($env | to_entries | map({key, value, secret: true})) }
+  id: ".id"
+update:
+  request: PATCH /v2/apps/{id}
+  body: |
+    { env_vars: ($env | to_entries | map({key, value, secret: true})) }
+wait:
+  request: GET /v2/revisions/{deploy_id}
+  status: ".status"
+  done: [succeeded]
+  failed: [failed, skipped]
+  url: ".timelines[0].hostnames[0]"
+delete:
+  request: DELETE /v2/apps/{id}
+  ok: [200, 202, 204, 404]
+url: "https://{url}"

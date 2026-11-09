@@ -23,14 +23,45 @@ locals {
     card_required  = ["yes", "no", "unknown"]
   }
 
+  # Optional `behavior` says what an always-free tier does when it is idle or over its cap.
+  behaviors = {
+    "always-on"     = "🟢 always on"
+    "scale-to-zero" = "💤 scales to zero"
+    sleeps          = "💤 sleeps when idle"
+    pauses          = "⏸️ pauses when unused"
+    capped          = "🚧 hard cap, no billing"
+  }
+
+  # `engine` says what makes the provider's resources (docs/engines.md); without it, `iac` does.
+  # `engine_<kind>` overrides it for one kind of resource. `jobs` says which of provision, ci and
+  # cd the provider supports, and `verified` whether anything but a test double has run it.
+  engines  = ["tofu", "api", "cli", "guided"]
+  jobs     = ["provision", "ci", "cd"]
+  verified = ["fake-api", "live"]
+
+  stack_dirs = toset([for f in fileset(local.providers_dir, "*/stack/*.tf") : dirname(dirname(f))])
+  api_dirs   = toset([for f in fileset(local.providers_dir, "*/api.yaml") : dirname(f)])
+
+  # The engine a provider resolves to, the same way `freelunch engine` does.
+  resolved_engine = {
+    for k, p in local.providers : k => try(tostring(p.engine), contains(["stale", "none"], try(p.iac, "")) ? "guided" : "tofu")
+  }
+
   # `recommended: true` marks the provider to start with where a category offers several.
   recommended = [for k, p in local.providers : k if try(p.recommended, false) == true]
 
   invalid = {
-    missing_fields  = [for k, p in local.providers : k if !alltrue([for f in local.required_fields : try(p[f], null) != null])]
-    name_mismatch   = [for k, p in local.providers : k if try(p.name, "") != k]
-    bad_category    = [for k, p in local.providers : k if !contains(local.category_keys, try(p.category, ""))]
-    bad_enum        = [for k, p in local.providers : k if !alltrue([for f, allowed in local.enums : contains(allowed, try(tostring(p[f]), ""))])]
+    missing_fields = [for k, p in local.providers : k if !alltrue([for f in local.required_fields : try(p[f], null) != null])]
+    name_mismatch  = [for k, p in local.providers : k if try(p.name, "") != k]
+    bad_category   = [for k, p in local.providers : k if !contains(local.category_keys, try(p.category, ""))]
+    bad_enum       = [for k, p in local.providers : k if !alltrue([for f, allowed in local.enums : contains(allowed, try(tostring(p[f]), ""))])]
+    bad_behavior   = [for k, p in local.providers : k if try(p.behavior, null) != null && !contains(keys(local.behaviors), tostring(p.behavior))]
+    bad_engine     = [for k, p in local.providers : k if !alltrue([for f, v in p : contains(local.engines, tostring(v)) if f == "engine" || startswith(f, "engine_")])]
+    bad_jobs       = [for k, p in local.providers : k if try(p.jobs, null) != null && !alltrue([for j in p.jobs : contains(local.jobs, tostring(j))])]
+    bad_verified   = [for k, p in local.providers : k if try(p.verified, null) != null && !contains(local.verified, tostring(p.verified))]
+    # a ready provider (or one that says so) has what its engine runs on: tofu a stack, api an api.yaml
+    no_stack        = [for k, p in local.providers : k if local.resolved_engine[k] == "tofu" && (try(p.engine, null) != null || try(p.status, "") == "ready") && !contains(local.stack_dirs, k)]
+    no_api_yaml     = [for k, p in local.providers : k if local.resolved_engine[k] == "api" && !contains(local.api_dirs, k)]
     bad_terraform   = [for k, p in local.providers : k if(try(p.terraform_provider, null) == null) != (try(p.iac, "") == "none")]
     bad_recommended = [for k, p in local.providers : k if !(try(p.recommended, false) == true || try(p.recommended, false) == false) || (contains(local.recommended, k) && try(p.status, "") == "excluded")]
     two_recommended = [for c in local.category_keys : c if length([for k in local.recommended : k if try(local.providers[k].category, "") == c]) > 1]
@@ -64,8 +95,16 @@ locals {
 
   entries = {
     for k in local.sorted : k => merge(local.providers[k], {
-      iac_icon  = try(local.icons.iac[local.providers[k].iac], "?")
-      tier_icon = try(local.icons.tier[local.providers[k].free_tier_type], "?")
+      iac_icon     = try(local.icons.iac[local.providers[k].iac], "?")
+      tier_icon    = try(local.icons.tier[local.providers[k].free_tier_type], "?")
+      behavior_tag = try(" · ${local.behaviors[local.providers[k].behavior]}", "")
+      engine       = local.resolved_engine[k]
+      # the engine, jobs and verification of an implemented provider, for the checklist
+      engine_tag = local.providers[k].status == "ready" ? join("", [
+        " · ⚙️ `${local.resolved_engine[k]}`",
+        try(" · jobs: ${join(", ", local.providers[k].jobs)}", ""),
+        try(" · verified: ${local.providers[k].verified}", ""),
+      ]) : ""
     })
   }
 

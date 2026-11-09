@@ -1,0 +1,195 @@
+{
+  "token": "sample-token-1234",
+  "ours_id": "s1",
+  "foreign_id": "x9",
+  "create": [
+    {
+      "match": "GET /v1/services",
+      "status": 200,
+      "body": []
+    },
+    {
+      "match": "POST /v1/services",
+      "status": 201,
+      "body": {
+        "id": "s1"
+      }
+    },
+    {
+      "match": "POST /v1/services/s1/deploys",
+      "status": 201,
+      "body": {
+        "id": "d1"
+      }
+    },
+    {
+      "match": "GET /v1/services/s1/deploys/d1",
+      "status": 200,
+      "body": {
+        "status": "building"
+      }
+    },
+    {
+      "match": "GET /v1/services/s1/deploys/d1",
+      "status": 200,
+      "body": {
+        "status": "live"
+      }
+    },
+    {
+      "match": "GET /v1/services",
+      "status": 200,
+      "body": [
+        {
+          "id": "s1",
+          "name": "freelunch-web",
+          "url": "web.sample.test",
+          "labels": {
+            "freelunch": "freelunch"
+          }
+        }
+      ]
+    }
+  ],
+  "update": [
+    {
+      "match": "GET /v1/services",
+      "status": 200,
+      "times": 2,
+      "body": [
+        {
+          "id": "s1",
+          "name": "freelunch-web",
+          "url": "web.sample.test",
+          "labels": {
+            "freelunch": "freelunch"
+          }
+        }
+      ]
+    },
+    {
+      "match": "PATCH /v1/services/s1",
+      "status": 200,
+      "body": {}
+    },
+    {
+      "match": "POST /v1/services/s1/deploys",
+      "status": 201,
+      "body": {
+        "id": "d2"
+      }
+    },
+    {
+      "match": "GET /v1/services/s1/deploys/d2",
+      "status": 200,
+      "body": {
+        "status": "live"
+      }
+    }
+  ],
+  "foreign": [
+    {
+      "match": "GET /v1/services",
+      "status": 200,
+      "body": [
+        {
+          "id": "x9",
+          "name": "freelunch-web",
+          "url": "theirs.sample.test",
+          "labels": {}
+        }
+      ]
+    }
+  ],
+  "failed": [
+    {
+      "match": "GET /v1/services",
+      "status": 200,
+      "body": []
+    },
+    {
+      "match": "POST /v1/services",
+      "status": 201,
+      "body": {
+        "id": "s1"
+      }
+    },
+    {
+      "match": "POST /v1/services/s1/deploys",
+      "status": 201,
+      "body": {
+        "id": "d1"
+      }
+    },
+    {
+      "match": "GET /v1/services/s1/deploys/d1",
+      "status": 200,
+      "body": {
+        "status": "failed"
+      }
+    }
+  ],
+  "failed_says": "is failed",
+  "rejected": [
+    {
+      "match": "GET /v1/services",
+      "status": 200,
+      "body": []
+    },
+    {
+      "match": "POST /v1/services",
+      "status": 400,
+      "body": {
+        "message": "bad value supersecretvalue in env"
+      }
+    }
+  ],
+  "destroy": [
+    {
+      "match": "GET /v1/services",
+      "status": 200,
+      "body": [
+        {
+          "id": "s1",
+          "name": "freelunch-web",
+          "url": "web.sample.test",
+          "labels": {
+            "freelunch": "freelunch"
+          }
+        },
+        {
+          "id": "x9",
+          "name": "freelunch-old",
+          "url": "",
+          "labels": {}
+        },
+        {
+          "id": "y3",
+          "name": "other-app",
+          "url": "",
+          "labels": {
+            "freelunch": "other"
+          }
+        }
+      ]
+    },
+    {
+      "match": "DELETE /v1/services/s1",
+      "status": 404,
+      "body": {}
+    }
+  ],
+  "record_only": [
+    {
+      "match": "GET /v1/services",
+      "status": 200,
+      "body": []
+    },
+    {
+      "match": "DELETE /v1/services/s1",
+      "status": 204,
+      "body": {}
+    }
+  ],
+  "other_id": "y3"
+}

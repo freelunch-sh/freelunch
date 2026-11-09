@@ -9,6 +9,7 @@
 | **Free tier** | ⏳ Trial credit (time-limited) |
 | **Card required** | unknown |
 | **Terraform provider** | [`confluentinc/confluent`](https://registry.terraform.io/providers/confluentinc/confluent/latest) (partner) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

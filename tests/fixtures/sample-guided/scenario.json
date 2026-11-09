@@ -1,0 +1,6 @@
+{
+  "generic": false,
+  "token": "sampleg-token-77",
+  "check": [{"match": "GET /me", "status": 200, "body": {"id": "u1"}}],
+  "bad": [{"match": "GET /me", "status": 401, "body": {"message": "invalid token sampleg-token-77"}}]
+}

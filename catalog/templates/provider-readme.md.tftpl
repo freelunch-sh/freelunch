@@ -9,6 +9,13 @@
 | **Free tier** | ${p.tier_icon} ${tier_label} |
 | **Card required** | ${p.card_required} |
 | **Terraform provider** | ${p.terraform_provider != null ? "[`${p.terraform_provider}`](https://registry.terraform.io/providers/${p.terraform_provider}/latest) (${p.iac})" : "None. Automate through the provider's API or CLI."} |
+| **Engine** | `${p.engine}` |
+%{ if try(p.jobs, null) != null ~}
+| **Jobs** | ${join(", ", p.jobs)} |
+%{ endif ~}
+%{ if try(p.verified, null) != null ~}
+| **Verified** | ${p.verified == "live" ? "live: a real account has run it" : "fake-api: only a test double has run it"} |
+%{ endif ~}
 | **Last verified** | ${p.last_verified} |
 
 ## What's free

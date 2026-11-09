@@ -9,6 +9,7 @@
 | **Free tier** | 💲 No free tier (paid) |
 | **Card required** | yes |
 | **Terraform provider** | [`crusoecloud/crusoe`](https://registry.terraform.io/providers/crusoecloud/crusoe/latest) (community) |
+| **Engine** | `tofu` |
 | **Last verified** | 2026-10-18 |
 
 ## What's free

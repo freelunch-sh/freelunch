@@ -1,0 +1,16 @@
+{
+  "generic": false,
+  "token": "gql-token-5678",
+  "check": [
+    {"match": "POST /graphql", "status": 200, "body": {"data": {"me": {"id": "u1"}}}}
+  ],
+  "create": [
+    {"match": "POST /graphql", "status": 200, "body": {"data": {"services": []}}},
+    {"match": "POST /graphql", "status": 200, "body": {"data": {"createService": {"id": "g1"}}}},
+    {"match": "POST /graphql", "status": 200, "body": {"data": {"services": [{"id": "g1", "name": "freelunch-web", "url": "web.gql.test", "labels": {"freelunch": "freelunch"}}]}}}
+  ],
+  "quota": [
+    {"match": "POST /graphql", "status": 200, "body": {"data": {"services": []}}},
+    {"match": "POST /graphql", "status": 200, "body": {"errors": [{"message": "quota exceeded for supersecretvalue"}], "data": null}}
+  ]
+}

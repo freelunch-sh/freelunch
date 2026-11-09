@@ -1,0 +1,11 @@
+# A made-up tool for tests/cli.sh (the fake fakecli): every verb the cli engine has.
+tool: fakecli
+install: "pip install fakecli"
+auth:
+  env: FAKECLI_TOKEN
+check: [fakecli, whoami]
+list: { command: [fakecli, list], format: lines, skip: 1 }
+create: [fakecli, create, "{name}"]
+deploy: [fakecli, deploy, "{name}"]
+delete: [fakecli, destroy, "{name}", --yes]
+gone: "not found"

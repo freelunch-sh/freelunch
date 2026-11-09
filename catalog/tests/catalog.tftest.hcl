@@ -13,7 +13,7 @@ run "valid_catalog_renders" {
   }
 
   assert {
-    condition     = strcontains(output.checklist, "- [x] **[Alpha Cloud](providers/alpha/)** 🟢 `alpha/alpha` · ♾️ 1 tiny VM")
+    condition     = strcontains(output.checklist, "- [x] **[Alpha Cloud](providers/alpha/)** 🟢 `alpha/alpha` · ♾️ 1 tiny VM · ⚙️ `tofu` · jobs: provision, ci · verified: fake-api")
     error_message = "Ready provider should render as a checked item with icons."
   }
 
@@ -23,7 +23,7 @@ run "valid_catalog_renders" {
   }
 
   assert {
-    condition     = strcontains(output.checklist, "♾️ 1 tiny VM · **recommended**\n") && strcontains(output.checklist, "⏳ Trial credit\n")
+    condition     = strcontains(output.checklist, "verified: fake-api · **recommended**\n") && strcontains(output.checklist, "⏳ Trial credit\n")
     error_message = "Only the provider with recommended: true should carry the recommended mark."
   }
 
@@ -56,4 +56,72 @@ run "one_recommended_provider_per_category" {
   }
 
   expect_failures = [output.checklist, output.stub_readmes]
+}
+
+run "unknown_behavior_is_rejected" {
+  command = plan
+
+  variables {
+    providers_dir = "tests/fixtures/bad-behavior"
+  }
+
+  expect_failures = [output.checklist, output.stub_readmes]
+}
+
+run "engine_jobs_and_verified_are_shown" {
+  command = plan
+
+  variables {
+    providers_dir = "tests/fixtures/valid"
+  }
+
+  assert {
+    condition     = strcontains(output.stub_readmes["alpha"], "| **Engine** | `tofu` |") && strcontains(output.stub_readmes["alpha"], "| **Jobs** | provision, ci |") && strcontains(output.stub_readmes["alpha"], "| **Verified** | fake-api: only a test double has run it |")
+    error_message = "A provider's README should say its engine, jobs and how it was verified."
+  }
+
+  assert {
+    condition     = strcontains(output.stub_readmes["beta"], "| **Engine** | `guided` |") && !strcontains(output.stub_readmes["beta"], "**Jobs**")
+    error_message = "A provider with iac none defaults to the guided engine, and says nothing about jobs it doesn't state."
+  }
+}
+
+run "unknown_engine_is_rejected" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/bad-engine" }
+  expect_failures = [output.checklist, output.stub_readmes]
+}
+
+run "unknown_job_is_rejected" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/bad-jobs" }
+  expect_failures = [output.checklist, output.stub_readmes]
+}
+
+run "unknown_verified_is_rejected" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/bad-verified" }
+  expect_failures = [output.checklist, output.stub_readmes]
+}
+
+run "tofu_engine_needs_a_stack" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/no-stack" }
+  expect_failures = [output.checklist, output.stub_readmes]
+}
+
+run "api_engine_needs_an_api_yaml" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/no-api-yaml" }
+  expect_failures = [output.checklist, output.stub_readmes]
+}
+
+run "api_and_guided_engines_render" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/engines" }
+
+  assert {
+    condition     = strcontains(output.checklist, "⚙️ `api`") && strcontains(output.checklist, "⚙️ `guided`")
+    error_message = "Implemented providers should show their engines, api with an api.yaml and guided with neither file."
+  }
 }
