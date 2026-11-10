@@ -268,9 +268,12 @@ if [[ $n -gt ${FAKE_SESSION_REFRESHES:-1000} ]]; then
 fi
 echo "Successfully refreshed token" >&2
 EOF
+# With FAKE_SLEEP_BLOCK the sleep really sleeps (30 seconds), so a wait is parked in its pause
+# for a test to signal, instead of spinning through its attempts as fast as the machine allows.
 cat > "$WORK/wait-bin/sleep" <<'EOF'
 #!/bin/sh
 echo "sleep $*" >> "$FAKE_LOG"
+[ -z "${FAKE_SLEEP_BLOCK:-}" ] || exec /bin/sleep 30
 EOF
 cat > "$WORK/wait-bin/caffeinate" <<'EOF'
 #!/bin/sh
@@ -1828,7 +1831,7 @@ test_wait_says_which_signal_ended_it() {
   for sig in HUP TERM; do
     rm -f "$p/.freelunch/oci/wait.state"
     FAKE_PLAN="$(plan_with 'oci_core_instance.this["main"] create Xyz:UK-LONDON-1-AD-1')" freelunch_in "$p" plan oci --out .freelunch/oci/reviewed.tfplan
-    FAKE_APPLY="$(printf 'capacity %.0s' $(seq 1 3000))" FAKE_PLAN="$(plan_with 'oci_core_instance.this["main"] create Xyz:UK-LONDON-1-AD-1')" \
+    FAKE_SLEEP_BLOCK=1 FAKE_APPLY="$(printf 'capacity %.0s' $(seq 1 3000))" FAKE_PLAN="$(plan_with 'oci_core_instance.this["main"] create Xyz:UK-LONDON-1-AD-1')" \
       freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity >/dev/null 2>&1 &
     for _ in $(seq 1 100); do
       pid="$(sed -n 's/^pid=//p' "$p/.freelunch/oci/wait.state" 2>/dev/null || true)"
