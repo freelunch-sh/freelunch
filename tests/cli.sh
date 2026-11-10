@@ -1826,24 +1826,28 @@ test_detached_wait_and_status() {
 # A wait that gets a SIGTERM or SIGHUP says which signal ended it (not just "stopped"), and
 # a wait that is gone without a word says what that usually means.
 test_wait_says_which_signal_ended_it() {
-  local p="$WORK/signal" pid sig
+  local p="$WORK/signal" pid sig bg
   capacity_project "$p"
   for sig in HUP TERM; do
     rm -f "$p/.freelunch/oci/wait.state"
     FAKE_PLAN="$(plan_with 'oci_core_instance.this["main"] create Xyz:UK-LONDON-1-AD-1')" freelunch_in "$p" plan oci --out .freelunch/oci/reviewed.tfplan
     FAKE_SLEEP_BLOCK=1 FAKE_APPLY="$(printf 'capacity %.0s' $(seq 1 3000))" FAKE_PLAN="$(plan_with 'oci_core_instance.this["main"] create Xyz:UK-LONDON-1-AD-1')" \
       freelunch_in "$p" apply oci --plan .freelunch/oci/reviewed.tfplan --wait-for-capacity >/dev/null 2>&1 &
+    bg=$!
     for _ in $(seq 1 100); do
       pid="$(sed -n 's/^pid=//p' "$p/.freelunch/oci/wait.state" 2>/dev/null || true)"
       [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && break
       /bin/sleep 0.1
     done
+    [[ -n "$pid" ]] || { echo "the wait never wrote its pid:" >&2; cat "$p/.freelunch/oci/wait.state" >&2 || true; return 1; }
     kill -$sig "$pid"
     for _ in $(seq 1 600); do
       [[ "$(sed -n 's/^state=//p' "$p/.freelunch/oci/wait.state" || true)" != "stopped" ]] || break
       /bin/sleep 0.1
     done
-    contains "$(sed -n 's/^last=//p' "$p/.freelunch/oci/wait.state")" "got SIG$sig"
+    # the wait is gone before the next round starts, so nothing of this one is left to write
+    wait "$bg" 2>/dev/null || true
+    contains "$(sed -n 's/^last=//p' "$p/.freelunch/oci/wait.state")" "got SIG$sig" || { echo "wait.state after SIG$sig:" >&2; cat "$p/.freelunch/oci/wait.state" >&2; return 1; }
   done
   # A pid that is gone while the state says waiting: killed or lost its machine.
   printf 'state=waiting\npid=999999\nstarted=%s\nupdated=%s\nattempt=497\nlast=out of host capacity\nnext=\nlog=\nsession=\n' "$(date +%s)" "$(date +%s)" > "$p/.freelunch/oci/wait.state"
