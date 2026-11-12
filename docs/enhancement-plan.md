@@ -121,14 +121,14 @@ redeploy during the rollback) and Cloudflare (tunnel, DNS, Access) on real accou
   table at the end, a row per provider with a `verified: fake-api` or no `verified` and
   `status: ready`: provider, the exact command to run, what to look for. Generate the rows
   from the `provider.yaml` files
-- [ ] `private/ROADMAP.md` (git-ignored, so no commit): tick PR #25 and "Merge PR #25";
+- [x] `private/ROADMAP.md` (git-ignored, so no commit): tick PR #25 and "Merge PR #25";
   tick the v0.2 lines that exist (`up`, `setup`, the git-branch state, per-secret passing);
   strike v0.2 Phase 7's "Removed: `ci init|secrets|restore|wait|resume`, FREELUNCH_BUNDLE"
   with a note that they were kept and the bundle made optional; note under Phase 2 that
   `offers:` was not built and the catalogue took `engine`/`jobs`/`verified` instead; tick
   three of the five v0.1 Phase 2 live checks with the date and commit; add a line at the top
   pointing here
-- [ ] `private/browser-only-checklist.md` (git-ignored): tick 8.4 for AWS, GCP and Azure
+- [x] `private/browser-only-checklist.md` (git-ignored): tick 8.4 for AWS, GCP and Azure
   (`ci oidc`), leaving the Oracle spike; check 5.1 against `ci init --set-secrets` and tick
   it only if the value is never written to disk or printed; remove "polling timeout" from
   5.5 (5.2 decided there is no polling); fix the test count
