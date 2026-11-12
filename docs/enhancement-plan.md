@@ -111,7 +111,7 @@ redeploy during the rollback) and Cloudflare (tunnel, DNS, Access) on real accou
 - [x] `README.md` Roadmap section: replace "Every live-account run is still to do" with what
   has run live and what has not (CI deploy, the installed pin, a free domain, the fixes above,
   every other provider)
-- [ ] `docs/oci-wait-gaps.md`: its header says "Nothing here is fixed yet". Mark each item
+- [x] `docs/oci-wait-gaps.md`: its header says "Nothing here is fixed yet". Mark each item
   fixed, open or moved to this plan (section 3), checking the code for each, not this list
 - [ ] `docs/engines-plan.md`: delete the first four boxes of "Later phases" (they only point
   at sections 9 to 12). Move the lines that say "not built on purpose" or "nothing for an
