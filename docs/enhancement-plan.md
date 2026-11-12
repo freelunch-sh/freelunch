@@ -113,11 +113,11 @@ redeploy during the rollback) and Cloudflare (tunnel, DNS, Access) on real accou
   every other provider)
 - [x] `docs/oci-wait-gaps.md`: its header says "Nothing here is fixed yet". Mark each item
   fixed, open or moved to this plan (section 3), checking the code for each, not this list
-- [ ] `docs/engines-plan.md`: delete the first four boxes of "Later phases" (they only point
+- [x] `docs/engines-plan.md`: delete the first four boxes of "Later phases" (they only point
   at sections 9 to 12). Move the lines that say "not built on purpose" or "nothing for an
   engine to make" (HCP Terraform/Spacelift/Scalr, Filebase, the GPU providers) out of the
   checklists into a "Not building" list at the end, without boxes, keeping their reasons
-- [ ] `docs/engines-plan.md`: replace the five "Live-account run for each" boxes with one
+- [x] `docs/engines-plan.md`: replace the five "Live-account run for each" boxes with one
   table at the end, a row per provider with a `verified: fake-api` or no `verified` and
   `status: ready`: provider, the exact command to run, what to look for. Generate the rows
   from the `provider.yaml` files

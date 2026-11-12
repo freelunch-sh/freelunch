@@ -195,7 +195,6 @@ an app's `needs` names one and gets the variables the service names
 - [ ] The other observability providers: Grafana Cloud, Datadog, Honeycomb (its API-key resource needs a management key, and the free plan's access to one is not clear), Checkly, PagerDuty (its provider docs could not be read: token variable and integration key attribute unconfirmed), Site24x7, Netdata
 - [ ] The other messaging providers: Synadia, Confluent (trial credit only), Redpanda (trial credit only)
 - [x] A service from an `api` or `cli` engine, through its record (`service:` in `cli.yaml`, `outputs:` in `api.yaml`; `deploy` and `check` read it)
-- [ ] Live-account run for each
 
 ## 11. CI systems, registries and IaC platforms (was phase 5)
 
@@ -210,8 +209,6 @@ it; a **registry** (`engine: registry`, or any provider with a `registry:` host)
 - [x] Catalog checks for both engines (a `ci` provider has a template, a `registry` one a host)
 - [x] GitLab as a provider: `engine: ci` with `ci_builtin` (its pipeline, state kind and registry are in the CLI)
 - [x] GitHub as a provider: `engine: ci` with `ci_builtin` (its workflows, GHCR and git-branch state are in the CLI)
-- [ ] HCP Terraform, Spacelift, Scalr: **not built on purpose.** They run the plans themselves, on their runners, which is the opposite of freelunch running them where you are with your credentials and its capacity wait; and as a state backend they would replace the store freelunch already offers (git, OCI, R2, B2, GitLab). A project that wants one can use its own backend config in a stack
-- [ ] Live-account run for each pipeline
 
 ## 12. Providers with no Terraform provider, or a stale one (was phase 6)
 
@@ -228,16 +225,75 @@ contract. A `cli.yaml` with a `database:` block now writes it into the provider'
 - [x] `body_format: form` and `outputs.fetch` in the `api` engine
 - [x] StatusCake (form bodies, push URL by a second read) and UptimeRobot (v3, JSON): calls read from their docs/OpenAPI, fixtures and tests, not run live; their free-plan allowance for heartbeats is not in their API docs
 - [ ] Phase (secrets): its CLI is not checked yet
-- [ ] Filebase (storage): its keys come from its console, not an API, so nothing for an engine to make
 - [ ] Databases whose tool or API is not checked yet: Tinybird, Nile, Prisma Postgres, InfluxDB Cloud, CrateDB Cloud
-- [ ] GPU providers (Modal, Vast.ai, Paperspace): no contract for them yet (a GPU is a host that is rented by the hour); out of scope until there is one
-- [ ] Live-account run for each
 
 ## Later phases (from the rollout)
 
-- [ ] Phase 3: networking and DNS glue: now section 9 above (built except the 9d providers still unchecked there, and the live runs)
-- [ ] Phase 4: secrets, observability, messaging: now section 10 above (contract and four providers built)
-- [ ] Phase 5: IaC state, CI, registries: now section 11 above (CI systems and Docker Hub built; the IaC platforms left out on purpose)
-- [ ] Phase 6: no-provider and stale-provider cases: now section 12 above (the cli engine's database outputs and Turso built; the rest waits on checkable APIs or a contract)
 - [ ] SingleStore: unblocked only if a provider can create a free workspace
-- [ ] Live-account run for each `fake-api` provider
+
+## Not building
+
+Left out on purpose or for lack of a way to check them; each keeps its reason.
+
+- HCP Terraform, Spacelift, Scalr: **not built on purpose.** They run the plans themselves, on their runners, which is the opposite of freelunch running them where you are with your credentials and its capacity wait; and as a state backend they would replace the store freelunch already offers (git, OCI, R2, B2, GitLab). A project that wants one can use its own backend config in a stack
+- Filebase (storage): its keys come from its console, not an API, so nothing for an engine to make
+- GPU providers (Modal, Vast.ai, Paperspace): no contract for them yet (a GPU is a host that is rented by the hour); out of scope until there is one
+
+## Live runs still to do
+
+One row per `status: ready` provider that is not `verified: live`, generated from the `provider.yaml`
+files (`verified` is `-` where none is set). Run the command in a scratch project, record the run in the
+provider's README under "Live runs", then set `verified: live`.
+
+| Provider | Layer | Verified | Command | Look for |
+|---|---|---|---|---|
+| ably | service | - | `freelunch plan ably`, then `freelunch apply ably` | the resource exists, its credentials reach an app, none appears in a dry run |
+| aiven | service | - | `freelunch plan aiven`, then `freelunch apply aiven` | the resource exists, its credentials reach an app, none appears in a dry run |
+| aws | host | - | `freelunch plan aws`, then `freelunch apply aws` | a VM that answers SSH, `freelunch trust` pins its key, `check` is healthy |
+| axiom | service | - | `freelunch plan axiom`, then `freelunch apply axiom` | the resource exists, its credentials reach an app, none appears in a dry run |
+| azure-devops | service | - | `freelunch ci init azure-devops` in a scratch repository | the pipeline runs and pushes the image; the secret it names is the one it reads |
+| azure | host | - | `freelunch plan azure`, then `freelunch apply azure` | a VM that answers SSH, `freelunch trust` pins its key, `check` is healthy |
+| backblaze-b2 | service | - | `freelunch plan backblaze-b2`, then `freelunch apply backblaze-b2` | the resource exists, its credentials reach an app, none appears in a dry run |
+| better-stack | service | - | `freelunch plan better-stack`, then `freelunch apply better-stack` | the resource exists, its credentials reach an app, none appears in a dry run |
+| bitbucket | service | - | `freelunch ci init bitbucket` in a scratch repository | the pipeline runs and pushes the image; the secret it names is the one it reads |
+| buildkite | service | - | `freelunch ci init buildkite` in a scratch repository | the pipeline runs and pushes the image; the secret it names is the one it reads |
+| circleci | service | - | `freelunch ci init circleci` in a scratch repository | the pipeline runs and pushes the image; the secret it names is the one it reads |
+| cloud-run | platform | - | `freelunch plan cloud-run`, then `freelunch apply cloud-run` | an app deploys and answers on its address |
+| cloudamqp | service | - | `freelunch plan cloudamqp`, then `freelunch apply cloudamqp` | the resource exists, its credentials reach an app, none appears in a dry run |
+| cloudns | glue | - | `freelunch plan cloudns`, then `freelunch apply cloudns` | the records, mesh members or tunnels exist and the host joins |
+| cockroachdb | service | - | `freelunch plan cockroachdb`, then `freelunch apply cockroachdb` | the resource exists, its credentials reach an app, none appears in a dry run |
+| codeberg | service | - | `freelunch ci init codeberg` in a scratch repository | the pipeline runs and pushes the image; the secret it names is the one it reads |
+| couchbase-capella | service | - | `freelunch plan couchbase-capella`, then `freelunch apply couchbase-capella` | the resource exists, its credentials reach an app, none appears in a dry run |
+| datastax-astra | service | - | `freelunch plan datastax-astra`, then `freelunch apply datastax-astra` | the resource exists, its credentials reach an app, none appears in a dry run |
+| deno-deploy | service | fake-api | `freelunch api deno-deploy check`, then `deploy <app>` | the resource exists, the record in the state store matches, `destroy` removes it |
+| desec | glue | fake-api | `freelunch dns desec check`, then `apply` | the record exists and resolves; `destroy` removes only its own records |
+| digitalplat | service | - | `freelunch guided digitalplat` | the steps match the provider's current console |
+| docker-hub | service | - | `freelunch init --image-workflow --registry docker-hub` | the workflow logs in and pushes an image |
+| doppler | service | - | `freelunch plan doppler`, then `freelunch apply doppler` | the resource exists, its credentials reach an app, none appears in a dry run |
+| duckdns | glue | fake-api | `freelunch dns duckdns check`, then `apply` | the record exists and resolves; `destroy` removes only its own records |
+| eu-org | service | - | `freelunch guided eu-org` | the steps match the provider's current console |
+| gcore | glue | - | `freelunch plan gcore`, then `freelunch apply gcore` | the records, mesh members or tunnels exist and the host joins |
+| gcp | host | - | `freelunch plan gcp`, then `freelunch apply gcp` | a VM that answers SSH, `freelunch trust` pins its key, `check` is healthy |
+| github | service | - | `freelunch ci init github` in a scratch repository | the pipeline runs and pushes the image; the secret it names is the one it reads |
+| gitlab | service | - | `freelunch ci init gitlab` in a scratch repository | the pipeline runs and pushes the image; the secret it names is the one it reads |
+| healthchecks-io | service | - | `freelunch plan healthchecks-io`, then `freelunch apply healthchecks-io` | the resource exists, its credentials reach an app, none appears in a dry run |
+| mongodb-atlas | service | - | `freelunch plan mongodb-atlas`, then `freelunch apply mongodb-atlas` | the resource exists, its credentials reach an app, none appears in a dry run |
+| motherduck | service | - | `freelunch plan motherduck`, then `freelunch apply motherduck` | the resource exists, its credentials reach an app, none appears in a dry run |
+| neo4j-aura | service | - | `freelunch plan neo4j-aura`, then `freelunch apply neo4j-aura` | the resource exists, its credentials reach an app, none appears in a dry run |
+| neon | service | - | `freelunch plan neon`, then `freelunch apply neon` | the resource exists, its credentials reach an app, none appears in a dry run |
+| netbird | glue | - | `freelunch plan netbird`, then `freelunch apply netbird` | the records, mesh members or tunnels exist and the host joins |
+| new-relic | service | - | `freelunch plan new-relic`, then `freelunch apply new-relic` | the resource exists, its credentials reach an app, none appears in a dry run |
+| oke | service | - | `freelunch plan oke`, then `freelunch apply oke` | the resource exists, its credentials reach an app, none appears in a dry run |
+| pp-ua | service | - | `freelunch guided pp-ua` | the steps match the provider's current console |
+| redis-cloud | service | - | `freelunch plan redis-cloud`, then `freelunch apply redis-cloud` | the resource exists, its credentials reach an app, none appears in a dry run |
+| render | platform | - | `freelunch plan render`, then `freelunch apply render` | an app deploys and answers on its address |
+| scaleway | platform | - | `freelunch plan scaleway`, then `freelunch apply scaleway` | an app deploys and answers on its address |
+| sentry | service | - | `freelunch plan sentry`, then `freelunch apply sentry` | the resource exists, its credentials reach an app, none appears in a dry run |
+| statuscake | service | fake-api | `freelunch api statuscake check`, then `deploy <app>` | the resource exists, the record in the state store matches, `destroy` removes it |
+| supabase | service | - | `freelunch plan supabase`, then `freelunch apply supabase` | the resource exists, its credentials reach an app, none appears in a dry run |
+| tailscale | glue | - | `freelunch plan tailscale`, then `freelunch apply tailscale` | the records, mesh members or tunnels exist and the host joins |
+| tidb-cloud | service | - | `freelunch plan tidb-cloud`, then `freelunch apply tidb-cloud` | the resource exists, its credentials reach an app, none appears in a dry run |
+| turso | service | fake-api | `freelunch cli turso check`, then `deploy <app>` | the resource exists, the record in the state store matches, `destroy` removes it |
+| upstash | service | - | `freelunch plan upstash`, then `freelunch apply upstash` | the resource exists, its credentials reach an app, none appears in a dry run |
+| uptimerobot | service | fake-api | `freelunch api uptimerobot check`, then `deploy <app>` | the resource exists, the record in the state store matches, `destroy` removes it |
+| yugabyte | service | - | `freelunch plan yugabyte`, then `freelunch apply yugabyte` | the resource exists, its credentials reach an app, none appears in a dry run |
