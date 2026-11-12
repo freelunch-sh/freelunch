@@ -138,7 +138,7 @@ redeploy during the rollback) and Cloudflare (tunnel, DNS, Access) on real accou
 Today `logs` only knows Northflank, and nothing restarts an app, opens a shell in it or shows
 whether a VM's disk is filling.
 
-- [ ] Refactor, no behaviour change: turn `vol_target` and `vol_ssh` into `app_target <area>
+- [x] Refactor, no behaviour change: turn `vol_target` and `vol_ssh` into `app_target <area>
   <app> [host]` and `host_ssh <command>` (the area is the word error messages start with:
   `volume`, `logs`, ...), setting `APP_HOST`, `APP_ADDR`, `APP_USER`, `APP_KIND` and
   `APP_DIR` (the app's folder on the host; `/opt/freelunch/apps/<app>` for now, section 6

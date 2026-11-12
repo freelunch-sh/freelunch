@@ -3705,65 +3705,72 @@ host_ssh_info() {
     | jq -r --arg h "$1" '.[] | select("\(.provider)-\(.name)" == $h) | [(.public_ip // .private_ip // ""), (.ssh_user // "ubuntu")] | @tsv' | head -n1
 }
 
-# vol_target <app> [host]: the VM host an app runs on, as VOL_HOST, VOL_ADDR and VOL_USER, with
-# SSH set up to pinned keys only (nothing here trusts a key it sees first)
-vol_target() {
-  local app="$1" want="${2:-}" apps_file tunnel_state="" kind
-  [[ "$app" =~ ^[A-Za-z0-9_.-]+$ ]] || die "volume: '$app' is not an app name"
+# app_target <area> <app> [host]: the host an app runs on, as APP_HOST, APP_ADDR, APP_USER, APP_KIND
+# (vm or platform) and APP_DIR (the app's folder on a VM host). <area> is the word error messages
+# start with (volume, logs, ...). A VM host's key has to be pinned; a platform has no address, so
+# the caller decides what a platform means for it.
+app_target() {
+  local area="$1" app="$2" want="${3:-}" apps_file tunnel_state=""
+  [[ "$app" =~ ^[A-Za-z0-9_.-]+$ ]] || die "$area: '$app' is not an app name"
   apps_file="$(state_root)/apps.tfvars"
-  [[ -f "$apps_file" ]] || die "volume: no $(rel "$apps_file"): the apps come from there"
+  [[ -f "$apps_file" ]] || die "$area: no $(rel "$apps_file"): the apps come from there"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   cmd_hybrid >/dev/null
   deploy_plan "$apps_file" "$tunnel_state" >/dev/null
-  VOL_HOST="$want"
-  [[ -n "$VOL_HOST" ]] || VOL_HOST="$(jq -r --arg a "$app" 'to_entries[] | select(.value.apps | has($a)) | .key' "$TMP/targets.json" | head -n1)"
-  [[ -n "$VOL_HOST" ]] || die "volume: no host runs an app named $app (apps: $(jq -r '[.[].apps | keys[]] | unique | join(", ")' "$TMP/targets.json"))"
-  if jq -e --arg h "$VOL_HOST" 'has($h)' "$TMP/targets.json" >/dev/null; then
-    kind="$(jq -r --arg h "$VOL_HOST" '.[$h].kind' "$TMP/targets.json")"
-    [[ "$kind" != platform ]] || die "volume: $VOL_HOST is a container platform; its volumes are copied with the provider's own tools, not over SSH"
-    VOL_ADDR="$(jq -r --arg h "$VOL_HOST" '.[$h].address // empty' "$TMP/targets.json")"
-    VOL_USER="$(jq -r --arg h "$VOL_HOST" '.[$h].user' "$TMP/targets.json")"
+  APP_HOST="$want" APP_KIND=vm APP_ADDR="" APP_USER="" APP_DIR="/opt/freelunch/apps/$app"
+  [[ -n "$APP_HOST" ]] || APP_HOST="$(jq -r --arg a "$app" 'to_entries[] | select(.value.apps | has($a)) | .key' "$TMP/targets.json" | head -n1)"
+  [[ -n "$APP_HOST" ]] || die "$area: no host runs an app named $app (apps: $(jq -r '[.[].apps | keys[]] | unique | join(", ")' "$TMP/targets.json"))"
+  if jq -e --arg h "$APP_HOST" 'has($h)' "$TMP/targets.json" >/dev/null; then
+    [[ "$(jq -r --arg h "$APP_HOST" '.[$h].kind' "$TMP/targets.json")" != platform ]] || { APP_KIND=platform; return 0; }
+    APP_ADDR="$(jq -r --arg h "$APP_HOST" '.[$h].address // empty' "$TMP/targets.json")"
+    APP_USER="$(jq -r --arg h "$APP_HOST" '.[$h].user' "$TMP/targets.json")"
   else
     # a host that has no app in the plan now (the app moved off it): the inventory knows it
-    IFS=$'\t' read -r VOL_ADDR VOL_USER < <(host_ssh_info "$VOL_HOST") || true
-    [[ -n "${VOL_ADDR:-}" ]] || die "volume: $VOL_HOST is not a host of this project (hosts: $(jq -r 'keys | join(", ")' "$TMP/targets.json"))"
+    IFS=$'\t' read -r APP_ADDR APP_USER < <(host_ssh_info "$APP_HOST") || true
+    [[ -n "${APP_ADDR:-}" ]] || die "$area: $APP_HOST is not a host of this project (hosts: $(jq -r 'keys | join(", ")' "$TMP/targets.json"))"
   fi
-  [[ -n "$VOL_ADDR" ]] || die "volume: $VOL_HOST has no address"
+  [[ -n "$APP_ADDR" ]] || die "$area: $APP_HOST has no address"
   ssh_options yes
-  ssh-keygen -F "$VOL_ADDR" -f "$(state_root)/known_hosts" >/dev/null 2>&1 || die "volume: the host key of $VOL_HOST isn't pinned yet: freelunch trust $VOL_HOST"
+  ssh-keygen -F "$APP_ADDR" -f "$(state_root)/known_hosts" >/dev/null 2>&1 || die "$area: the host key of $APP_HOST isn't pinned yet: freelunch trust $APP_HOST"
 }
 
-# vol_ssh <command>: run a command on the host, with $S for sudo when the user isn't root
-vol_ssh() {
-  "$SSH" "${SSH_OPTS[@]}" "$VOL_USER@$VOL_ADDR" "S=''; [ \"\$(id -u)\" -eq 0 ] || S='sudo -n'; $1"
+# vol_target <app> [host]: app_target for the volume commands, which only work over SSH
+vol_target() {
+  app_target volume "$@"
+  [[ "$APP_KIND" != platform ]] || die "volume: $APP_HOST is a container platform; its volumes are copied with the provider's own tools, not over SSH"
+}
+
+# host_ssh <command>: run a command on APP_HOST, with $S for sudo when the user isn't root
+host_ssh() {
+  "$SSH" "${SSH_OPTS[@]}" "$APP_USER@$APP_ADDR" "S=''; [ \"\$(id -u)\" -eq 0 ] || S='sudo -n'; $1"
 }
 
 # vol_list <app>: the names of the app's volumes on the host
 vol_list() {
-  vol_ssh "\$S docker volume ls -q --filter label=com.docker.compose.project=$1"
+  host_ssh "\$S docker volume ls -q --filter label=com.docker.compose.project=$1"
 }
 
 # vol_pull <app> <dir>: one <volume>.tar.gz in <dir> for each volume of the app
 vol_pull() {
   local app="$1" dir="$2" v mp n=0 vols
-  vols="$(vol_list "$app")" || die "volume: can't list the volumes of $app on $VOL_HOST"
-  [[ -n "$vols" ]] || { log "volume: $app has no Docker volumes on $VOL_HOST"; return 0; }
+  vols="$(vol_list "$app")" || die "volume: can't list the volumes of $app on $APP_HOST"
+  [[ -n "$vols" ]] || { log "volume: $app has no Docker volumes on $APP_HOST"; return 0; }
   mkdir -p "$dir"
   # VOL_STOP=1: a copy of a running app can be half-written, so a move stops the old one first
   if [[ "${VOL_STOP:-0}" == 1 ]]; then
-    log "volume: stopping $app on $VOL_HOST, so its volumes are copied whole"
-    vol_ssh "\$S docker compose --project-directory /opt/freelunch/apps/$app stop" >/dev/null || die "volume: can't stop $app on $VOL_HOST"
+    log "volume: stopping $app on $APP_HOST, so its volumes are copied whole"
+    host_ssh "\$S docker compose --project-directory $APP_DIR stop" >/dev/null || die "volume: can't stop $app on $APP_HOST"
   fi
   while IFS= read -r v; do
     [[ "$v" =~ ^[A-Za-z0-9_.-]+$ ]] || die "volume: unexpected volume name '$v'"
-    mp="$(vol_ssh "\$S docker volume inspect --format '{{.Mountpoint}}' $v")" || die "volume: can't find $v on $VOL_HOST"
-    vol_ssh "\$S tar czf - -C '$mp' ." > "$dir/$v.tar.gz" || { rm -f "$dir/$v.tar.gz"; die "volume: reading $v from $VOL_HOST failed"; }
-    tar tzf "$dir/$v.tar.gz" >/dev/null 2>&1 || { rm -f "$dir/$v.tar.gz"; die "volume: what came from $VOL_HOST for $v is not a tar archive"; }
+    mp="$(host_ssh "\$S docker volume inspect --format '{{.Mountpoint}}' $v")" || die "volume: can't find $v on $APP_HOST"
+    host_ssh "\$S tar czf - -C '$mp' ." > "$dir/$v.tar.gz" || { rm -f "$dir/$v.tar.gz"; die "volume: reading $v from $APP_HOST failed"; }
+    tar tzf "$dir/$v.tar.gz" >/dev/null 2>&1 || { rm -f "$dir/$v.tar.gz"; die "volume: what came from $APP_HOST for $v is not a tar archive"; }
     log "volume: $v: $(du -h "$dir/$v.tar.gz" | awk '{ print $1 }') in $(rel "$dir/$v.tar.gz")"
     n=$((n + 1))
   done <<< "$vols"
-  log "volume: $n volume(s) of $app pulled from $VOL_HOST into $(rel "$dir")"
+  log "volume: $n volume(s) of $app pulled from $APP_HOST into $(rel "$dir")"
 }
 
 # vol_push <app> <dir>: restore each <volume>.tar.gz in <dir> into the host's volume of that
@@ -3771,25 +3778,25 @@ vol_pull() {
 # app has been deployed).
 vol_push() {
   local app="$1" dir="$2" f v mp have n=0 compose
-  compose="--project-directory /opt/freelunch/apps/$app"
+  compose="--project-directory $APP_DIR"
   compgen -G "$dir/*.tar.gz" >/dev/null || die "volume: no .tar.gz files in $(rel "$dir")"
-  have="$(vol_list "$app")" || die "volume: can't list the volumes of $app on $VOL_HOST"
+  have="$(vol_list "$app")" || die "volume: can't list the volumes of $app on $APP_HOST"
   for f in "$dir"/*.tar.gz; do
     v="$(basename "$f" .tar.gz)"
-    grep -qxF "$v" <<< "$have" || die "volume: $VOL_HOST has no volume $v for $app (it has: ${have:-none}). Deploy the app there first (freelunch deploy)"
+    grep -qxF "$v" <<< "$have" || die "volume: $APP_HOST has no volume $v for $app (it has: ${have:-none}). Deploy the app there first (freelunch deploy)"
   done
-  log "volume: stopping $app on $VOL_HOST while its volumes are restored"
-  vol_ssh "\$S docker compose $compose stop" >/dev/null || die "volume: can't stop $app on $VOL_HOST"
+  log "volume: stopping $app on $APP_HOST while its volumes are restored"
+  host_ssh "\$S docker compose $compose stop" >/dev/null || die "volume: can't stop $app on $APP_HOST"
   for f in "$dir"/*.tar.gz; do
     v="$(basename "$f" .tar.gz)"
-    mp="$(vol_ssh "\$S docker volume inspect --format '{{.Mountpoint}}' $v")" || die "volume: can't find $v on $VOL_HOST (the app stays stopped: freelunch deploy starts it)"
-    vol_ssh "\$S sh -c \"find '$mp' -mindepth 1 -delete && tar xzf - -C '$mp'\"" < "$f" \
-      || die "volume: restoring $v on $VOL_HOST failed. The app stays stopped; the archive is still in $(rel "$dir"), so push it again"
+    mp="$(host_ssh "\$S docker volume inspect --format '{{.Mountpoint}}' $v")" || die "volume: can't find $v on $APP_HOST (the app stays stopped: freelunch deploy starts it)"
+    host_ssh "\$S sh -c \"find '$mp' -mindepth 1 -delete && tar xzf - -C '$mp'\"" < "$f" \
+      || die "volume: restoring $v on $APP_HOST failed. The app stays stopped; the archive is still in $(rel "$dir"), so push it again"
     log "volume: $v restored"
     n=$((n + 1))
   done
-  vol_ssh "\$S docker compose $compose start" >/dev/null || die "volume: restored $n volume(s), but $app wouldn't start on $VOL_HOST (freelunch deploy $VOL_HOST)"
-  log "volume: $n volume(s) of $app pushed to $VOL_HOST, and $app started"
+  host_ssh "\$S docker compose $compose start" >/dev/null || die "volume: restored $n volume(s), but $app wouldn't start on $APP_HOST (freelunch deploy $APP_HOST)"
+  log "volume: $n volume(s) of $app pushed to $APP_HOST, and $app started"
 }
 
 cmd_volume() {
