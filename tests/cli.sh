@@ -3083,6 +3083,10 @@ test_status_and_doctor_ask_northflank() {
   equals "$out" "api line two"
   if out="$(nf_in "$p" logs nothing 2>&1)"; then echo "logs should have failed"; return 1; fi
   contains "$out" "logs: no host runs an app named nothing"
+  if out="$(nf_in "$p" logs api --follow 2>&1)"; then echo "--follow should have failed on Northflank"; return 1; fi
+  contains "$out" "logs: --follow works on VM hosts; on Northflank use its dashboard"
+  if out="$(nf_in "$p" restart api 2>&1)"; then echo "restart should have failed on Northflank"; return 1; fi
+  contains "$out" "restart: api runs on northflank-main, a container platform (northflank); restart it with that provider's own tools"
   contains "$(FAKE_NF_STOPPED=cloudflared nf_in "$p" status)" "$(printf 'Tunnels\n  northflank-main not checked without CLOUDFLARE_API_TOKEN')"
   out="$(TEST_NF_TOKEN='' nf_in "$p" status)"
   contains "$out" "  not asked without NORTHFLANK_API_TOKEN"
@@ -5922,6 +5926,25 @@ test_logs_reads_a_vm_apps_logs() {
   grep -q 'apps/cloudflared logs --no-color --tail 50 --follow$' "$p/fake.log"
   out="$(UP_CMD=logs up_in "$p" nothing 2>&1)" && { echo "logs should have failed"; return 1; }
   contains "$out" "logs: no host runs an app named nothing"
+}
+
+test_restart_restarts_and_waits_for_healthy() {
+  local p="$WORK/vm-restart" out
+  up_project "$p" oci
+  FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1
+  : > "$p/fake.log"
+  out="$(UP_CMD=restart up_in "$p" api 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "restart: api is running on oci-main"
+  grep -q 'docker compose restart @ api' "$p/fake.log"
+  grep -q 'docker compose up -d --wait --wait-timeout 180 @ api' "$p/fake.log"
+  # an app that stays unhealthy fails loudly, with the log lines
+  : > "$p/fake.log"
+  out="$(FAKE_UNHEALTHY=api UP_CMD=restart up_in "$p" api 2>&1)" && { echo "restart should have failed"; return 1; }
+  contains "$out" "!! api is not healthy after 180s"
+  contains "$out" "restart: api did not come back healthy on oci-main"
+  grep -q 'docker compose logs --no-color --tail 50 @ api' "$p/fake.log"
+  out="$(UP_CMD=restart up_in "$p" nothing 2>&1)" && { echo "restart should have failed"; return 1; }
+  contains "$out" "restart: no host runs an app named nothing"
 }
 
 test_volume_says_what_is_wrong() {

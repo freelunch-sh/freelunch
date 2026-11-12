@@ -148,7 +148,7 @@ whether a VM's disk is filling.
   keys only. `cloudflared` is a valid app name. Northflank keeps its path; `--follow` there
   dies with "logs: --follow works on VM hosts; on Northflank use its dashboard". The last
   `die` of `cmd_logs` now says the app runs nowhere. Test: `test_logs_reads_a_vm_apps_logs`
-- [ ] `freelunch restart <app> [--host h]`: `docker compose restart`, then
+- [x] `freelunch restart <app> [--host h]`: `docker compose restart`, then
   `docker compose up -d --wait --wait-timeout $FREELUNCH_DEPLOY_TIMEOUT` so it fails loudly
   with the last 50 log lines when the app stays unhealthy (the same output `up` in
   `remote_script` gives). On a platform: `engine_call <provider> restart` when the engine

@@ -179,6 +179,8 @@ Infrastructure:
                           edge and why. Without a name: every path
   logs <app> [--lines n] [--follow] [--host h]
                           The last lines an app (or cloudflared) logged, on a VM host or Northflank
+  restart <app> [--host h] Restart an app on its VM host and wait until it is healthy; if it is not,
+                          the last 50 log lines say why
   doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in and
                           what the tenancy's limits leave, the Northflank token, SSH keys,
                           images and their registry logins, the Cloudflare token and zone. It
@@ -6067,6 +6069,34 @@ cmd_logs() {
   host_ssh "\$S docker compose --project-directory $APP_DIR logs --no-color $tail_args"
 }
 
+# cmd_restart <app> [--host h]: restart an app on its VM host and wait for it to be healthy, with the
+# last log lines when it isn't (the same check a deploy makes). A platform restarts apps its own way.
+cmd_restart() {
+  local app="" want="" timeout="${FREELUNCH_DEPLOY_TIMEOUT:-180}" provider script
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --host) [[ -n "${2:-}" ]] || die "restart: --host takes a host"; want="$2"; shift ;;
+      -*) die "restart: unknown option $1" ;;
+      *) [[ -z "$app" ]] || die "restart: unexpected argument $1"; app="$1" ;;
+    esac
+    shift
+  done
+  [[ -n "$app" ]] || die "usage: freelunch restart <app|cloudflared> [--host h]"
+  app_target restart "$app" "$want"
+  if [[ "$APP_KIND" == platform ]]; then
+    provider="$(jq -r --arg h "$APP_HOST" '.[$h].provider // empty' "$TMP/targets.json")"
+    if [[ -n "$provider" ]] && engine_defined "$provider" restart; then
+      engine_call "$provider" restart "$app"
+      return 0
+    fi
+    die "restart: $app runs on $APP_HOST, a container platform${provider:+ ($provider)}; restart it with that provider's own tools"
+  fi
+  script="cd $APP_DIR && docker compose restart && docker compose up -d --wait --wait-timeout $timeout || { echo \"!! $app is not healthy after ${timeout}s\" >&2; docker compose ps -a >&2; docker compose logs --no-color --tail 50 >&2; exit 1; }"
+  log "restart: restarting $app on $APP_HOST"
+  host_ssh "\$S sh -c $(shq "$script")" || die "restart: $app did not come back healthy on $APP_HOST (its last log lines are above)"
+  log "restart: $app is running on $APP_HOST"
+}
+
 # northflank_status <target>: each service in the target's project, and whether it runs
 northflank_status() {
   local host="$1" project expected code s status running seen=""
@@ -10758,6 +10788,7 @@ main() {
     plan|apply|destroy)   cmd_lifecycle "$cmd" "$@" ;;
     status)               cmd_status ;;
     logs)                 cmd_logs "$@" ;;
+    restart)              cmd_restart "$@" ;;
     doctor)               cmd_doctor ;;
     journey)              resolve_state_refs; sync_start status; cmd_journey "$@" ;;
     check)                if [[ $# -gt 0 ]]; then resolve_state_refs; sync_start status; cmd_probe "$@"; else cmd_check; fi ;;
