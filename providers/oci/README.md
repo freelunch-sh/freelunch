@@ -323,6 +323,16 @@ Always Free costs $0, so any bill is a mistake. freelunch puts several nets unde
 - **Home region check.** The precondition compares `region` with the tenancy's home region,
   so the API key needs permission to list region subscriptions.
 
+## Live runs
+
+- **2026-11-09, commit `3ad40cf`:** a real Always Free tenancy. A wait for capacity run from a
+  laptop, reviewed plans, an in-place resize, `deploy`, `doctor`, `status` and the state store.
+- Fixed after that run, not run live again: `trust` for a restarted VM (it says when the
+  console holds no host keys), the order `up` cuts over in (new tunnel and app first, routes
+  after cloudflared connects), and moving an app's data between hosts (`up --move`, `volume`,
+  `rollback`).
+- Not run live: anything not listed above, a wait run by CI in particular.
+
 ## Tests
 
 Offline, against a mocked OCI API:

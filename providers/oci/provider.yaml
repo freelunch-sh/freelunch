@@ -4,6 +4,7 @@ name: oci
 display_name: "Oracle Cloud (OCI)"
 category: hyperscalers
 status: ready
+verified: live
 layer: host
 arch: arm64
 terraform_provider: "oracle/oci"

@@ -4,6 +4,7 @@ name: northflank
 display_name: "Northflank"
 category: containers
 status: ready
+verified: live
 layer: platform
 arch: amd64
 recommended: true

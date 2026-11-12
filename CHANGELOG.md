@@ -12,6 +12,8 @@ release can change commands and the project layout.
 
 ### Added
 
+- **Live runs recorded.** Oracle, Northflank and Cloudflare are marked `verified: live` after the
+  field run of 2026-11-09, and their READMEs say what ran and what did not.
 - **OCI cost safety nets.** A `budget` module (`budget_alert_emails`) makes a $1 monthly budget
   with email alerts with the stack; `doctor` reports whether the tenancy can be charged at all,
   checks the whole tenancy's volumes, reserved IPs and load balancers against Always Free; `plan oci` prints its cost; `status` and the end of

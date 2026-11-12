@@ -3,6 +3,7 @@ name: cloudflare
 display_name: "Cloudflare"
 category: edge
 status: ready
+verified: live
 layer: glue
 terraform_provider: "cloudflare/cloudflare"
 iac: partner

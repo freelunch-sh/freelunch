@@ -306,7 +306,12 @@ doesn't break your project.
     Codeberg as the image's registry.
 - **Not built, on purpose or for lack of a way to check it:** HCP Terraform, Spacelift and Scalr (they run
   plans themselves), ZeroTier, ngrok, the GPU providers, and the providers whose API or tool is not
-  checked yet; the plan says why for each. **Every live-account run is still to do.**
+  checked yet; the plan says why for each.
+- **Run live so far** (2026-11-09, on real accounts): Oracle (a wait for capacity, reviewed plans, an
+  in-place resize, `deploy`, `doctor`, `status`, the state store), Northflank (`deploy`) and Cloudflare
+  (tunnel, DNS, Access). **Not run live yet:** a deploy from CI, the installed pin, a free domain, the
+  fixes made after that run (`trust` on a restarted VM, `up --move`, `rollback`) and every other
+  provider.
 - **Next, in order:**
   1. **Menus:** ready-made stacks in one command, starting with the v0.1 setup.
   2. **$0 guardrails:** a budget alert on every provider and a cost summary after each plan.
@@ -346,7 +351,7 @@ Large public clouds. Only OCI and GCP give always-free VMs; Azure gives new acco
 - [ ] **[Huawei Cloud](providers/huawei-cloud/)** 🟡 `huaweicloud/huaweicloud` · ⏳ Free trial packages for new accounts; free DNS hosting; startup program
 - [ ] **[IBM Cloud](providers/ibm-cloud/)** 🟢 `IBM-Cloud/ibm` · ♾️ Lite plans: Cloudant 1 GB, Db2 100 MB, API Connect 50k calls/month, Log Analysis 500 MB/day
 - [x] **[Microsoft Azure](providers/azure/)** 🟢 `hashicorp/azurerm` · ⏳ $200 credit for 30 days; 12 months: 750 h each of B1s, B2pts v2 (Arm) and B2ats v2 (AMD) VMs, 2 × 64 GB P6 SSD disks; always free: App Service F1 (10 apps), Functions 1M requests, Container Apps 180k vCPU-s + 2M requests, Cosmos DB 25 GB · ⚙️ `tofu`
-- [x] **[Oracle Cloud (OCI)](providers/oci/)** 🟢 `oracle/oci` · ♾️ 2 Arm A1 OCPUs + 12 GB RAM, 2 AMD micro VMs, 200 GB block storage, 10 TB egress/month, 2 VCNs, 1 flexible load balancer, 20 GB object storage; home region only · ⚙️ `tofu`
+- [x] **[Oracle Cloud (OCI)](providers/oci/)** 🟢 `oracle/oci` · ♾️ 2 Arm A1 OCPUs + 12 GB RAM, 2 AMD micro VMs, 200 GB block storage, 10 TB egress/month, 2 VCNs, 1 flexible load balancer, 20 GB object storage; home region only · ⚙️ `tofu` · verified: live
 - [ ] **[Tencent Cloud](providers/tencent-cloud/)** 🟢 `tencentcloudstack/tencentcloud` · ⏳ Free trial packages for new accounts; startup program
 
 ### VPS & cloud credits (0/10)
@@ -389,7 +394,7 @@ Run a container without managing a VM. Free tiers usually sleep when idle.
 - [ ] **[Clever Cloud](providers/clever-cloud/)** 🟡 `CleverCloud/clevercloud` · ⏳ EUR 20 credit at sign-up; DEV plan with free MySQL and PostgreSQL
 - [x] **[Google Cloud Run](providers/cloud-run/)** 🟢 `hashicorp/google` · ♾️ With request-based billing, per billing account and month: 2M requests, 180,000 vCPU-seconds and 360,000 GB-seconds; scales to zero between requests · ⚙️ `tofu`
 - [ ] **[Leapcell](providers/leapcell/)** ⚪ · ♾️ Hobby plan: 20 projects, 100k serverless invocations/month, 3 GB-hours compute, 2 GB transfer
-- [x] **[Northflank](providers/northflank/)** ⚪ · ♾️ Sandbox: 2 services, 2 jobs and 1 database, always on with no sleeping, plans up to nf-compute-20 (0.2 vCPU, 512 MB) and up to $20/month of resources; no card · 🟢 always on · ⚙️ `guided` · **recommended**
+- [x] **[Northflank](providers/northflank/)** ⚪ · ♾️ Sandbox: 2 services, 2 jobs and 1 database, always on with no sleeping, plans up to nf-compute-20 (0.2 vCPU, 512 MB) and up to $20/month of resources; no card · 🟢 always on · ⚙️ `guided` · verified: live · **recommended**
 - [x] **[Oracle Kubernetes Engine (OKE)](providers/oke/)** 🟢 `oracle/oci` · ♾️ Basic cluster with no control-plane fee; worker nodes on the Always Free Arm cores (2 OCPUs and 12 GB since June 2026 on new accounts, 4 and 24 on older ones), shared with the oci stack's VMs; 200 GB block storage, 1 flexible load balancer · ⚙️ `tofu`
 - [ ] **[Railway](providers/railway/)** 🟡 `terraform-community-providers/railway` · 🔁 $5 trial credit for 30 days, then the Free plan: $1 of usage credit a month, up to 1 vCPU and 0.5 GB RAM per service, 0.5 GB volume
 - [x] **[Render](providers/render/)** 🟢 `render-oss/render` · ♾️ Free web services: 750 instance-hours/month, 512 MB / 0.1 CPU, spin down after 15 min idle; free Postgres expires after 30 days; 5 GB/month bandwidth · 💤 sleeps when idle · ⚙️ `tofu`
@@ -401,7 +406,7 @@ Run a container without managing a VM. Free tiers usually sleep when idle.
 Static sites, edge functions and CDN in front of the hosts.
 
 - [ ] **[bunny.net](providers/bunny-net/)** 🟡 `BunnyWay/bunnynet` · ⏳ 14-day trial with $20 credit (no card), plus $30 when billing details are added; then pay-as-you-go CDN from $0.01/GB in Europe and North America
-- [x] **[Cloudflare](providers/cloudflare/)** 🟢 `cloudflare/cloudflare` · ♾️ DNS for unlimited domains, CDN/SSL/WAF basics, Tunnel, Zero Trust (50 users), Workers 100k requests/day, Pages (unlimited sites and bandwidth), R2 10 GB with no egress fees, D1 5 GB, KV, Queues · ⚙️ `tofu`
+- [x] **[Cloudflare](providers/cloudflare/)** 🟢 `cloudflare/cloudflare` · ♾️ DNS for unlimited domains, CDN/SSL/WAF basics, Tunnel, Zero Trust (50 users), Workers 100k requests/day, Pages (unlimited sites and bandwidth), R2 10 GB with no egress fees, D1 5 GB, KV, Queues · ⚙️ `tofu` · verified: live
 - [x] **[Deno Deploy](providers/deno-deploy/)** 🟠 `denoland/deno` · ♾️ 1M requests/month, 20 GiB egress/month, 1 GiB KV (about 10 CPU-hours/month); personal use · 🚧 hard cap, no billing · ⚙️ `api` · jobs: provision, cd · verified: fake-api
 - [ ] **[Fastly](providers/fastly/)** 🟢 `fastly/fastly` · ♾️ Monthly: CDN 100 GB per region + 1M requests, Compute 10M requests + 100M vCPU-ms, 5 GB object storage, 1 GB KV store, 5 TLS domains
 - [ ] **[Netlify](providers/netlify/)** 🟢 `netlify/netlify` · ♾️ 300 credits/month (hard limit; credit-based since Sep 2025)

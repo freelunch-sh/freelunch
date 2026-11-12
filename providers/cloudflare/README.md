@@ -266,8 +266,16 @@ Run `cloudflared` on that host with `module.tunnel.tunnel_tokens["my-vm"]` as `T
   (`ssh <host> 'cd /opt/freelunch/apps/cloudflared && sudo docker compose down'`) or destroy
   the host stack, then run `destroy cloudflare` again.
 - **One route per hostname.** Path-based routing is not supported yet.
-- **Not live-tested yet.** The stack is covered by offline tests against a mocked API. The
-  first live run is part of the v0.1 release checklist.
+- **Partly live-tested.** See [Live runs](#live-runs) for what has run and what has not.
+
+## Live runs
+
+- **2026-11-09, commit `3ad40cf`:** a real account and zone. A tunnel per host, DNS records
+  for the routes and Cloudflare Access in front of an app, started by `freelunch deploy`.
+- Not run live: anything not listed above, R2 buckets and service tokens in particular.
+
+Fixed after that run, not run live again: the order `up` cuts over in when an app changes
+hosts (new tunnel and app first, routes after cloudflared connects).
 
 ## Tests
 

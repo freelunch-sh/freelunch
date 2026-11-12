@@ -202,8 +202,13 @@ services made in the dashboard aren't in it.
 - **Regions.** A project can't move, so a new `region` means `destroy` and `apply`.
   `curl https://api.northflank.com/v1/regions` lists them; reports of free projects show
   Europe - West, the default here.
-- **Not live-tested yet.** The API calls follow Northflank's API reference and its JS
-  client, and pass the offline tests. Please open an issue with what you find.
+- **Volumes are not live-tested.** See [Live runs](#live-runs) for what has run.
+
+## Live runs
+
+- **2026-11-09, commit `3ad40cf`:** a real Sandbox account. `deploy` of a project's container
+  and a redeploy during a rollback, both against Northflank's API.
+- Not run live: anything not listed above, volumes in particular.
 
 ## Tests
 
