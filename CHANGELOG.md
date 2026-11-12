@@ -12,6 +12,8 @@ release can change commands and the project layout.
 
 ### Added
 
+- **`freelunch logs` on a VM host.** `logs <app> [--lines n] [--follow] [--host h]` reads the app's
+  Compose logs over SSH with the pinned key; `cloudflared` is an app name too.
 - **Live runs recorded.** Oracle, Northflank and Cloudflare are marked `verified: live` after the
   field run of 2026-11-09, and their READMEs say what ran and what did not.
 - **OCI cost safety nets.** A `budget` module (`budget_alert_emails`) makes a $1 monthly budget

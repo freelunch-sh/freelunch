@@ -49,6 +49,8 @@ cat > "$WORK/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 echo "docker $* @ $(basename "$PWD")" >> "$FAKE_LOG"
 for a; do last="$a"; done
+# docker compose --project-directory <dir> logs ...: a line named after the app's folder
+if [[ "$1 ${2:-}" == "compose --project-directory" && " $* " == *" logs "* ]]; then echo "log line from $(basename "$3")"; exit 0; fi
 case "$1 ${2:-}" in
   "login "*)   echo "stdin: $(cat)" >> "$FAKE_LOG" ;;
   "compose up") [[ "$(basename "$PWD")" != "${FAKE_UNHEALTHY:-}" ]] || exit 1 ;;
@@ -3080,7 +3082,7 @@ test_status_and_doctor_ask_northflank() {
   out="$(nf_in "$p" logs api --lines 1)"
   equals "$out" "api line two"
   if out="$(nf_in "$p" logs nothing 2>&1)"; then echo "logs should have failed"; return 1; fi
-  contains "$out" "nothing doesn't run on a Northflank project"
+  contains "$out" "logs: no host runs an app named nothing"
   contains "$(FAKE_NF_STOPPED=cloudflared nf_in "$p" status)" "$(printf 'Tunnels\n  northflank-main not checked without CLOUDFLARE_API_TOKEN')"
   out="$(TEST_NF_TOKEN='' nf_in "$p" status)"
   contains "$out" "  not asked without NORTHFLANK_API_TOKEN"
@@ -5904,6 +5906,22 @@ test_volume_pull_and_push_copy_an_apps_volumes() {
   # the default folder is under backups/<app>/
   out="$(UP_CMD=volume up_in "$p" pull api 2>&1)"
   contains "$out" "backups/api/"
+}
+
+test_logs_reads_a_vm_apps_logs() {
+  local p="$WORK/vm-logs" out
+  up_project "$p" oci
+  FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1
+  : > "$p/fake.log"
+  out="$(UP_CMD=logs up_in "$p" api --lines 7 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "log line from api"
+  grep -q 'docker compose --project-directory .*/apps/api logs --no-color --tail 7$' "$p/fake.log"
+  # cloudflared is an app name too; --follow is passed on; --host picks the host
+  out="$(UP_CMD=logs up_in "$p" cloudflared --follow --host oci-main 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "log line from cloudflared"
+  grep -q 'apps/cloudflared logs --no-color --tail 50 --follow$' "$p/fake.log"
+  out="$(UP_CMD=logs up_in "$p" nothing 2>&1)" && { echo "logs should have failed"; return 1; }
+  contains "$out" "logs: no host runs an app named nothing"
 }
 
 test_volume_says_what_is_wrong() {

@@ -177,7 +177,8 @@ Infrastructure:
   journey [name] [--json] Follow each path from a hostname through the apps it needs to the
                           database, hop by hop; stops at the first that fails and says which
                           edge and why. Without a name: every path
-  logs <app> [--lines n]  The last lines an app (or cloudflared) logged on Northflank
+  logs <app> [--lines n] [--follow] [--host h]
+                          The last lines an app (or cloudflared) logged, on a VM host or Northflank
   doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in and
                           what the tenancy's limits leave, the Northflank token, SSH keys,
                           images and their registry logins, the Cloudflare token and zone. It
@@ -3719,7 +3720,7 @@ app_target() {
   cmd_hybrid >/dev/null
   deploy_plan "$apps_file" "$tunnel_state" >/dev/null
   APP_HOST="$want" APP_KIND=vm APP_ADDR="" APP_USER="" APP_DIR="/opt/freelunch/apps/$app"
-  [[ -n "$APP_HOST" ]] || APP_HOST="$(jq -r --arg a "$app" 'to_entries[] | select(.value.apps | has($a)) | .key' "$TMP/targets.json" | head -n1)"
+  [[ -n "$APP_HOST" ]] || APP_HOST="$(jq -r --arg a "$app" 'to_entries[] | select((.value.apps | has($a)) or (.value.tunnel and $a == "cloudflared")) | .key' "$TMP/targets.json" | head -n1)"
   [[ -n "$APP_HOST" ]] || die "$area: no host runs an app named $app (apps: $(jq -r '[.[].apps | keys[]] | unique | join(", ")' "$TMP/targets.json"))"
   if jq -e --arg h "$APP_HOST" 'has($h)' "$TMP/targets.json" >/dev/null; then
     [[ "$(jq -r --arg h "$APP_HOST" '.[$h].kind' "$TMP/targets.json")" != platform ]] || { APP_KIND=platform; return 0; }
@@ -6033,28 +6034,37 @@ northflank_logs() {
 # cmd_logs <app> [--lines n]: the last lines an app (or cloudflared) logged on its Northflank
 # project. Containers of other platforms are reached with their own tools.
 cmd_logs() {
-  local app="" lines=50 host project apps_file tunnel_state=""
+  local app="" lines=50 follow=0 want="" host project apps_file tunnel_state="" tail_args
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --lines) [[ -n "${2:-}" ]] || die "logs: --lines takes a number"; lines="$2"; shift ;;
+      --follow|-f) follow=1 ;;
+      --host) [[ -n "${2:-}" ]] || die "logs: --host takes a host"; want="$2"; shift ;;
       -*) die "logs: unknown option $1" ;;
       *) app="$1" ;;
     esac
     shift
   done
-  [[ -n "$app" ]] || die "usage: freelunch logs <app|cloudflared> [--lines n]"
+  [[ -n "$app" ]] || die "usage: freelunch logs <app|cloudflared> [--lines n] [--follow] [--host h]"
   [[ "$lines" =~ ^[0-9]+$ ]] || die "logs: --lines takes a number"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   apps_file="$(state_root)/apps.tfvars"
   if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   cmd_hybrid >/dev/null && deploy_plan "$apps_file" "$tunnel_state" >/dev/null 2>&1 \
     || die "logs: apps.tfvars doesn't resolve against the inventory yet (freelunch deploy --dry-run says why)"
-  for host in $(jq -r --arg a "$app" 'to_entries[] | select(.value.kind == "platform" and .value.provider == "northflank") | select((.value.apps | has($a)) or (.value.tunnel and $a == "cloudflared")) | .key' "$TMP/targets.json"); do
-    project="$(jq -r --arg h "$host" '.[$h].id' "$TMP/platforms.json")"
-    northflank_logs "$project" "$app" "$lines"
-    return 0
-  done
-  die "logs: $app doesn't run on a Northflank project (freelunch status shows where apps run)"
+  if [[ -z "$want" ]]; then
+    for host in $(jq -r --arg a "$app" 'to_entries[] | select(.value.kind == "platform" and .value.provider == "northflank") | select((.value.apps | has($a)) or (.value.tunnel and $a == "cloudflared")) | .key' "$TMP/targets.json"); do
+      [[ $follow -eq 0 ]] || die "logs: --follow works on VM hosts; on Northflank use its dashboard"
+      project="$(jq -r --arg h "$host" '.[$h].id' "$TMP/platforms.json")"
+      northflank_logs "$project" "$app" "$lines"
+      return 0
+    done
+  fi
+  app_target logs "$app" "$want"
+  [[ "$APP_KIND" != platform ]] || die "logs: $app runs on $APP_HOST, a container platform; read its logs with that provider's own tools"
+  tail_args="--tail $lines"
+  [[ $follow -eq 0 ]] || tail_args="$tail_args --follow"
+  host_ssh "\$S docker compose --project-directory $APP_DIR logs --no-color $tail_args"
 }
 
 # northflank_status <target>: each service in the target's project, and whether it runs

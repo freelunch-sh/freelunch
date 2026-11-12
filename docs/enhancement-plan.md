@@ -143,7 +143,7 @@ whether a VM's disk is filling.
   `volume`, `logs`, ...), setting `APP_HOST`, `APP_ADDR`, `APP_USER`, `APP_KIND` and
   `APP_DIR` (the app's folder on the host; `/opt/freelunch/apps/<app>` for now, section 6
   changes it in this one place). `volume` keeps its messages and tests unchanged
-- [ ] `freelunch logs <app> [--lines n] [--follow] [--host h]` on a VM host:
+- [x] `freelunch logs <app> [--lines n] [--follow] [--host h]` on a VM host:
   `docker compose --project-directory "$APP_DIR" logs --no-color --tail <n>` over SSH, pinned
   keys only. `cloudflared` is a valid app name. Northflank keeps its path; `--follow` there
   dies with "logs: --follow works on VM hosts; on Northflank use its dashboard". The last
