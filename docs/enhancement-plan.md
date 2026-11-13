@@ -651,3 +651,57 @@ section (date, commit, what ran, what failed) and only then set or keep `verifie
 - [ ] ⛔ A free domain through `domain add` and `domain status`, serving the app
 - [ ] ⛔ Sections 2 to 9: each section's own ⛔ box
 - [ ] ⛔ Release `v0.1.0` once the four boxes above are ticked
+
+## 13. Known gaps to come back to
+
+Found while building sections 1 to 6. None blocks the boxes above; each is a decision or a missing test.
+Tick one when it is fixed, and say how.
+
+**Missing tests**
+
+- [ ] `up --move` takes a backup of an app with a `backup` before it stops the old app (`up_copy_data`), and says
+  which projects stay on the old host. Neither is tested: the suite has no VM-to-VM move (only platform to VM).
+  Needs a fixture with two VM hosts.
+- [ ] `restore` onto a different host than the one that made the backup, as one journey (the plan calls it the normal
+  case). The tests restore on the same fake host.
+- [ ] The wait's lost-answer lookup is tested with a fake `oci`; the real CLI prints nothing for an empty instance list,
+  which the fake copies, but it has never run against Oracle.
+- [ ] `doctor` (not `check`) printing the backup passphrase line and the job overlap warnings: only `check` is tested.
+
+**Behaviour to decide**
+
+- [ ] `destroy` of an owner's host stops when the host's key is pinned but the host doesn't answer (a dead VM, say) and
+  needs `--evict-tenants`. The plan says "when it can't be asked, say so and stop"; for a VM Oracle removed this makes the
+  common case harder. Loosen it, e.g. a dead host that also fails a ping/port check goes ahead after a warning.
+- [ ] The room check runs only on hosts marked `shared = true`. The owner's own deploy is not checked against the memory
+  its tenants reserved. Add the same check when the owner's host has tenants (needs the SSH call on every owner deploy).
+- [ ] Backups are filed under `freelunch/<project>/<app>`, and `<project>` is the project folder's name unless
+  `project = "..."` is set. In CI the checkout folder can differ, which would start a new repository. Make `ci init`
+  write `project` into `apps.tfvars`, or fail a CI backup when it is unset.
+- [ ] A job's `timeout_minutes` is `TimeoutStartSec`, which also counts the time a heavy job waits for the host's lock.
+  A job queued behind a long one can time out before it starts. Put the limit around the command, not the unit.
+- [ ] `status` prints a project's backup lines before its app lines; the plan says "per app".
+- [ ] The tenant registry records an owner app's memory limit only when its Compose file has one, otherwise `?`, so
+  tenants cannot count it. Warn the owner at deploy when a host has tenants and an app has no limit.
+
+**Not verified against the real thing**
+
+- [ ] Every unit file, the `flock` wrapper and `systemctl show` parsing were written from systemd's documentation and
+  tested against fakes. First live run: a job and a backup on the Oracle VM (the plan's section 12).
+- [ ] `restic` arguments (`cat config`, `init`, `backup`, `forget --prune --host`, `restore latest --target /`) and the
+  JSON of `restic snapshots` (`summary.total_bytes_processed` needs restic 0.17 or newer; the pinned image is 0.19.1)
+  were written from restic's documentation.
+- [ ] The restic image's size on arm64 (16.8 MB compressed from the registry's manifest) is the registry's number, not
+  a pull on the VM.
+- [ ] Litestream (SQLite streaming) was researched but not built; its current version could not be confirmed from its own
+  pages. See the answer under section 5.
+
+**Housekeeping**
+
+- [ ] `private/ROADMAP.md`: the v0.1 Phase 2 line "Private GHCR image with env secrets, then updated with `deploy`" and
+  the `state init oci` plus CI deploy line were left unticked because the plan's field-run list does not say whether they
+  ran. Tick them (or not) from your own memory of the run.
+- [ ] `private/browser-only-checklist.md` 5.1: `ci init --set-secrets` writes the secret to a temporary file before
+  `gh secret set` reads it. Either pipe it on stdin, or leave the box open and say why.
+- [ ] The CLI test that counts shellcheck findings is a convention (23 findings at the start), not a check. Add a
+  baseline file and a test, or fix the 23.
