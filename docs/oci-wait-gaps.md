@@ -25,7 +25,7 @@ operation timed out`.
 
 ### 2. A single request has no timeout
 
-**Status: open, section 3.** There is no per-attempt limit.
+**Status: fixed.** `FREELUNCH_ATTEMPT_TIMEOUT` (default 900 seconds) stops an attempt that hangs, SIGINT first and SIGKILL 30 seconds later, and the wait then looks for the VM it may have made. It does not retry after a wake on its own: the stopped attempt is simply the next one.
 
 That attempt sat in "Still creating" for 2 hours 1 minute. Neither the provider call nor the
 wait loop caps a single attempt. The elapsed time jumped (5m, 24m, 57m, 1h5m, ...), which

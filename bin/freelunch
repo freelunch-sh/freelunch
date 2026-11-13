@@ -216,7 +216,9 @@ FREELUNCH_DEPLOY_RESTART_STUCK=1 restarts a Northflank service whose container m
 halfway through that wait.
 deploy asks the registries which platforms each image has first; FREELUNCH_CHECK_IMAGES=0
 skips that.
-FREELUNCH_CAPACITY_INTERVAL (seconds, default 120) spaces out capacity retries, and
+FREELUNCH_ATTEMPT_TIMEOUT (seconds, default 900, 0 for none) stops one attempt that hangs and
+looks for the VM it may have made. FREELUNCH_CAPACITY_INTERVAL (seconds, default 120) spaces
+out capacity retries, and
 FREELUNCH_CAPACITY_TIMEOUT (seconds) stops them after that long. When a wait ends, a desktop
 notification says so, and FREELUNCH_NOTIFY (an ntfy, Discord or Slack URL) gets a message too;
 FREELUNCH_NOTIFY=off turns both off. FREELUNCH_WAIT_ATTEMPT=<n> goes on with a wait an earlier
@@ -1227,6 +1229,36 @@ transient_why() {
   echo "OCI couldn't be reached${failure:+ ($failure)}"
 }
 
+# attempt_limit <command...>: run the command, and when it takes longer than ATTEMPT_LIMIT seconds
+# (FREELUNCH_ATTEMPT_TIMEOUT; 0 for no limit) stop it with SIGINT, so tofu/terraform save the state,
+# and 30 seconds later (FREELUNCH_ATTEMPT_KILL_AFTER) with SIGKILL. macOS has no timeout(1). A stopped
+# command leaves the file ATTEMPT_CUT behind.
+attempt_limit() {
+  local pid wd rc=0
+  if [[ "${ATTEMPT_LIMIT:-0}" -eq 0 ]]; then "$@"; return; fi
+  "$@" & pid=$!
+  (
+    sp=""
+    # TERM from below ends the watchdog quietly, with its sleep, before it can stop anything
+    trap '[[ -z "$sp" ]] || { kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null; }; exit 0' TERM
+    command -p sleep "$ATTEMPT_LIMIT" & sp=$!; wait "$sp"
+    : > "$ATTEMPT_CUT"
+    pkill -INT -P "$pid" 2>/dev/null || true
+    command -p sleep "${FREELUNCH_ATTEMPT_KILL_AFTER:-30}" & sp=$!; wait "$sp"
+    pkill -KILL -P "$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+  ) & wd=$!
+  wait "$pid" || rc=$?
+  kill "$wd" 2>/dev/null || true
+  wait "$wd" 2>/dev/null || true
+  return "$rc"
+}
+
+# attempt_limit_text: the limit on an attempt in words ("15 minutes")
+attempt_limit_text() {
+  if [[ $((ATTEMPT_LIMIT % 60)) -eq 0 ]]; then echo "$((ATTEMPT_LIMIT / 60)) minutes"; else echo "$ATTEMPT_LIMIT seconds"; fi
+}
+
 # lost_launch_error <output>: whether every error in a failed apply is a network failure of the
 # POST that makes an instance, so the VM may exist although OCI's answer never came
 lost_launch_error() {
@@ -1406,7 +1438,7 @@ nap_sleep() {
 apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or approval, or ""> [extra args]
   local p="$1" reviewed="$2"; shift 2
   local dir out plan json profile="" interval delay pause cap deadline="" summary why a pid unreviewed rotates=0
-  local first=1 exact=0 resumes=0 phase nothing=0 before slept what="the reviewed plan" again reason swept="" sweeping=0 lost
+  local cut first=1 exact=0 resumes=0 phase nothing=0 before slept what="the reviewed plan" again reason swept="" sweeping=0 lost
   local args=() state=() approve=() offset=() lookup_json=""
   dir="$(stack_dir "$p")"
   interval="${FREELUNCH_CAPACITY_INTERVAL:-120}"
@@ -1416,6 +1448,8 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
     deadline=$((SECONDS + FREELUNCH_CAPACITY_TIMEOUT))
   fi
   cap=$((interval > MAX_CAPACITY_DELAY ? interval : MAX_CAPACITY_DELAY))
+  ATTEMPT_LIMIT="${FREELUNCH_ATTEMPT_TIMEOUT:-900}"
+  [[ "$ATTEMPT_LIMIT" =~ ^[0-9]+$ ]] || die "FREELUNCH_ATTEMPT_TIMEOUT is a number of seconds (0 turns the limit off), not '$ATTEMPT_LIMIT'"
   command -v jq >/dev/null || die "jq is required for --wait-for-capacity"
   if [[ "$p" == "oci" ]] && is_configured oci; then profile="$(oci_session_profile "$(config_dir oci)/terraform.tfvars")"; fi
   if [[ -n "$profile" ]] && ! command -v oci >/dev/null; then
@@ -1456,6 +1490,7 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
   if grep -qs 'variable "availability_domain_offset"' "$dir"/*.tf; then rotates=1; fi
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   out="$TMP/$p.out"
+  ATTEMPT_CUT="$TMP/$p.cut"
   plan="$TMP/$p.tfplan"
   json="$TMP/$p.json"
   again="review a new plan (freelunch plan $p --out <file>)"
@@ -1486,11 +1521,12 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
       check_oci_session "$profile" "$why"
     fi
     WAIT_TRIES=$WAIT_ATTEMPT
+    rm -f "$ATTEMPT_CUT"
     wait_state waiting "attempt $WAIT_ATTEMPT is running"
     if [[ $first -eq 1 && $exact -eq 1 ]]; then
       # A saved plan already holds the variables; only the state has to be pointed at.
       phase=apply lookup_json="$TMP/reviewed.json"
-      if tf_for "$p" "$dir" apply -input=false ${state[@]+"${state[@]}"} "$reviewed" 2>&1 | keep "$out"; then break; fi
+      if attempt_limit tf_for "$p" "$dir" apply -input=false ${state[@]+"${state[@]}"} "$reviewed" 2>&1 | keep "$out"; then break; fi
       # An earlier attempt that made part of the plan changed the state, so the plan can't be
       # applied as it is any more. Planning again goes on with the rest of it.
       if grep -q 'Saved plan is stale' "$out"; then
@@ -1500,11 +1536,11 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
       fi
     elif [[ $first -eq 1 && -z "$reviewed" ]]; then
       phase=first lookup_json=""
-      if tf_for "$p" "$dir" apply -input=false ${args[@]+"${args[@]}"} ${approve[@]+"${approve[@]}"} "$@" 2>&1 | keep "$out"; then break; fi
+      if attempt_limit tf_for "$p" "$dir" apply -input=false ${args[@]+"${args[@]}"} ${approve[@]+"${approve[@]}"} "$@" 2>&1 | keep "$out"; then break; fi
     # Any other attempt shows only the summary of its plan, unless the plan fails or is refused.
     else
       phase=plan lookup_json=""
-      if tf_for "$p" "$dir" plan -input=false -no-color -out="$plan" ${args[@]+"${args[@]}"} ${offset[@]+"${offset[@]}"} "$@" > "$out" 2>&1; then
+      if attempt_limit tf_for "$p" "$dir" plan -input=false -no-color -out="$plan" ${args[@]+"${args[@]}"} ${offset[@]+"${offset[@]}"} "$@" > "$out" 2>&1; then
         tf_for "$p" "$dir" show -json "$plan" > "$json"
         lookup_json="$json"
         summary="$(grep -m1 -E '^(Plan:|No changes)' "$out" || true)"
@@ -1534,7 +1570,7 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
         if jq -e "$CHANGES | length == 0" "$json" >/dev/null; then nothing=1; fi
         [[ -z "$summary" ]] || log "$p: attempt $WAIT_ATTEMPT${WAIT_AD:+ in $WAIT_AD}${WAIT_SIZE:+ ($WAIT_SIZE)}: $summary"
         phase=apply
-        if tf_for "$p" "$dir" apply -input=false ${state[@]+"${state[@]}"} "$plan" 2>&1 | keep "$out"; then break; fi
+        if attempt_limit tf_for "$p" "$dir" apply -input=false ${state[@]+"${state[@]}"} "$plan" 2>&1 | keep "$out"; then break; fi
       else
         cat "$out" >&2
       fi
@@ -1545,9 +1581,17 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
     reason="$(retry_reason "$out" "$phase")"
     # A lost answer to the request that makes the VM: the VM may exist, so look for it first.
     LOST_NOTE=""
-    if [[ -z "$reason" && "$phase" != plan ]] && lost_launch_error "$out"; then
+    cut=0
+    [[ ! -e "$ATTEMPT_CUT" ]] || cut=1
+    if [[ -z "$reason" && $cut -eq 1 && "$phase" == plan ]]; then
+      reason=lost LOST_WHY="attempt $WAIT_ATTEMPT took longer than $(attempt_limit_text) (the machine may have slept): stopped it; a plan makes nothing"
+    elif [[ -z "$reason" && "$phase" != plan ]] && { [[ $cut -eq 1 ]] || lost_launch_error "$out"; }; then
       lost=0; check_lost_launch || lost=$?
       case "$lost" in 0) reason=lost ;; 2) reason=adopted ;; esac
+      if [[ $cut -eq 1 && $lost -ne 1 ]]; then
+        if [[ $lost -eq 0 ]]; then LOST_WHY="attempt $WAIT_ATTEMPT took longer than $(attempt_limit_text) (the machine may have slept): stopped it and checked that no VM was made"
+        else LOST_WHY="attempt $WAIT_ATTEMPT took longer than $(attempt_limit_text) (the machine may have slept): stopped it, and the VM it made is imported into the state"; fi
+      fi
     fi
     case "$reason" in
       capacity)  delay="$interval"; why="out of host capacity" ;;

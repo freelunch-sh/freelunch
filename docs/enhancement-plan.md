@@ -188,7 +188,7 @@ Read first: `retry_reason`, `transient_why`, the wait loop that calls them, `end
   import command. Without the OCI CLI: stop as today, and say the CLI is what would have
   let it check. Extend `fake-tf`'s `post` error and add a fake `oci compute instance list`.
   Tests: not found retries, found adopts, import failure prints the command
-- [ ] One attempt has a time limit (gap 2). `FREELUNCH_ATTEMPT_TIMEOUT` (seconds, default
+- [x] One attempt has a time limit (gap 2). `FREELUNCH_ATTEMPT_TIMEOUT` (seconds, default
   900; `0` turns it off). Run the attempt's plan and apply under a watchdog in bash (macOS
   has no `timeout`): a background timer that sends SIGINT to the tofu/terraform process,
   then SIGKILL 30 seconds later. An attempt that was cut off is handled like the box above

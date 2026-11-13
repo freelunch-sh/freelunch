@@ -12,6 +12,8 @@ release can change commands and the project layout.
 
 ### Added
 
+- **One attempt of a wait has a time limit.** `FREELUNCH_ATTEMPT_TIMEOUT` (default 900 seconds, 0 for none)
+  stops an attempt that hangs, for example after the laptop slept, and looks for the VM it may have made.
 - **A lost answer no longer ends a wait for capacity.** When the request that makes the VM fails on the
   network, the wait looks for a VM of that name with the OCI CLI: none, and it tries again; one, and it
   imports it into the state and goes on.

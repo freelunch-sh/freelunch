@@ -155,6 +155,7 @@ case "${2:-}" in
       if [[ "$a" == -state=* && -f "$state" && "$end" != "stale" ]]; then jq '.serial += 1' "$state" > "$state.new" && mv "$state.new" "$state"; fi
     done
     [[ "$end" != "ok" ]] || exit 0
+    [[ "$end" != "hang" ]] || exec /bin/sleep 60
     IFS=+ read -ra errors <<< "$end"
     for e in "${errors[@]}"; do oci_error "$e"; done
     exit 1 ;;
@@ -176,6 +177,7 @@ case "${2:-}" in
     echo "$n" > "$FAKE_LOG.plans"
     read -ra ends <<< "${FAKE_PLANS:-ok}"
     end="${ends[n-1]:-ok}"
+    [[ "$end" != "hang" ]] || exec /bin/sleep 60
     if [[ "$end" != "ok" ]]; then oci_error "$end"; exit 1; fi
     echo "Plan: 1 to add, 0 to change, 0 to destroy." ;;
   show)
@@ -3253,6 +3255,8 @@ test_capacity_looks_for_a_vm_whose_launch_answer_was_lost() {
   out="$(FAKE_APPLY="post ok" FAKE_PLAN="$plan" apply_in "$p" oci --wait-for-capacity 2>&1)"
   contains "$out" "the answer to the request that makes main was lost, and no such VM exists, so it tries again"
   contains "$out" "oci: applied on attempt 2"
+  lacks "$out" "took longer than"
+  lacks "$out" "Terminated"
   grep -q 'oci compute instance list --compartment-id ocid1.compartment.oc1..c --display-name main --all' "$p/fake.log"
   fails grep -q ' import ' "$p/fake.log"
   # a VM that is being terminated is not the one
@@ -3270,6 +3274,31 @@ test_capacity_looks_for_a_vm_whose_launch_answer_was_lost() {
   contains "$out" "The VM main exists (ocid1.instance.oc1..i1), but importing it into the state failed"
   contains "$out" "import -input=false"
   contains "$out" "'ocid1.instance.oc1..i1'"
+}
+
+# One attempt has a time limit: an apply that hangs (a laptop that slept) is stopped, and the wait
+# looks for the VM it may have made before it goes on. A plan that hangs is stopped and repeated.
+test_capacity_stops_an_attempt_that_hangs() {
+  local p="$WORK/hang" out plan
+  capacity_project "$p"
+  plan='{"resource_changes":[{"address":"oci_core_instance.this","change":{"actions":["create"],"after":{"display_name":"main","compartment_id":"ocid1.compartment.oc1..c"}}}]}'
+  out="$(FREELUNCH_ATTEMPT_TIMEOUT=1 FREELUNCH_ATTEMPT_KILL_AFTER=1 FAKE_APPLY="hang ok" FAKE_PLAN="$plan" apply_in "$p" oci --wait-for-capacity 2>&1)"
+  contains "$out" "attempt 1 took longer than 1 seconds (the machine may have slept): stopped it and checked that no VM was made"
+  contains "$out" "oci: applied on attempt 2"
+  grep -q 'oci compute instance list' "$p/fake.log"
+  rm "$p/fake.log"*
+  out="$(FREELUNCH_ATTEMPT_TIMEOUT=1 FREELUNCH_ATTEMPT_KILL_AFTER=1 FAKE_INSTANCES='{"data":[{"id":"ocid1.instance.oc1..i1","lifecycle-state":"PROVISIONING"}]}' FAKE_APPLY="hang ok" FAKE_PLAN="$plan" apply_in "$p" oci --wait-for-capacity 2>&1)"
+  contains "$out" "stopped it, and the VM it made is imported into the state"
+  grep -q ' import .*oci_core_instance.this ocid1.instance.oc1..i1' "$p/fake.log"
+  # a plan that hangs makes nothing: it is stopped and repeated, with no look for a VM
+  rm "$p/fake.log"*
+  out="$(FREELUNCH_ATTEMPT_TIMEOUT=1 FREELUNCH_ATTEMPT_KILL_AFTER=1 FAKE_APPLY="capacity ok" FAKE_PLANS="hang ok" FAKE_PLAN="$plan" apply_in "$p" oci --wait-for-capacity 2>&1)"
+  contains "$out" "a plan makes nothing"
+  contains "$out" "oci: applied on attempt 3"
+  fails grep -q 'oci compute instance list' "$p/fake.log"
+  # the limit is a number
+  if out="$(FREELUNCH_ATTEMPT_TIMEOUT=soon apply_in "$p" oci --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "FREELUNCH_ATTEMPT_TIMEOUT is a number of seconds"
 }
 
 # A machine that sleeps between signing a request and sending it gets a 401 for the clock
