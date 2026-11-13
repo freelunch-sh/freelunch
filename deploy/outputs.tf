@@ -8,6 +8,16 @@ output "targets" {
   }
 
   precondition {
+    condition     = length(local.unknown_backup_buckets) == 0
+    error_message = "Backups go to buckets that no storage stack has made: ${join(", ", local.unknown_backup_buckets)}. Known buckets: ${length(local.buckets) > 0 ? join(", ", sort(keys(local.buckets))) : "none"}. Add the bucket to that stack's buckets and apply it (freelunch apply cloudflare)."
+  }
+
+  precondition {
+    condition     = length(local.backup_without_data) == 0
+    error_message = "These apps have a backup and nothing to back up: ${join(", ", local.backup_without_data)}. Give the app a named volume in its Compose file, or list paths on the host in the backup."
+  }
+
+  precondition {
     condition     = length(local.unknown_job_apps) == 0
     error_message = "Jobs name apps that aren't in apps.tfvars: ${join(", ", local.unknown_job_apps)}. Known apps: ${length(var.apps) > 0 ? join(", ", sort(keys(var.apps))) : "none"}."
   }
@@ -95,6 +105,12 @@ output "tunnel_tokens" {
 output "app_env" {
   description = "Environment per app from its bucket (the S3 endpoint, region, bucket name and keys) and its database (DATABASE_URL)."
   value       = local.app_env
+  sensitive   = true
+}
+
+output "backup_env" {
+  description = "Per app with a backup: the S3 settings and keys of the bucket it backs up to."
+  value       = { for name, a in var.apps : name => local.node_out[a.backup.bucket] if a.backup != null && try(local.node_out[a.backup.bucket], null) != null }
   sensitive   = true
 }
 

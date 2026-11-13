@@ -87,6 +87,15 @@ fi
 if [[ "$1 ${2:-}" == "compose --project-directory" && " $* " == *" exec "* ]]; then exit "${FAKE_EXEC_RC:-0}"; fi
 # docker compose --project-directory <dir> logs ...: a line named after the app's folder
 if [[ "$1 ${2:-}" == "compose --project-directory" && " $* " == *" logs "* ]]; then echo "log line from $(basename "$3")"; exit 0; fi
+# docker run ... <restic image> <restic command>: logged by the line below; the repository is new when
+# FAKE_RESTIC_NEW is set (cat config fails, init works), and FAKE_RESTIC_FAIL names a command that fails
+if [[ "$1 ${2:-}" == "run --rm" ]]; then
+  case " $* " in
+    *" cat config "*)  [[ -z "${FAKE_RESTIC_NEW:-}" ]] || exit 1 ;;
+  esac
+  for w in ${FAKE_RESTIC_FAIL:-}; do [[ " $* " != *" $w "* ]] || { echo "Fatal: $w failed" >&2; exit 1; }; done
+  if [[ " $* " == *" snapshots "* ]]; then cat "$FAKE_ROOT/snapshots.json" 2>/dev/null || echo '[]'; fi
+fi
 # docker compose config --services (in the app's folder): FAKE_SERVICES, or one service named like the app
 if [[ "$1 ${2:-} ${3:-} ${4:-}" == "compose config --services " ]]; then
   if [[ -n "${FAKE_SERVICES:-}" ]]; then tr ' ' '\n' <<< "$FAKE_SERVICES"; else basename "$PWD"; fi; exit 0
@@ -2281,6 +2290,94 @@ test_deploy_runs_hooks_around_the_update() {
   grep -q 'docker compose exec -T worker sh -c bin/warm @ api' "$p/fake.log"
 }
 
+# backup_project <dir>: a project whose api has a named volume and a daily backup to a bucket
+backup_project() {
+  new_project "$1"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["127.0.0.1:8080:8080"]\n    env_file: .env\n    volumes: ["data:/var/lib/data"]\nvolumes:\n  data: {}\n' > "$1/compose.yaml"
+  mkdir -p "$1/.freelunch/backblaze-b2"
+  cp "$ROOT/deploy/tests/fixtures/storage.tfstate" "$1/.freelunch/backblaze-b2/terraform.tfstate"
+  sed -i.bak 's|env_file = "api.env" }|env_file = "api.env", backup = { bucket = "backblaze-b2-results", schedule = "daily 02:00", before = "bin/dump", keep_daily = 5 } }|' "$1/.freelunch/apps.tfvars"
+}
+
+# An app with a backup gets restic's settings (0600, with the passphrase and the bucket's keys), a script (0700), and a
+# daily timer behind the host's heavy lock. The passphrase is required, and never in a dry run.
+test_deploy_sets_up_a_backup() {
+  local p="$WORK/backup" out
+  backup_project "$p"
+  if out="$(GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "backup: FREELUNCH_BACKUP_PASSPHRASE is not set"
+  out="$(GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pass-phrase-123 deploy_in "$p" --dry-run 2>&1)"
+  contains "$out" "# backup of api: daily 02:00"
+  contains "$out" "s3:https://s3.us-west-004.backblazeb2.com/freelunch-results/freelunch/"
+  lacks "$out" "pass-phrase-123"
+  lacks "$out" "mock-key"
+  GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pass-phrase-123 deploy_in "$p" >/dev/null 2>&1
+  equals "$(ls -l "$p/host/bin/backup-api" | cut -c1-10)" "-rwx------"
+  equals "$(ls -l "$p/host/backup/api.env" | cut -c1-10)" "-rw-------"
+  contains "$(cat "$p/host/backup/api.env")" "RESTIC_PASSWORD=pass-phrase-123"
+  contains "$(cat "$p/host/backup/api.env")" "AWS_ACCESS_KEY_ID=mock-key-id"
+  contains "$(cat "$p/host/backup/api.env")" "AWS_SECRET_ACCESS_KEY=mock-key"
+  contains "$(cat "$p/host/backup/api.env")" "RESTIC_REPOSITORY=s3:https://s3.us-west-004.backblazeb2.com/freelunch-results/freelunch/"
+  contains "$(cat "$p/host/systemd/freelunch-backup-api.timer")" "OnCalendar=*-*-* 02:00:00 UTC"
+  contains "$(cat "$p/host/systemd/freelunch-backup-api.service")" "ExecStart=/usr/bin/flock /opt/freelunch/locks/heavy.lock /bin/bash /opt/freelunch/jobs/backup-api.sh"
+  grep -q '^systemctl enable freelunch-backup-api.timer' "$p/fake.log"
+  contains "$(cat "$p/host/bin/backup-api")" "--keep-daily 5 --keep-weekly 4"
+  contains "$(cat "$p/host/bin/backup-api")" "image=restic/restic:0.19.1@sha256:"
+  out="$(check_in "$p" 2>&1 || true)"
+  contains "$out" "fail  FREELUNCH_BACKUP_PASSPHRASE is not set"
+  out="$(FREELUNCH_BACKUP_PASSPHRASE=x check_in "$p" 2>&1 || true)"
+  contains "$out" "ok    FREELUNCH_BACKUP_PASSPHRASE is set"
+  # the script: before first, a new repository is made, then backup and forget; success is written
+  mkdir -p "$p/host/volumes/api_data/_data"
+  : > "$p/fake.log"
+  sed "s#/opt/freelunch/#$p/host/#g" "$p/host/bin/backup-api" > "$p/backup-api.sh"
+  FAKE_ROOT="$p/host" FAKE_LOG="$p/fake.log" PATH="$WORK/bin:$PATH" FAKE_RESTIC_NEW=1 bash "$p/backup-api.sh" >/dev/null 2>&1 || { echo "the backup script failed"; cat "$p/fake.log" >&2; return 1; }
+  equals "$(awk '/docker compose --project-directory .* exec -T api sh -c bin\/dump/ { print "before" } / cat config/ { print "cat" } / init @/ { print "init" } / backup \/data\/api_data/ { print "backup" } / forget --prune/ { print "forget" }' "$p/fake.log" | tr '\n' ' ')" "before cat init backup forget "
+  exists "$p/host/backup/api.last"
+  absent "$p/host/backup/api.failed"
+  grep -q -- '-v .*host/volumes/api_data/_data:/data/api_data:ro' "$p/fake.log"
+  # a failing before skips the backup and says why
+  : > "$p/fake.log"
+  FAKE_EXEC_RC=1 FAKE_ROOT="$p/host" FAKE_LOG="$p/fake.log" PATH="$WORK/bin:$PATH" bash "$p/backup-api.sh" >/dev/null 2>&1 && { echo "the script should have failed"; return 1; }
+  contains "$(cat "$p/host/backup/api.failed")" "before failed, so no backup was made"
+  fails grep -q ' backup /data' "$p/fake.log"
+}
+
+# freelunch backup runs the backup unit now and follows it; backup list prints the snapshots.
+test_backup_runs_now_and_lists_snapshots() {
+  local p="$WORK/backup-now" out key
+  backup_project "$p"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw FAKE_HOST_KEY="$key" deploy_in "$p" >/dev/null 2>&1
+  mkdir -p "$p/host/jobstate"
+  printf 'Result=success\nExecMainStatus=0\n' > "$p/host/jobstate/freelunch-backup-api.service"
+  printf 'NextElapseUSecRealtime=x\nLastTriggerUSec=Fri 2026-11-13 02:00:00 UTC\n' > "$p/host/jobstate/freelunch-backup-api.timer"
+  : > "$p/fake.log"
+  out="$(backup_in "$p" 2>&1)"
+  contains "$out" "backup: starting backup-api on oci-main"
+  contains "$out" "backup: backup-api finished: ok"
+  grep -q 'systemctl start --no-block freelunch-backup-api.service' "$p/fake.log"
+  printf 'Result=exit-code\nExecMainStatus=1\n' > "$p/host/jobstate/freelunch-backup-api.service"
+  if out="$(backup_in "$p" api 2>&1)"; then echo "a failed backup should fail"; return 1; fi
+  contains "$out" "backup: backup-api finished: failed (exit 1)"
+  # the snapshots, from the repository
+  cat > "$p/host/snapshots.json" <<'JSON'
+[{"short_id": "a1b2c3d4", "time": "2026-11-12T02:00:03Z", "summary": {"total_bytes_processed": 5242880}},
+ {"short_id": "e5f6a7b8", "time": "2026-11-13T02:00:02Z", "summary": {"total_bytes_processed": 2147483648}}]
+JSON
+  out="$(backup_in "$p" list api 2>&1)"
+  contains "$out" "api (s3:https://s3.us-west-004.backblazeb2.com/freelunch-results/freelunch/"
+  contains "$out" "a1b2c3d4   2026-11-12T02:00:03Z       5.0 MB"
+  contains "$out" "e5f6a7b8   2026-11-13T02:00:02Z       2.0 GB"
+  grep -q 'snapshots --json --host api' "$p/fake.log"
+  rm "$p/host/snapshots.json"
+  contains "$(backup_in "$p" list api 2>&1)" "api: no snapshots yet"
+  # an app with no backup
+  sed -i.bak 's|, backup = {[^}]*}||' "$p/.freelunch/apps.tfvars"
+  if out="$(backup_in "$p" api 2>&1)"; then echo "backup should have failed"; return 1; fi
+  contains "$out" "backup: api has no backup in apps.tfvars"
+}
+
 # Two deploys to one host queue on a lock; one that cannot get it in 15 minutes says another holds it.
 test_deploy_takes_the_host_lock() {
   local p="$WORK/lock" out
@@ -2310,6 +2407,11 @@ test_schedules_become_calendar_values_and_minutes() {
     schedule_oncalendar "weekly funday 03:00"
   ' _ "$CLI" 2>&1)" || true
   equals "$out" "$(printf '%s\n' '*-*-* *:05:00 UTC' '*-*-* 03:30:00 UTC' 'Sun *-*-* 23:59:00 UTC' 0 10079 90 1530 8730 168 5 65 10025 'die: schedule: '"'"'weekly funday 03:00'"'"' is not a schedule. Use "hourly :MM", "daily HH:MM" or "weekly <mon..sun> HH:MM" (UTC; for example "daily 03:30")')"
+}
+
+backup_in() { # backup_in <dir> [args]: freelunch backup with the fake ssh and docker
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" "$CLI" backup "$@")
 }
 
 jobs_in() { # jobs_in <dir> [args]: freelunch jobs with the fake ssh and docker

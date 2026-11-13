@@ -292,13 +292,13 @@ backup is a manual `volume pull` to the laptop.
   Hub's registry API. The arm64 image is 16.8 MB compressed, its entrypoint is `/entrypoint.sh`, so the backup
   script passes restic's arguments after the image name. Recorded in `shared/restic.env` (`RESTIC_IMAGE=`), which the
   CLI reads. The `latest` tag points at an index with another digest but the same build, so it is not used.
-- [ ] `deploy/variables.tf`: per app `backup = optional(object({ bucket, schedule,
+- [x] `deploy/variables.tf`: per app `backup = optional(object({ bucket, schedule,
   before = optional(string), keep_daily = optional(number, 7), keep_weekly =
   optional(number, 4), paths = optional(list(string), []) }))`. Validations: the bucket is a
   known bucket (reuse `unknown_buckets`), the schedule parses, the app has a volume or
   `paths`. On a platform target: an error ("backups run on VM hosts; on <platform> use its
   own snapshots"). Tests in `deploy/tests/`
-- [ ] `remote_script`: for an app with `backup`, write `/opt/freelunch/bin/backup-<app>`
+- [x] `remote_script`: for an app with `backup`, write `/opt/freelunch/bin/backup-<app>`
   (0700) and `/opt/freelunch/backup/<app>.env` (0600: the S3 endpoint, keys, repository and
   password, from `bucket_env`'s data and the passphrase), and a `freelunch-backup-<app>`
   service and timer through the section 4 code path, always `heavy`. The script: run
@@ -309,7 +309,7 @@ backup is a manual `volume pull` to the laptop.
   `/opt/freelunch/backup/<app>.failed` with the last 20 lines. The dry run prints the script
   with every secret redacted. Tests: files and modes, the timer, `before` runs first, a
   failing `before` skips the backup and writes `.failed`, no secret in the dry run
-- [ ] `freelunch backup [app]` runs the backup now and follows it; `freelunch backup list
+- [x] `freelunch backup [app]` runs the backup now and follows it; `freelunch backup list
   <app>` prints the snapshots (`restic snapshots`, id, time, size). Tests with a fake restic
   (the fake `docker` grows a `run ... restic` case)
 - [ ] `freelunch restore <app> [--snapshot <id>] [--host h]`: stop the app, restore the

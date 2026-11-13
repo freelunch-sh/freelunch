@@ -229,6 +229,111 @@ run "hooks_are_an_error_on_a_platform" {
   expect_failures = [output.platforms]
 }
 
+# Backups ---------------------------------------------------------------------------------
+
+run "a_backup_reaches_the_target_with_its_buckets_settings" {
+  command = plan
+
+  variables {
+    storage_state_paths = ["tests/fixtures/storage.tfstate"]
+    apps = {
+      api = {
+        host    = "oci-main"
+        compose = "compose-data.yaml"
+        backup  = { bucket = "backblaze-b2-results", schedule = "daily 02:00", before = "bin/dump", keep_daily = 3 }
+      }
+    }
+  }
+
+  assert {
+    condition = (
+      output.targets["oci-main"].apps.api.backup.schedule == "daily 02:00" &&
+      output.targets["oci-main"].apps.api.backup.bucket == "backblaze-b2-results" &&
+      output.targets["oci-main"].apps.api.backup.before == "bin/dump" &&
+      output.targets["oci-main"].apps.api.backup.keep_daily == 3 &&
+      output.targets["oci-main"].apps.api.backup.keep_weekly == 4 &&
+      length(output.targets["oci-main"].apps.api.backup.paths) == 0
+    )
+    error_message = "A backup keeps its bucket, schedule, hook and retention, with defaults of 7 daily and 4 weekly."
+  }
+
+  assert {
+    condition     = nonsensitive(output.backup_env["api"].bucket) == "freelunch-results" && nonsensitive(output.backup_env["api"].endpoint) == "https://s3.us-west-004.backblazeb2.com"
+    error_message = "The bucket's S3 settings are handed to deploy for the app, apart from its environment."
+  }
+}
+
+run "a_backup_goes_to_a_bucket_somebody_made" {
+  command = plan
+
+  variables {
+    apps = { api = { host = "oci-main", compose = "compose-data.yaml", backup = { bucket = "backblaze-b2-nothing", schedule = "daily 02:00" } } }
+  }
+
+  expect_failures = [output.targets]
+}
+
+run "a_backup_needs_a_volume_or_paths" {
+  command = plan
+
+  variables {
+    storage_state_paths = ["tests/fixtures/storage.tfstate"]
+    apps                = { api = { host = "oci-main", compose = "compose.yaml", backup = { bucket = "backblaze-b2-results", schedule = "daily 02:00" } } }
+  }
+
+  expect_failures = [output.targets]
+}
+
+run "paths_are_something_to_back_up" {
+  command = plan
+
+  variables {
+    storage_state_paths = ["tests/fixtures/storage.tfstate"]
+    apps                = { api = { host = "oci-main", compose = "compose.yaml", backup = { bucket = "backblaze-b2-results", schedule = "daily 02:00", paths = ["/srv/uploads"] } } }
+  }
+
+  assert {
+    condition     = output.targets["oci-main"].apps.api.backup.paths == tolist(["/srv/uploads"])
+    error_message = "A backup of paths on the host needs no volume."
+  }
+}
+
+run "a_backup_schedule_has_one_of_three_forms" {
+  command = plan
+
+  variables {
+    storage_state_paths = ["tests/fixtures/storage.tfstate"]
+    apps                = { api = { host = "oci-main", compose = "compose-data.yaml", backup = { bucket = "backblaze-b2-results", schedule = "nightly" } } }
+  }
+
+  expect_failures = [var.apps]
+}
+
+run "backup_paths_are_absolute" {
+  command = plan
+
+  variables {
+    storage_state_paths = ["tests/fixtures/storage.tfstate"]
+    apps                = { api = { host = "oci-main", compose = "compose-data.yaml", backup = { bucket = "backblaze-b2-results", schedule = "daily 02:00", paths = ["uploads"] } } }
+  }
+
+  expect_failures = [var.apps]
+}
+
+run "backups_are_an_error_on_a_platform" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = null
+    storage_state_paths  = ["tests/fixtures/storage.tfstate"]
+    apps                 = { api = { host = "northflank-main", compose = "api.yaml", backup = { bucket = "backblaze-b2-results", schedule = "daily 02:00", paths = ["/x"] } } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
 # Jobs ------------------------------------------------------------------------------------
 
 run "jobs_reach_the_host_their_app_runs_on" {

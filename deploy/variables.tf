@@ -29,6 +29,17 @@ variable "apps" {
     pre_deploy  = optional(string)
     post_deploy = optional(string)
     service     = optional(string)
+    # A backup of the app's volumes (and paths) to a bucket freelunch knows, with restic, on a schedule
+    # (hourly :MM, daily HH:MM, weekly <mon..sun> HH:MM; UTC). before runs in the app's service first
+    # (a database dump, say); keep_daily and keep_weekly are how many snapshots are kept.
+    backup = optional(object({
+      bucket      = string
+      schedule    = string
+      before      = optional(string)
+      keep_daily  = optional(number, 7)
+      keep_weekly = optional(number, 4)
+      paths       = optional(list(string), [])
+    }))
   }))
   default = {}
 
@@ -40,6 +51,16 @@ variable "apps" {
   validation {
     condition     = alltrue([for a in values(var.apps) : (a.pre_deploy == null ? true : !strcontains(a.pre_deploy, "\n")) && (a.post_deploy == null ? true : !strcontains(a.post_deploy, "\n"))])
     error_message = "pre_deploy and post_deploy are one command each, on one line. For more, put a script in the image and call it."
+  }
+
+  validation {
+    condition     = alltrue([for a in values(var.apps) : a.backup == null ? true : can(regex("^(hourly :[0-5][0-9]|daily ([01][0-9]|2[0-3]):[0-5][0-9]|weekly (mon|tue|wed|thu|fri|sat|sun) ([01][0-9]|2[0-3]):[0-5][0-9])$", a.backup.schedule))])
+    error_message = "A backup's schedule is one of \"hourly :MM\", \"daily HH:MM\" or \"weekly <mon..sun> HH:MM\", in UTC (for example \"daily 02:00\")."
+  }
+
+  validation {
+    condition     = alltrue([for a in values(var.apps) : a.backup == null ? true : (a.backup.before == null ? true : !strcontains(a.backup.before, "\n")) && a.backup.keep_daily >= 1 && a.backup.keep_weekly >= 0 && alltrue([for p in a.backup.paths : startswith(p, "/")])])
+    error_message = "A backup's before is one command on one line, keep_daily is at least 1, and paths are absolute paths on the host."
   }
 
   validation {
@@ -93,6 +114,17 @@ variable "jobs" {
   validation {
     condition     = alltrue([for j in values(var.jobs) : j.service == null ? true : can(regex("^[A-Za-z0-9][A-Za-z0-9_.-]*$", j.service))])
     error_message = "A job's service must be the name of a service in the app's Compose file."
+  }
+}
+
+variable "project" {
+  description = "The project's name, for what is filed under it on a shared host or in a bucket (backups). Without it freelunch uses the project folder's name."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.project == null ? true : can(regex("^[a-z0-9]([a-z0-9]|-[a-z0-9])*$", var.project))
+    error_message = "project is lowercase letters, digits and single hyphens (no --)."
   }
 }
 

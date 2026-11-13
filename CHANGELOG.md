@@ -12,6 +12,9 @@ release can change commands and the project layout.
 
 ### Added
 
+- **Backups to a bucket.** `backup = { bucket, schedule, before, keep_daily, keep_weekly, paths }` on an app saves its
+  volumes (and paths) with restic, run as a container, encrypted with `FREELUNCH_BACKUP_PASSPHRASE`, on a timer behind
+  the host's heavy lock. `freelunch backup [app]` runs one now and follows it; `backup list <app>` shows the snapshots.
 - **`freelunch jobs`** shows each job's schedule, last run, last result and next run, and `jobs run <job>` starts
   one and follows its output. `deploy --dry-run`, `check` and `doctor` warn when heavy jobs (or the host's
   reboot) start close together, with a time that clears them.

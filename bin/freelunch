@@ -185,6 +185,8 @@ Infrastructure:
                           it. Returns the command's exit code
   jobs [run <job>]        The scheduled jobs of every VM host: schedule, last run and result, next run.
                           jobs run <job> starts one now and follows its output
+  backup [app]            Back an app (every app with a backup, without a name) up now and follow it.
+  backup list <app>       The snapshots in its repository: id, time, size
   restart <app> [--host h] Restart an app on its VM host and wait until it is healthy; if it is not,
                           the last 50 log lines say why
   doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in and
@@ -3068,14 +3070,14 @@ deploy_plan() { # deploy_plan <apps file> <cloudflare state or "">
   check_checkout_tfvars "$ROOT/deploy"
   TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" init -input=false >/dev/null || return 1
   TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" apply -input=false -auto-approve "${args[@]}" >/dev/null || return 1
-  for o in targets platforms registries tunnel_tokens app_env graph; do
+  for o in targets platforms registries tunnel_tokens app_env backup_env graph; do
     TF_DATA_DIR="$TMP/.terraform" tf_in "$ROOT/deploy" output -state="$TMP/deploy.tfstate" -json "$o" > "$TMP/$o.json" || return 1
   done
   graph_prepare || return 1
   graph_edges || return 1
   # in GitHub Actions, keep what a bucket or a database hands an app out of the job's log
   if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
-    jq -r '.[] | .[] | strings | select(length >= 8)' "$TMP/app_env.json" | while IFS= read -r value; do echo "::add-mask::$value"; done
+    jq -r '.[] | .[] | strings | select(length >= 8)' "$TMP/app_env.json" "$TMP/backup_env.json" | while IFS= read -r value; do echo "::add-mask::$value"; done
   fi
 }
 
@@ -3214,6 +3216,163 @@ graph_gate() {
   [[ -z "$bad" ]] || die "deploy: ${bad%; }. Fix it, or FREELUNCH_CHECK_NEEDS=0 to deploy anyway"
 }
 
+# --- backups ---------------------------------------------------------------------------
+# An app with `backup` in apps.tfvars is saved with restic (a container, no install on the host) to
+# a bucket freelunch knows, on a timer, and can be brought back with freelunch restore.
+
+# restic_image: the pinned image (shared/restic.env)
+restic_image() { sed -n 's/^RESTIC_IMAGE=//p' "$ROOT/shared/restic.env"; }
+
+# backup_apps <host>: the apps of the host that have a backup
+backup_apps() { jq -r --arg h "$1" '.[$h].apps | to_entries[] | select(.value.backup != null) | .key' "$TMP/targets.json"; }
+
+# backup_project: the name the repositories in the bucket are filed under: project in apps.tfvars,
+# else the project folder's name
+backup_project() {
+  local n
+  n="$(tfvar "$(state_root)/apps.tfvars" project)"
+  if [[ -n "$n" ]]; then echo "$n"; else project_name "$(basename "$(dirname "$PROJECT")")"; fi
+}
+
+# backup_passphrase_check: stop when a backup has nothing to encrypt it with
+backup_passphrase_check() {
+  [[ -n "${FREELUNCH_BACKUP_PASSPHRASE:-}" ]] && return 0
+  [[ -n "$(jq -r '[.[].apps[] | select(.backup != null)] | length | select(. > 0)' "$TMP/targets.json")" ]] || return 0
+  die "backup: FREELUNCH_BACKUP_PASSPHRASE is not set. It encrypts the backups, and without it nobody can read them (you included), so keep a copy somewhere safe too. Put it in $(rel "$(state_root)")/.env"
+}
+
+# backup_repository <app>: the restic repository of the app in its bucket
+backup_repository() {
+  jq -r --arg a "$1" --arg p "$(backup_project)" '.[$a] | "s3:\(.endpoint | sub("/$"; ""))/\(.bucket)/freelunch/\($p)/\($a)"' "$TMP/backup_env.json"
+}
+
+# backup_script <app> <service> <before> <keep_daily> <keep_weekly> <paths...>: /opt/freelunch/bin/backup-<app>
+backup_script() {
+  local app="$1" service="$2" before="$3" daily="$4" weekly="$5" p paths=""
+  shift 5
+  for p in "$@"; do paths="$paths
+mounts+=(-v $(shq "$p:/paths$p:ro")); targets+=($(shq "/paths$p"))"; done
+  cat <<SCRIPT
+#!/bin/bash
+# freelunch backup of $app: written by freelunch deploy, run by freelunch-backup-$app.timer
+set -uo pipefail
+app=$(shq "$app")
+dir=/opt/freelunch/apps/\$app
+state=/opt/freelunch/backup
+image=$(restic_image)
+log="\$(mktemp)"
+trap 'rm -f "\$log"' EXIT
+fail() {
+  echo "!! \$app: \$1" >&2
+  { echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) \$1"; tail -n 20 "\$log"; } > "\$state/\$app.failed"
+  exit 1
+}
+exec > >(tee -a "\$log") 2>&1
+mounts=() targets=()
+for v in \$(docker volume ls -q --filter "label=com.docker.compose.project=\$app"); do
+  mp="\$(docker volume inspect --format '{{.Mountpoint}}' "\$v")" || fail "can't find the volume \$v"
+  mounts+=(-v "\$mp:/data/\$v:ro"); targets+=("/data/\$v")
+done$paths
+[ \${#targets[@]} -gt 0 ] || fail "there is nothing to back up: \$app has no volumes on this host and no paths"
+restic() { docker run --rm --env-file "\$state/\$app.env" --hostname "\$app" "\${mounts[@]}" "\$image" "\$@"; }
+SCRIPT
+  if [[ -n "$before" ]]; then
+    cat <<SCRIPT
+svc=$(shq "$service")
+if [ -z "\$svc" ]; then
+  list="\$(docker compose --project-directory "\$dir" config --services)"
+  if printf '%s\\n' "\$list" | grep -qx "\$app"; then svc="\$app"
+  elif [ "\$(printf '%s\\n' "\$list" | grep -c .)" -eq 1 ]; then svc="\$list"
+  else fail "\$app has several services; name the one the backup's before runs in with service in apps.tfvars"; fi
+fi
+echo "--> \$app: before"
+docker compose --project-directory "\$dir" exec -T "\$svc" sh -c $(shq "$before") || fail "before failed, so no backup was made"
+SCRIPT
+  fi
+  cat <<SCRIPT
+echo "--> \$app: backing up"
+restic cat config >/dev/null 2>&1 || restic init || fail "can't open or make the repository"
+restic backup "\${targets[@]}" || fail "restic backup failed"
+restic forget --prune --host "\$app" --keep-daily $daily --keep-weekly $weekly || fail "restic forget failed"
+date -u +%s > "\$state/\$app.last"
+rm -f "\$state/\$app.failed"
+echo "--> \$app: backed up"
+SCRIPT
+}
+
+# backup_units <app> <schedule>: the wrapper the job list knows, the service and the timer, apart by %%%%
+backup_units() {
+  local app="$1" schedule="$2"
+  printf '#!/bin/bash\nexec /opt/freelunch/bin/backup-%s\n' "$app"
+  echo "%%%%"
+  cat <<UNIT
+[Unit]
+Description=freelunch backup of $app
+
+[Service]
+Type=oneshot
+TimeoutStartSec=180m
+ExecStart=/usr/bin/flock /opt/freelunch/locks/heavy.lock /bin/bash /opt/freelunch/jobs/backup-$app.sh
+UNIT
+  echo "%%%%"
+  cat <<UNIT
+[Unit]
+Description=freelunch backup of $app: $schedule
+
+[Timer]
+OnCalendar=$(schedule_oncalendar "$schedule")
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+}
+
+# remote_backups <host> <redact>: the part of the deploy script that writes each backup's script, settings,
+# timer and service. It prints the names it wrote for remote_jobs, which keeps their timers.
+remote_backups() {
+  local host="$1" redact="$2" app svc before daily weekly schedule files env_text
+  local -a paths
+  for app in $(backup_apps "$host"); do
+    svc="$(jq -r --arg h "$host" --arg a "$app" '.[$h].apps[$a].service // ""' "$TMP/targets.json")"
+    before="$(jq -r --arg h "$host" --arg a "$app" '.[$h].apps[$a].backup.before // ""' "$TMP/targets.json")"
+    daily="$(jq -r --arg h "$host" --arg a "$app" '.[$h].apps[$a].backup.keep_daily' "$TMP/targets.json")"
+    weekly="$(jq -r --arg h "$host" --arg a "$app" '.[$h].apps[$a].backup.keep_weekly' "$TMP/targets.json")"
+    schedule="$(jq -r --arg h "$host" --arg a "$app" '.[$h].apps[$a].backup.schedule' "$TMP/targets.json")"
+    paths=()
+    while IFS= read -r p; do [[ -z "$p" ]] || paths+=("$p"); done < <(jq -r --arg h "$host" --arg a "$app" '.[$h].apps[$a].backup.paths[]?' "$TMP/targets.json")
+    echo "echo \"--> backup of $app\""
+    echo 'install -d -m 0755 /opt/freelunch/bin; install -d -m 0700 /opt/freelunch/backup; install -d -m 0750 /opt/freelunch/jobs'
+    if [[ "$redact" == 1 ]]; then
+      echo "# backup of $app: $schedule, restic $(restic_image | cut -c1-40)..., to $(backup_repository "$app")"
+    fi
+    echo "putf /opt/freelunch/bin/backup-$app 0700 <<'FREELUNCH_EOF'"
+    backup_script "$app" "$svc" "$before" "$daily" "$weekly" ${paths[@]+"${paths[@]}"} | b64
+    echo "FREELUNCH_EOF"
+    echo "putf /opt/freelunch/backup/$app.env 0600 <<'FREELUNCH_EOF'"
+    if [[ "$redact" == 1 ]]; then
+      echo "<restic repository, password and the bucket's keys, redacted>"
+    else
+      env_text="$(printf 'RESTIC_REPOSITORY=%s\nRESTIC_PASSWORD=%s\nAWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\nAWS_DEFAULT_REGION=%s\n' \
+        "$(backup_repository "$app")" "$FREELUNCH_BACKUP_PASSPHRASE" \
+        "$(jq -r --arg a "$app" '.[$a].access_key_id' "$TMP/backup_env.json")" "$(jq -r --arg a "$app" '.[$a].secret_access_key' "$TMP/backup_env.json")" \
+        "$(jq -r --arg a "$app" '.[$a].region // "us-east-1"' "$TMP/backup_env.json")")"
+      printf '%s\n' "$env_text" | b64
+    fi
+    echo "FREELUNCH_EOF"
+    files="$(backup_units "$app" "$schedule")"
+    echo "putf /opt/freelunch/jobs/backup-$app.sh 0750 <<'FREELUNCH_EOF'"
+    awk '/^%%%%$/ { exit } { print }' <<< "$files" | b64
+    echo "FREELUNCH_EOF"
+    echo "putf /etc/systemd/system/freelunch-backup-$app.service 0644 <<'FREELUNCH_EOF'"
+    awk '/^%%%%$/ { n++; next } n == 1' <<< "$files" | b64
+    echo "FREELUNCH_EOF"
+    echo "putf /etc/systemd/system/freelunch-backup-$app.timer 0644 <<'FREELUNCH_EOF'"
+    awk '/^%%%%$/ { n++; next } n == 2' <<< "$files" | b64
+    echo "FREELUNCH_EOF"
+  done
+}
+
 # --- schedules and jobs ----------------------------------------------------------------
 # A schedule is one of "hourly :MM", "daily HH:MM" or "weekly <mon..sun> HH:MM", all UTC, so
 # freelunch can turn it into a systemd calendar value and compare schedules with each other.
@@ -3309,6 +3468,7 @@ UNIT
 # of the host and removes the ones whose job is gone from apps.tfvars
 remote_jobs() {
   local host="$1" redact="$2" job app command schedule service heavy minutes files kept="" install_jobs_dir=0
+  remote_backups "$host" "$redact"
   while IFS=$'\x1f' read -r job app command schedule service heavy minutes; do
     [[ -n "$job" ]] || continue
     if [[ $install_jobs_dir -eq 0 ]]; then
@@ -3331,6 +3491,10 @@ remote_jobs() {
     awk '/^%%%%$/ { n++; next } n == 2' <<< "$files" | b64
     echo "FREELUNCH_EOF"
   done < <(jq -r --arg h "$host" '(.[$h].jobs // {}) | to_entries[] | [.key, .value.app, .value.command, .value.schedule, (.value.service // ""), (.value.heavy | tostring), (.value.timeout_minutes | tostring)] | join("\u001f")' "$TMP/targets.json")
+  for app in $(backup_apps "$host"); do
+    kept="$kept backup-$app"
+    install_jobs_dir=1
+  done
   if [[ $install_jobs_dir -eq 1 ]]; then
     echo 'systemctl daemon-reload'
     for job in $kept; do
@@ -3391,6 +3555,7 @@ drop_jobs() {
     case " $1 " in *" $n "*) continue ;; esac
     systemctl disable --now "freelunch-$n.timer" >/dev/null 2>&1 || true
     rm -f "/etc/systemd/system/freelunch-$n.timer" "/etc/systemd/system/freelunch-$n.service" "$s"
+    case "$n" in backup-*) rm -f "/opt/freelunch/bin/$n" "/opt/freelunch/backup/${n#backup-}".* ;; esac
     echo "    removed the job $n"
     changed=1
   done
@@ -3636,6 +3801,7 @@ cmd_deploy() {
   if [[ "${FREELUNCH_SSH_STRICT:-0}" == "1" ]]; then ssh_options yes; else ssh_options accept-new; fi
   token_reminders
   [[ "$dry_run" == "1" ]] || graph_gate "${hosts[@]}"
+  backup_passphrase_check
   if [[ "$dry_run" == "1" ]]; then
     while IFS= read -r line; do log "$line"; done < <(job_overlap_lines)
   fi
@@ -6592,6 +6758,59 @@ job_state() {
   echo "$last|$result|${next:-none}"
 }
 
+# cmd_backup [app] | list <app>: back an app (or every app with a backup) up now, or list the snapshots of
+# its repository
+cmd_backup() {
+  local sub="" app="" apps_file tunnel_state="" a host snapshots all=()
+  if [[ "${1:-}" == list ]]; then sub=list; shift; fi
+  [[ $# -le 1 ]] || die "usage: freelunch backup [app] | freelunch backup list <app>"
+  app="${1:-}"
+  [[ "$sub" != list || -n "$app" ]] || die "usage: freelunch backup list <app>"
+  apps_file="$(state_root)/apps.tfvars"
+  [[ -f "$apps_file" ]] || die "backup: no $(rel "$apps_file"): the apps come from there"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if ! { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1; then
+    die "backup: apps.tfvars doesn't resolve against the inventory yet (freelunch deploy --dry-run says why)"
+  fi
+  if [[ -n "$app" ]]; then
+    jq -e --arg a "$app" '[.[].apps | select(has($a)) | .[$a].backup] | any(. != null)' "$TMP/targets.json" >/dev/null \
+      || die "backup: $app has no backup in apps.tfvars. Add backup = { bucket = \"...\", schedule = \"daily 02:00\" } to it"
+    set -- "$app"
+  else
+    while IFS= read -r a; do all+=("$a"); done < <(jq -r '[.[].apps | to_entries[] | select(.value.backup != null) | .key] | unique | .[]' "$TMP/targets.json")
+    [[ ${#all[@]} -gt 0 ]] || die "backup: no app has a backup in apps.tfvars"
+    set -- "${all[@]}"
+  fi
+  for a in "$@"; do
+    host="$(jq -r --arg a "$a" 'to_entries[] | select(.value.apps | has($a)) | .key' "$TMP/targets.json" | head -n1)"
+    app_target backup "$a" "$host"
+    if [[ "$sub" == list ]]; then
+      snapshots="$(host_ssh "\$S docker run --rm --env-file /opt/freelunch/backup/$a.env $(restic_image) snapshots --json --host $a")" \
+        || die "backup: can't read the snapshots of $a on $APP_HOST (has freelunch deploy set the backup up?)"
+      if [[ "$(jq 'length' <<< "$snapshots")" -eq 0 ]]; then echo "$a: no snapshots yet"; continue; fi
+      echo "$a ($(backup_repository "$a" 2>/dev/null || echo "repository"))"
+      jq -r '.[] | [.short_id, .time, (.summary.total_bytes_processed // 0)] | @tsv' <<< "$snapshots" \
+        | awk -F'\t' '{ s = $3; u = "B"; if (s >= 1073741824) { s /= 1073741824; u = "GB" } else if (s >= 1048576) { s /= 1048576; u = "MB" } else if (s >= 1024) { s /= 1024; u = "KB" } printf "  %-10s %-26s %.1f %s\n", $1, $2, s, u }'
+    else
+      unit_run backup "backup-$a"
+    fi
+  done
+}
+
+# unit_run <area> <name>: start freelunch-<name>.service on APP_HOST, follow its output until it is done (a
+# heavy one may wait for the host's lock first) and say how it ended; dies when it failed
+unit_run() {
+  local area="$1" name="$2" state last result next
+  log "$area: starting $name on $APP_HOST"
+  host_ssh "\$S systemctl start --no-block freelunch-$name.service" || die "$area: can't start $name on $APP_HOST (has freelunch deploy been run since it was added?)"
+  host_ssh "u=freelunch-$name.service; \$S journalctl -u \$u -f -n 0 --no-pager --output=cat & jp=\$!; while case \"\$(\$S systemctl is-active \$u)\" in active|activating) true ;; *) false ;; esac; do sleep 1; done; sleep 1; kill \$jp 2>/dev/null; true" || true
+  state="$(job_state "$name")"
+  IFS='|' read -r last result next <<< "$state"
+  if [[ "$result" == ok ]]; then log "$area: $name finished: ok"; return 0; fi
+  die "$area: $name finished: ${result:-no result}"
+}
+
 # cmd_jobs [run <job>]: the jobs of every VM host with their schedule, last run, last result and next
 # run; "run <job>" starts one now and follows its output
 cmd_jobs() {
@@ -6618,14 +6837,8 @@ cmd_jobs() {
     [[ -n "$host" ]] || die "jobs: no job named $job (jobs: $(jq -r '[.[].jobs // {} | keys[]] | join(", ")' "$TMP/targets.json"))"
     app="$(jq -r --arg h "$host" --arg j "$job" '.[$h].jobs[$j].app' "$TMP/targets.json")"
     app_target jobs "$app" "$host"
-    log "jobs: starting $job on $APP_HOST"
-    host_ssh "\$S systemctl start --no-block freelunch-$job.service" || die "jobs: can't start $job on $APP_HOST (has freelunch deploy been run since the job was added?)"
-    # follow the output until the service is done; a heavy job may wait for the host's lock first
-    host_ssh "u=freelunch-$job.service; \$S journalctl -u \$u -f -n 0 --no-pager --output=cat & jp=\$!; while case \"\$(\$S systemctl is-active \$u)\" in active|activating) true ;; *) false ;; esac; do sleep 1; done; sleep 1; kill \$jp 2>/dev/null; true" || true
-    state="$(job_state "$job")"
-    IFS='|' read -r last result next <<< "$state"
-    if [[ "$result" == ok ]]; then log "jobs: $job finished: ok"; return 0; fi
-    die "jobs: $job finished: ${result:-no result}"
+    unit_run jobs "$job"
+    return 0
   fi
   for host in $(jq -r 'to_entries[] | select(.value.jobs // {} | length > 0) | .key' "$TMP/targets.json"); do
     echo "Jobs on $host"
@@ -6649,13 +6862,13 @@ cmd_jobs() {
 # on the host's lock, so this is a warning, with a time in the widest free gap for the later one.
 job_overlap_lines() {
   local host provider reboot rows="" name schedule minutes mins a sa b sb sug_job sug_sched
-  for host in $(jq -r 'to_entries[] | select(.value.jobs // {} | length > 0) | .key' "$TMP/targets.json"); do
+  for host in $(jq -r 'to_entries[] | select((.value.jobs // {} | length > 0) or ([.value.apps[] | select(.backup != null)] | length > 0)) | .key' "$TMP/targets.json"); do
     rows=""
     while IFS=$'\t' read -r name schedule minutes; do
       [[ -n "$name" ]] || continue
       mins="$(schedule_minutes "$schedule")"
       rows="$rows$name|$schedule|$minutes|$mins|$(awk -v s="$schedule" 'BEGIN { split(s, p, " "); print p[1] }')"$'\n'
-    done < <(jq -r --arg h "$host" '.[$h].jobs | to_entries[] | select(.value.heavy) | [.key, .value.schedule, .value.timeout_minutes] | @tsv' "$TMP/targets.json")
+    done < <(jq -r --arg h "$host" '((.[$h].jobs // {}) | to_entries[] | select(.value.heavy) | [.key, .value.schedule, .value.timeout_minutes]), (.[$h].apps | to_entries[] | select(.value.backup != null) | ["backup-" + .key, .value.backup.schedule, 60]) | @tsv' "$TMP/targets.json")
     # the host's own reboot for security updates, at reboot_time (04:00 unless the stack says otherwise)
     provider="$(jq -r --arg h "$host" '.[$h].provider // empty' "$TMP/targets.json")"
     reboot="04:00"
@@ -6720,6 +6933,11 @@ doctor_job_overlaps() {
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1 || return 0
+  if [[ "$(jq -r '[.[].apps[] | select(.backup != null)] | length' "$TMP/targets.json")" -gt 0 ]]; then
+    echo "Backups"
+    if [[ -n "${FREELUNCH_BACKUP_PASSPHRASE:-}" ]]; then check ok "FREELUNCH_BACKUP_PASSPHRASE is set"
+    else check fail "FREELUNCH_BACKUP_PASSPHRASE is not set: it encrypts the backups, and without it nobody can read them. Put it in $(rel "$(state_root)")/.env, and keep a copy somewhere safe"; fi
+  fi
   lines="$(job_overlap_lines)"
   [[ -n "$lines" ]] || return 0
   echo "Jobs"
@@ -11437,6 +11655,7 @@ main() {
     restart)              cmd_restart "$@" ;;
     shell)                cmd_shell "$@" ;;
     jobs)                 cmd_jobs "$@" ;;
+    backup)               cmd_backup "$@" ;;
     doctor)               cmd_doctor ;;
     journey)              resolve_state_refs; sync_start status; cmd_journey "$@" ;;
     check)                if [[ $# -gt 0 ]]; then resolve_state_refs; sync_start status; cmd_probe "$@"; else cmd_check; fi ;;
