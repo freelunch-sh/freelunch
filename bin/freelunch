@@ -1322,6 +1322,82 @@ check_lost_launch() {
   return 0
 }
 
+# tfvars_instance_value <tfvars> <instance> <attribute>: the value on its own line in the instance's block of
+# `instances`, e.g. ocpus of main. Nothing when the attribute is not on a line of its own there.
+tfvars_instance_value() {
+  awk -v k="$2" -v a="$3" '
+    $0 ~ "^[ \t]*" k "[ \t]*=[ \t]*\\{" { inb = 1; depth = 0 }
+    inb {
+      line = $0
+      if ($0 ~ "^[ \t]*" a "[ \t]*=") { v = $0; sub(/^[^=]*=[ \t]*/, "", v); sub(/[ \t]*(#.*)?$/, "", v); print v; exit }
+      depth += gsub(/\{/, "{", line) - gsub(/\}/, "}", line)
+      if (depth <= 0) exit
+    }' "$1"
+}
+
+# tfvars_instance_set <tfvars> <instance> <ocpus> <memory_in_gbs>: write both values in the instance's block
+tfvars_instance_set() {
+  awk -v k="$2" -v oc="$3" -v mem="$4" '
+    function put(v,   rest) {
+      match($0, /=[ \t]*/)
+      rest = substr($0, RSTART + RLENGTH); sub(/^[^ \t#]+/, v, rest)
+      $0 = substr($0, 1, RSTART + RLENGTH - 1) rest
+    }
+    $0 ~ "^[ \t]*" k "[ \t]*=[ \t]*\\{" { inb = 1; depth = 0 }
+    inb {
+      line = $0
+      if ($0 ~ "^[ \t]*ocpus[ \t]*=") put(oc)
+      else if ($0 ~ "^[ \t]*memory_in_gbs[ \t]*=") put(mem)
+      depth += gsub(/\{/, "{", line) - gsub(/\}/, "}", line)
+      if (depth <= 0) inb = 0
+    }
+    { print }' "$1" > "$1.new" && mv "$1.new" "$1"
+}
+
+# fallback_sizes <plan json> <tfvars>: "<instance> <ocpus> <memory>" for each instance the plan makes
+# at a size other than the one `instances` asks for
+fallback_sizes() {
+  local key oc mem want_oc want_mem
+  while IFS=$'\t' read -r key oc mem; do
+    [[ -n "$key" && -n "$oc" ]] || continue
+    want_oc="$(tfvars_instance_value "$2" "$key" ocpus)"; want_mem="$(tfvars_instance_value "$2" "$key" memory_in_gbs)"
+    # values that cannot be read are reported too: the plan's size is all that is known
+    if [[ -z "$want_oc" || -z "$want_mem" \
+       || "$(awk -v x="$want_oc" 'BEGIN { print x + 0 }')" != "$(awk -v x="$oc" 'BEGIN { print x + 0 }')" \
+       || "$(awk -v x="$want_mem" 'BEGIN { print x + 0 }')" != "$(awk -v x="$mem" 'BEGIN { print x + 0 }')" ]]; then
+      echo "$key $oc $mem"
+    fi
+  done < <(jq -r '.resource_changes[]? | select((.address | test("oci_core_instance\\.")) and (.change.actions | index("create")))
+    | [((.address | capture("\\[\"(?<k>[^\"]+)\"\\]") | .k)? // ""), (.change.after.shape_config[0].ocpus // ""), (.change.after.shape_config[0].memory_in_gbs // "")] | @tsv' "$1" 2>/dev/null)
+}
+
+# report_fallback_sizes <plan json> <tfvars>: after a wait settled for a smaller size, the two lines that
+# make the tfvars match, written for you when you say so
+report_fallback_sizes() {
+  local key oc mem answer rows row
+  rows="$(fallback_sizes "$1" "$2")"
+  # a loop over lines, not "while read": the answers to ask come from the terminal's stdin
+  while IFS= read -r row <&3; do
+    read -r key oc mem <<< "$row"
+    [[ -n "$key" ]] || continue
+    log "$p: the host $key was made with $oc OCPU(s) and $mem GB, less than instances asks for. To match it, put these two lines in the $key block of $(rel "$2"):"
+    printf '    ocpus          = %s\n    memory_in_gbs  = %s\n' "$oc" "$mem" >&2
+    log "$p: afterwards freelunch plan $p should say \"No changes\". Raising them later is an in-place resize."
+    if interactive; then
+      answer="$(ask "Write them into $(rel "$2") now? (y/n)" n)"
+      case "$answer" in
+        y|Y|yes)
+          if [[ -n "$(tfvars_instance_value "$2" "$key" ocpus)" && -n "$(tfvars_instance_value "$2" "$key" memory_in_gbs)" ]]; then
+            tfvars_instance_set "$2" "$key" "$oc" "$mem"
+            log "$p: set ocpus and memory_in_gbs of $key in $(rel "$2")"
+          else
+            log "$p: ocpus and memory_in_gbs are not on lines of their own in the $key block, so nothing was written"
+          fi ;;
+      esac
+    fi
+  done 3<<< "$rows"
+}
+
 # ads_in <plan json>: the availability domains the plan creates instances in, without the
 # tenancy prefix (Xyz:UK-LONDON-1-AD-2 is UK-LONDON-1-AD-2)
 ads_in() {
@@ -1628,7 +1704,9 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
   fi
   [[ $WAIT_ATTEMPT -eq 1 ]] || log "$p: applied on attempt $WAIT_ATTEMPT${WAIT_AD:+ in $WAIT_AD}${WAIT_SIZE:+ ($WAIT_SIZE)}"
   if [[ -n "$WAIT_SIZE" ]] && grep -qs '^[[:space:]]*capacity_fallbacks' "$(config_dir "$p")/terraform.tfvars"; then
-    log "$p: the host was made with $WAIT_SIZE, which may be less than instances asks for: set ocpus and memory_in_gbs in $(rel "$(config_dir "$p")/terraform.tfvars") to match, or the next plan resizes it"
+    if [[ -n "$lookup_json" && -f "$lookup_json" ]]; then
+      report_fallback_sizes "$lookup_json" "$(config_dir "$p")/terraform.tfvars"
+    fi
   fi
   end_wait "done" "got the host on attempt $WAIT_ATTEMPT${WAIT_AD:+ in $WAIT_AD}${WAIT_SIZE:+ ($WAIT_SIZE)}$(host_addresses "$p" | awk 'NF == 2 { s = s ", " $1 " at " $2 } END { if (s) print ":" substr(s, 2) }')"
 }

@@ -195,7 +195,7 @@ Read first: `retry_reason`, `transient_why`, the wait loop that calls them, `end
   (look for the VM, adopt or retry). Log "attempt N took longer than 15 minutes (the machine
   may have slept): stopped it and checked that no VM was made". Keep the existing rule that
   `tee` ignores SIGINT. Test with a `fake-tf` mode that sleeps past a 1-second limit
-- [ ] After a wait lands on a fallback size (gap 4), say exactly what to do: print the two
+- [x] After a wait lands on a fallback size (gap 4), say exactly what to do: print the two
   lines to put in `terraform.tfvars` (`ocpus`, `memory_in_gbs`) for that instance, and that
   `freelunch plan oci` afterwards should say "No changes"; then that raising them later is
   an in-place resize. With a terminal, offer to write them, and only do it when both values

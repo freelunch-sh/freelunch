@@ -12,6 +12,8 @@ release can change commands and the project layout.
 
 ### Added
 
+- **A wait that settles for a smaller size says exactly what to change.** It prints the `ocpus` and
+  `memory_in_gbs` lines for that instance, and at a terminal offers to write them into the tfvars.
 - **One attempt of a wait has a time limit.** `FREELUNCH_ATTEMPT_TIMEOUT` (default 900 seconds, 0 for none)
   stops an attempt that hangs, for example after the laptop slept, and looks for the VM it may have made.
 - **A lost answer no longer ends a wait for capacity.** When the request that makes the VM fails on the

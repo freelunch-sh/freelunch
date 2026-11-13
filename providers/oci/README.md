@@ -208,8 +208,10 @@ capacity_fallbacks = [
 After each full round of domains the wait steps down to the next size, and starts over with
 the size in `instances` after the last. A fallback never makes an instance bigger than
 `instances` says. The list is part of `terraform.tfvars`, so an approval (`freelunch ci wait`)
-covers it. Host made at a smaller size? Set `ocpus` and `memory_in_gbs` to match afterwards,
-or the next plan resizes it. Use fallbacks with one A1 host: if another instance was made
+covers it. Host made at a smaller size? The wait ends by printing the two lines to put in the
+instance's block (`ocpus`, `memory_in_gbs`) and, at a terminal, offers to write them when both
+sit on lines of their own there. Afterwards `freelunch plan oci` says "No changes"; raising
+them later is an in-place resize. Without them the next plan resizes the host. Use fallbacks with one A1 host: if another instance was made
 before the first ran out of room, a step to another size would change that one, and the wait
 stops, since no one approved that.
 

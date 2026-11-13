@@ -47,7 +47,7 @@ gets one round per run.
 
 ### 4. A changed size invalidates the approval, and the fallbacks don't help for CI
 
-**Status: partly fixed; the rest is section 3.** After a wait lands on a fallback size, the wait says to set `ocpus` and `memory_in_gbs`; it does not print the lines or offer to write them.
+**Status: fixed, except the approval.** After a wait lands on a fallback size it prints the two lines for the instance, says `plan` should then show no changes, and offers to write them at a terminal. A changed size still makes an approval stale, so `ci wait` needs a new one.
 
 - Changing tfvars makes the approval hash stale, so `ci wait` needs a new plan and approval
   each time.

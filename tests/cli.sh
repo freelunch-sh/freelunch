@@ -1817,7 +1817,28 @@ test_capacity_wait_names_the_size() {
   out="$(FAKE_APPLY="capacity ok" FAKE_PLAN="$plan" apply_in "$p" oci --wait-for-capacity 2>&1)"
   contains "$out" "got the host" || true
   contains "$out" "(1 OCPU, 6 GB)"
-  contains "$out" "set ocpus and memory_in_gbs"
+  contains "$out" "the host main was made with 1 OCPU(s) and 6 GB, less than instances asks for"
+  contains "$out" "$(printf '    ocpus          = 1\n    memory_in_gbs  = 6')"
+  contains "$out" "freelunch plan oci should say \"No changes\""
+  # no terminal: it only says so
+  equals "$(grep -c 'ocpus *= 2' "$p/.freelunch/oci/terraform.tfvars")" 1
+  # a terminal, and yes: both values are written in place
+  rm "$p/fake.log"*
+  out="$(FREELUNCH_INTERACTIVE=1 FAKE_APPLY="capacity ok" FAKE_PLAN="$plan" apply_in "$p" oci --wait-for-capacity <<< "y" 2>&1)"
+  contains "$out" "set ocpus and memory_in_gbs of main in .freelunch/oci/terraform.tfvars"
+  grep -qE '^    ocpus          = 1$' "$p/.freelunch/oci/terraform.tfvars"
+  grep -qE '^    memory_in_gbs  = 6$' "$p/.freelunch/oci/terraform.tfvars"
+  grep -qE '^    boot_volume_gb = 100$' "$p/.freelunch/oci/terraform.tfvars"
+  # the tfvars already match: nothing to say
+  rm "$p/fake.log"*
+  out="$(FAKE_APPLY="capacity ok" FAKE_PLAN="$plan" apply_in "$p" oci --wait-for-capacity 2>&1)"
+  lacks "$out" "less than instances asks for"
+  # values that are not on lines of their own are only printed
+  sed -i.bak -e '/^    ocpus /d' -e 's|^    memory_in_gbs .*|    ocpus = 2, memory_in_gbs = 12|' "$p/.freelunch/oci/terraform.tfvars"
+  rm "$p/fake.log"*
+  out="$(FREELUNCH_INTERACTIVE=1 FAKE_APPLY="capacity ok" FAKE_PLAN="$plan" apply_in "$p" oci --wait-for-capacity <<< "y" 2>&1)"
+  contains "$out" "ocpus and memory_in_gbs are not on lines of their own in the main block, so nothing was written"
+  contains "$(cat "$p/.freelunch/oci/terraform.tfvars")" "ocpus = 2, memory_in_gbs = 12"
 }
 
 # --detach waits in the background with its output in wait.log, and status shows it.
