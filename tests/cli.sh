@@ -5805,6 +5805,31 @@ test_upgrade_installs_and_pins() {
   contains "$out" "$p/bin/freelunch is a file of its own"
 }
 
+# A wait that is running reads the freelunch script as it goes, so upgrade does not replace it.
+test_upgrade_waits_for_a_running_wait() {
+  local p="$WORK/pin-upgrade-wait" copy out
+  copy="$(installed_copy v1.0.0)"
+  mkdir -p "$p/.freelunch/oci"
+  echo v1.0.0 > "$p/.freelunch/version"
+  printf 'state=waiting\npid=%s\n' "$$" > "$p/.freelunch/oci/wait.state"
+  out="$(versions_in "$p" "$copy/bin/freelunch" upgrade 2>&1)" && { echo "upgrade should have refused"; return 1; }
+  contains "$out" "upgrade: a wait for capacity is running for oci (pid $$), and replacing freelunch under it can break it. Stop it first (kill $$), or wait for it to end"
+  equals "$(cat "$p/.freelunch/version")" "v1.0.0"
+  # a wait that ended, or whose process is gone, does not stop it
+  printf 'state=stopped\npid=%s\n' "$$" > "$p/.freelunch/oci/wait.state"
+  versions_in "$p" "$copy/bin/freelunch" upgrade >/dev/null 2>&1
+  equals "$(cat "$p/.freelunch/version")" "v1.10.0"
+  echo v1.0.0 > "$p/.freelunch/version"
+  printf 'state=waiting\npid=999999\n' > "$p/.freelunch/oci/wait.state"
+  versions_in "$p" "$copy/bin/freelunch" upgrade >/dev/null 2>&1
+  equals "$(cat "$p/.freelunch/version")" "v1.10.0"
+  # --force goes on anyway
+  echo v1.0.0 > "$p/.freelunch/version"
+  printf 'state=waiting\npid=%s\n' "$$" > "$p/.freelunch/oci/wait.state"
+  versions_in "$p" "$copy/bin/freelunch" upgrade --force >/dev/null 2>&1
+  equals "$(cat "$p/.freelunch/version")" "v1.10.0"
+}
+
 # install.sh downloads the latest release and hands over to its upgrade, outside any project.
 test_install_script() {
   local p="$WORK/install" out

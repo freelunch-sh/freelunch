@@ -93,7 +93,8 @@ Project:
                           doctor. --ci also sets up the state store, the workflow and the
                           secret, so a push deploys. With no terminal, flags answer
   version                 This freelunch's version, and the one the project pins
-  upgrade [version]       Install a release (the latest by default, or v1.2.0, main or a commit)
+  upgrade [version] [--force]
+                          Install a release (the latest by default, or v1.2.0, main or a commit)
                           as the freelunch on this machine, and pin the project to it
   trust <host>            Pin a host's SSH keys in known_hosts from its serial console, so the
                           first deploy talks to the right machine (OCI hosts)
@@ -368,9 +369,26 @@ cmd_version() {
 # upgrade [version]: install that version (the latest release by default) as the freelunch
 # this machine runs, and in a project pin it there too
 cmd_upgrade() {
-  local ref="${1:-}" home bin old t missing=()
-  [[ $# -le 1 ]] || die "upgrade takes one version at most"
+  local ref="" force=0 home bin old t missing=() f stack pid
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force) force=1 ;;
+      -*) die "upgrade: unknown option $1" ;;
+      *) [[ -z "$ref" ]] || die "upgrade takes one version at most"; ref="$1" ;;
+    esac
+    shift
+  done
   command -v git >/dev/null || die "upgrade needs git"
+  # bash reads a script while it runs, so replacing freelunch under a wait can break it
+  if [[ -n "$PROJECT" && $force -eq 0 ]]; then
+    for f in "$PROJECT"/*/wait.state; do
+      [[ -f "$f" && "$(sed -n 's/^state=//p' "$f")" == "waiting" ]] || continue
+      pid="$(sed -n 's/^pid=//p' "$f")"
+      [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || continue
+      stack="$(basename "$(dirname "$f")")"
+      die "upgrade: a wait for capacity is running for $stack (pid $pid), and replacing freelunch under it can break it. Stop it first (kill $pid), or wait for it to end. --force upgrades anyway"
+    done
+  fi
   case "$ref" in
     "")   ref="$(latest_version)" ;;
     main) ref="$(main_commit)" ;;

@@ -95,7 +95,7 @@ console page is broken.
 
 ### 9. The submodule has no safe way to update during a wait
 
-**Status: open, section 3.** `upgrade` does not look for a running wait.
+**Status: fixed.** `freelunch upgrade` refuses while a wait for capacity is running in the project (`--force` overrides), and `docs/ci.md` says the same for submodules.
 
 Bash reads a script while it runs, so updating `freelunch/` under a live wait can break it.
 

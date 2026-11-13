@@ -180,6 +180,10 @@ listed on the GitHub Marketplace as *Run freelunch*), which sets up the same tof
 terraform version you have, unpacks the bundle and runs the command with the freelunch
 version in `.freelunch/version`. After `freelunch upgrade`, the workflows run the new version
 without an edit.
+`freelunch upgrade` refuses while a wait for capacity is running in the project (`--force`
+upgrades anyway): bash reads a script as it runs, so replacing freelunch under a wait can break
+it. This also holds for a project that keeps freelunch as a submodule: do not update the
+submodule while a wait runs on that machine, stop the wait first.
 The pin is a release tag, or a full commit for a version that has no release yet
 (`curl ... install.sh | bash -s <commit>`, or `freelunch upgrade <commit>`); the workflows
 never run a moving branch such as `main`, so a CI run is the code you tested. Commit and push both files.

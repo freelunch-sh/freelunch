@@ -207,7 +207,7 @@ Read first: `retry_reason`, `transient_why`, the wait loop that calls them, `end
 - [x] The "Pay As You Go is the usual fix" hint also says: if the upgrade page fails, open a
   request with Oracle support, and that the upgrade places a temporary card authorization
   (state no amount unless Oracle's own page gives one; link it) (gap 8)
-- [ ] `freelunch upgrade` refuses while `wait_pid` finds a running wait in this project:
+- [x] `freelunch upgrade` refuses while `wait_pid` finds a running wait in this project:
   "upgrade: a wait for capacity is running for <stack> (pid N), and replacing freelunch
   under it can break it. Stop it first (kill N), or wait for it to end". `--force` skips it.
   Add the same warning for submodule users to the upgrade notes in `docs/ci.md` (gap 9)

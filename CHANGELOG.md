@@ -12,6 +12,8 @@ release can change commands and the project layout.
 
 ### Added
 
+- **`freelunch upgrade` leaves a running wait alone.** It refuses while a wait for capacity runs in the project
+  (`--force` overrides), because replacing the script under a running wait can break it.
 - **The Pay As You Go hint says more.** After a long wait the hint names the card authorization the upgrade makes
   (from Oracle's own page) and to open a request with Oracle support when the upgrade page fails.
 - **`doctor` warns about a wait on a session token.** A wait that is running or approved for CI ends when the
