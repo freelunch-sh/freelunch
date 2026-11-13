@@ -49,6 +49,12 @@ cat > "$WORK/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 echo "docker $* @ $(basename "$PWD")" >> "$FAKE_LOG"
 for a; do last="$a"; done
+# docker compose --project-directory <dir> config --services: the app's name, or FAKE_SERVICES
+if [[ "$1 ${2:-}" == "compose --project-directory" && " $* " == *" config --services "* ]]; then
+  if [[ -n "${FAKE_SERVICES:-}" ]]; then tr ' ' '\n' <<< "$FAKE_SERVICES"; else basename "$3"; fi; exit 0
+fi
+# docker compose ... exec: FAKE_EXEC_RC is its exit code
+if [[ "$1 ${2:-}" == "compose --project-directory" && " $* " == *" exec "* ]]; then exit "${FAKE_EXEC_RC:-0}"; fi
 # docker compose --project-directory <dir> logs ...: a line named after the app's folder
 if [[ "$1 ${2:-}" == "compose --project-directory" && " $* " == *" logs "* ]]; then echo "log line from $(basename "$3")"; exit 0; fi
 case "$1 ${2:-}" in
@@ -3087,6 +3093,8 @@ test_status_and_doctor_ask_northflank() {
   contains "$out" "logs: --follow works on VM hosts; on Northflank use its dashboard"
   if out="$(nf_in "$p" restart api 2>&1)"; then echo "restart should have failed on Northflank"; return 1; fi
   contains "$out" "restart: api runs on northflank-main, a container platform (northflank); restart it with that provider's own tools"
+  if out="$(nf_in "$p" shell api -- ls 2>&1)"; then echo "shell should have failed on Northflank"; return 1; fi
+  contains "$out" "shell: api runs on northflank-main, a container platform (northflank); open a shell in it with that provider's own tools"
   contains "$(FAKE_NF_STOPPED=cloudflared nf_in "$p" status)" "$(printf 'Tunnels\n  northflank-main not checked without CLOUDFLARE_API_TOKEN')"
   out="$(TEST_NF_TOKEN='' nf_in "$p" status)"
   contains "$out" "  not asked without NORTHFLANK_API_TOKEN"
@@ -5945,6 +5953,32 @@ test_restart_restarts_and_waits_for_healthy() {
   grep -q 'docker compose logs --no-color --tail 50 @ api' "$p/fake.log"
   out="$(UP_CMD=restart up_in "$p" nothing 2>&1)" && { echo "restart should have failed"; return 1; }
   contains "$out" "restart: no host runs an app named nothing"
+}
+
+test_shell_runs_a_command_in_the_apps_service() {
+  local p="$WORK/vm-shell" out rc
+  up_project "$p" oci
+  FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1
+  : > "$p/fake.log"
+  out="$(UP_CMD=shell up_in "$p" api -- echo 'hello world' 2>&1)" || { echo "$out" >&2; return 1; }
+  grep -q "docker compose --project-directory .*/apps/api exec -T api 'echo' 'hello world'" "$p/fake.log"
+  # the command's exit code is the command's
+  rc=0; FAKE_EXEC_RC=3 UP_CMD=shell up_in "$p" api -- false >/dev/null 2>&1 || rc=$?
+  equals "$rc" 3
+  # one service with another name is the one; several need --service
+  : > "$p/fake.log"
+  FAKE_SERVICES=web UP_CMD=shell up_in "$p" api -- ls >/dev/null 2>&1
+  grep -q 'exec -T web ' "$p/fake.log"
+  out="$(FAKE_SERVICES="web worker" UP_CMD=shell up_in "$p" api -- ls 2>&1)" && { echo "shell should have failed"; return 1; }
+  contains "$out" "shell: api has several services (web, worker); choose one with --service"
+  FAKE_SERVICES="web worker" UP_CMD=shell up_in "$p" api --service worker -- ls >/dev/null 2>&1
+  grep -q 'exec -T worker ' "$p/fake.log"
+  # without a command: a terminal (ssh -t, no BatchMode) and sh
+  : > "$p/fake.log"
+  UP_CMD=shell up_in "$p" api >/dev/null 2>&1
+  grep -q '^ssh -t ' "$p/fake.log"
+  fails grep -q '^ssh -t .*BatchMode' "$p/fake.log"
+  grep -q 'exec api sh' "$p/fake.log"
 }
 
 test_volume_says_what_is_wrong() {

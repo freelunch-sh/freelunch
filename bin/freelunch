@@ -179,6 +179,9 @@ Infrastructure:
                           edge and why. Without a name: every path
   logs <app> [--lines n] [--follow] [--host h]
                           The last lines an app (or cloudflared) logged, on a VM host or Northflank
+  shell <app> [--service s] [--host h] [-- command...]
+                          Run a command in an app's container on its VM host, or open a shell in
+                          it. Returns the command's exit code
   restart <app> [--host h] Restart an app on its VM host and wait until it is healthy; if it is not,
                           the last 50 log lines say why
   doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in and
@@ -6097,6 +6100,48 @@ cmd_restart() {
   log "restart: $app is running on $APP_HOST"
 }
 
+# cmd_shell <app> [--service s] [--host h] [-- command...]: run a command in the app's container, or
+# open a shell in it. The service is the one named like the app, else the only one.
+cmd_shell() {
+  local app="" want="" service="" services n rc=0 provider cmd="" a opts=() o
+  local -a argv=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --host) [[ -n "${2:-}" ]] || die "shell: --host takes a host"; want="$2"; shift ;;
+      --service) [[ -n "${2:-}" ]] || die "shell: --service takes a service name"; service="$2"; shift ;;
+      --) shift; argv=("$@"); break ;;
+      -*) die "shell: unknown option $1" ;;
+      *) [[ -z "$app" ]] || die "shell: unexpected argument $1 (a command goes after --)"; app="$1" ;;
+    esac
+    shift
+  done
+  [[ -n "$app" ]] || die "usage: freelunch shell <app|cloudflared> [--service s] [--host h] [-- command...]"
+  app_target shell "$app" "$want"
+  if [[ "$APP_KIND" == platform ]]; then
+    provider="$(jq -r --arg h "$APP_HOST" '.[$h].provider // empty' "$TMP/targets.json")"
+    die "shell: $app runs on $APP_HOST, a container platform${provider:+ ($provider)}; open a shell in it with that provider's own tools"
+  fi
+  if [[ -z "$service" ]]; then
+    services="$(host_ssh "\$S docker compose --project-directory $APP_DIR config --services")" \
+      || die "shell: can't read the services of $app on $APP_HOST"
+    n="$(printf '%s\n' "$services" | grep -c . || true)"
+    if printf '%s\n' "$services" | grep -qx "$app"; then service="$app"
+    elif [[ "$n" -eq 1 ]]; then service="$services"
+    else die "shell: $app has $([[ "$n" -eq 0 ]] && echo no services || echo "several services ($(printf '%s\n' "$services" | paste -sd, - | sed 's/,/, /g'))"); choose one with --service"
+    fi
+  fi
+  [[ "$service" =~ ^[A-Za-z0-9_.-]+$ ]] || die "shell: '$service' is not a service name"
+  if [[ ${#argv[@]} -gt 0 ]]; then
+    for a in "${argv[@]}"; do cmd="$cmd $(shq "$a")"; done
+    host_ssh "\$S docker compose --project-directory $APP_DIR exec -T $service$cmd" || rc=$?
+    exit "$rc"
+  fi
+  # a terminal: the same options without BatchMode, which would refuse to ask for anything
+  for o in "${SSH_OPTS[@]}"; do [[ "$o" == BatchMode=yes ]] || opts+=("$o"); done
+  "$SSH" -t "${opts[@]}" "$APP_USER@$APP_ADDR" "S=''; [ \"\$(id -u)\" -eq 0 ] || S='sudo -n'; \$S docker compose --project-directory $APP_DIR exec $service sh" || rc=$?
+  exit "$rc"
+}
+
 # northflank_status <target>: each service in the target's project, and whether it runs
 northflank_status() {
   local host="$1" project expected code s status running seen=""
@@ -10789,6 +10834,7 @@ main() {
     status)               cmd_status ;;
     logs)                 cmd_logs "$@" ;;
     restart)              cmd_restart "$@" ;;
+    shell)                cmd_shell "$@" ;;
     doctor)               cmd_doctor ;;
     journey)              resolve_state_refs; sync_start status; cmd_journey "$@" ;;
     check)                if [[ $# -gt 0 ]]; then resolve_state_refs; sync_start status; cmd_probe "$@"; else cmd_check; fi ;;

@@ -153,7 +153,7 @@ whether a VM's disk is filling.
   with the last 50 log lines when the app stays unhealthy (the same output `up` in
   `remote_script` gives). On a platform: `engine_call <provider> restart` when the engine
   defines it, else die naming the provider's own way. Test: healthy, and `FAKE_UNHEALTHY`
-- [ ] `freelunch shell <app> [--service s] [-- command...]`: with a command, run it with
+- [x] `freelunch shell <app> [--service s] [-- command...]`: with a command, run it with
   `docker compose exec -T <service> <command>` and return its exit code; without one, open
   `sh` with a terminal (`ssh -t`, without `BatchMode`). The service defaults to the one
   named like the app, else the only service, else die listing the services. VM hosts only;

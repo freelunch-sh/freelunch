@@ -12,6 +12,8 @@ release can change commands and the project layout.
 
 ### Added
 
+- **`freelunch shell <app> [-- command]`.** Runs a command in an app's container on its VM host (and
+  returns its exit code), or opens a shell with a terminal. `--service` picks one when an app has several.
 - **`freelunch restart <app>`.** Restarts an app on its VM host and waits for it to be healthy, failing
   with the last 50 log lines when it is not. On a platform it says to use the provider's own tools.
 - **`freelunch logs` on a VM host.** `logs <app> [--lines n] [--follow] [--host h]` reads the app's
