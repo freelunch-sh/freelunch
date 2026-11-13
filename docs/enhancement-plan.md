@@ -200,11 +200,11 @@ Read first: `retry_reason`, `transient_why`, the wait loop that calls them, `end
   `freelunch plan oci` afterwards should say "No changes"; then that raising them later is
   an in-place resize. With a terminal, offer to write them, and only do it when both values
   sit on their own lines inside that instance's block; otherwise print. Test both paths
-- [ ] `doctor`: when a wait is running or approved for a stack whose `oci_auth` is a session
+- [x] `doctor`: when a wait is running or approved for a stack whose `oci_auth` is a session
   token, warn that the wait ends when the session does (it already knows the session's end),
   and name the fix: an API key profile (`oci setup bootstrap`). Check first whether a
   warning like this exists and extend it instead of adding a second (gap 6)
-- [ ] The "Pay As You Go is the usual fix" hint also says: if the upgrade page fails, open a
+- [x] The "Pay As You Go is the usual fix" hint also says: if the upgrade page fails, open a
   request with Oracle support, and that the upgrade places a temporary card authorization
   (state no amount unless Oracle's own page gives one; link it) (gap 8)
 - [ ] `freelunch upgrade` refuses while `wait_pid` finds a running wait in this project:

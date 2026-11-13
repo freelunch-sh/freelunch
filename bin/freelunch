@@ -1495,7 +1495,7 @@ nap_sleep() {
   # OCI hands A1 machines to Pay As You Go accounts far more readily than to a free trial. The
   # CLI can't tell which one this is, so it says so now and then.
   if [[ "$p" == "oci" && $((WAIT_ATTEMPT % 24)) -eq 12 ]]; then
-    log "$p: $((WAIT_ATTEMPT - 1)) attempts and still no A1 capacity. If this tenancy is still on the free trial, upgrading it to Pay As You Go (Console > Billing > Upgrade) is the usual fix: the Always Free resources stay free, and A1 capacity is far easier to get"
+    log "$p: $((WAIT_ATTEMPT - 1)) attempts and still no A1 capacity. If this tenancy is still on the free trial, upgrading it to Pay As You Go (Console > Billing > Upgrade) is the usual fix: the Always Free resources stay free, and A1 capacity is far easier to get. The upgrade authorizes your card for \$100 USD (or the local equivalent) at once, which Oracle reverses on its side; your bank decides how long that takes (https://docs.oracle.com/en-us/iaas/Content/Billing/Tasks/changingpaymentmethod.htm). If the upgrade page fails or stays \"in progress\", open a request with Oracle support"
   fi
   wait_state waiting "$why${WAIT_AD:+ in $WAIT_AD}" "$(($(date +%s) + pause))"
   log "$p: $why${WAIT_AD:+ in $WAIT_AD}; attempt $WAIT_ATTEMPT in ${pause}s (Ctrl-C stops waiting)"
@@ -7723,6 +7723,10 @@ doctor_oci() {
   # tenancy allows.
   [[ -z "$session" ]] || end="$(session_end "$profile")"
   [[ -z "$end" ]] || ends="; the session ends at $(fmt_time "$end"), in $(fmt_duration $((end > $(date +%s) ? end - $(date +%s) : 0)))"
+  # A wait that is running, or approved for CI, ends with the session.
+  if [[ -n "$session" ]] && { wait_pid oci >/dev/null || [[ -f "$(config_dir oci)/approved.json" ]]; }; then
+    check warn "a wait for capacity is running or approved for this stack, and a session token ends it when the session ends${end:+ (at $(fmt_time "$end"))}: sign in with an API key for a wait that lasts (oci setup bootstrap --profile-name $profile)"
+  fi
   if ! command -v oci >/dev/null; then
     # Without the CLI, only what the provider will read can be checked.
     if [[ -n "$session" ]]; then

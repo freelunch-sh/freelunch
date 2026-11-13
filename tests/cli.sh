@@ -2349,6 +2349,13 @@ test_doctor_checks_oci_sessions_and_works_without_the_oci_cli() {
   contains "$out" "  ok    the session of profile tradio is valid until 2026-10-24 10:00:00, and each run refreshes it; the session ends at "
   contains "$out" ", in 8h 0m"
   grep -q '^oci iam region-subscription list .*--profile tradio --region eu-frankfurt-1 --auth security_token$' "$p/fake.log"
+  lacks "$out" "a wait for capacity is running or approved"
+  # a wait approved for CI ends with the session: say so, and name the fix
+  echo '{"stack": "oci", "changes": []}' > "$p/.freelunch/oci/approved.json"
+  out="$(doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  warn  a wait for capacity is running or approved for this stack, and a session token ends it when the session ends (at "
+  contains "$out" "sign in with an API key for a wait that lasts (oci setup bootstrap --profile-name tradio)"
+  rm "$p/.freelunch/oci/approved.json"
   out="$(FAKE_SESSION_REFRESHES=0 doctor_in "$p" 2>&1 || true)"
   contains "$out" "  fail  the session of profile tradio has expired: oci session authenticate --profile-name tradio"
   # Without the OCI CLI: the token's expiry, and a warning.
@@ -3295,6 +3302,18 @@ test_capacity_looks_for_a_vm_whose_launch_answer_was_lost() {
   contains "$out" "The VM main exists (ocid1.instance.oc1..i1), but importing it into the state failed"
   contains "$out" "import -input=false"
   contains "$out" "'ocid1.instance.oc1..i1'"
+}
+
+# After a long run of failures the wait suggests the Pay As You Go upgrade, what it asks of the card
+# and what to do when the upgrade page fails.
+test_capacity_wait_suggests_the_upgrade_and_its_support_path() {
+  local p="$WORK/upgrade-hint" out
+  capacity_project "$p"
+  out="$(FAKE_APPLY="$(printf 'capacity %.0s' $(seq 1 12)) ok" apply_in "$p" oci --wait-for-capacity 2>&1)"
+  contains "$out" "upgrading it to Pay As You Go (Console > Billing > Upgrade) is the usual fix"
+  contains "$out" "The upgrade authorizes your card for \$100 USD (or the local equivalent) at once, which Oracle reverses on its side"
+  contains "$out" "https://docs.oracle.com/en-us/iaas/Content/Billing/Tasks/changingpaymentmethod.htm"
+  contains "$out" "open a request with Oracle support"
 }
 
 # One attempt has a time limit: an apply that hangs (a laptop that slept) is stopped, and the wait

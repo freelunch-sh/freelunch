@@ -12,6 +12,10 @@ release can change commands and the project layout.
 
 ### Added
 
+- **The Pay As You Go hint says more.** After a long wait the hint names the card authorization the upgrade makes
+  (from Oracle's own page) and to open a request with Oracle support when the upgrade page fails.
+- **`doctor` warns about a wait on a session token.** A wait that is running or approved for CI ends when the
+  OCI session does; the warning says when and names the API key fix.
 - **A wait that settles for a smaller size says exactly what to change.** It prints the `ocpus` and
   `memory_in_gbs` lines for that instance, and at a terminal offers to write them into the tfvars.
 - **One attempt of a wait has a time limit.** `FREELUNCH_ATTEMPT_TIMEOUT` (default 900 seconds, 0 for none)

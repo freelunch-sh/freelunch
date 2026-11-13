@@ -70,7 +70,7 @@ gets one round per run.
 
 ### 6. The OCI session expiry is easy to miss
 
-**Status: partly fixed; the rest is section 3.** A wait says when its session ends when it starts, ends with the reason, and `status` shows the end. `doctor` does not flag it.
+**Status: fixed.** A wait says when its session ends when it starts, ends with the reason, and `status` shows the end. `doctor` warns when a wait is running or approved for a stack that signs in with a session token, and names the API key fix.
 
 An 8-hour session token ends the wait with it. A config with an API key doesn't hit this.
 
@@ -85,7 +85,7 @@ always-on box, but no freelunch command sets that up.
 
 ### 8. No upgrade path from the CLI
 
-**Status: open, section 3.** The hint names the Console path only.
+**Status: fixed.** The hint now says what the upgrade asks of the card (Oracle's own page: a $100 USD authorization, reversed on Oracle's side, the bank decides how long that takes) and to open a request with Oracle support when the upgrade page fails.
 
 The OCI CLI can't upgrade a trial account to pay-as-you-go, and the web UI failed. The hint
 after a dozen attempts says upgrading is the usual fix, but not how to do it when the
