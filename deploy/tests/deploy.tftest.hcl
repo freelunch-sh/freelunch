@@ -206,6 +206,16 @@ run "a_hook_is_one_line" {
   expect_failures = [var.apps]
 }
 
+run "an_app_name_has_no_double_hyphen" {
+  command = plan
+
+  variables {
+    apps = { "my--api" = { host = "oci-main", compose = "compose.yaml" } }
+  }
+
+  expect_failures = [var.apps]
+}
+
 run "a_service_is_a_service_name" {
   command = plan
 

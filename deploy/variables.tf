@@ -69,6 +69,11 @@ variable "apps" {
   }
 
   validation {
+    condition     = alltrue([for name in keys(var.apps) : !strcontains(name, "--")])
+    error_message = "App names can't contain two hyphens in a row: on a shared host, <project>--<app> is how a project's apps are told apart."
+  }
+
+  validation {
     condition     = !contains(keys(var.apps), "cloudflared")
     error_message = "The app name cloudflared is reserved for the Cloudflare Tunnel connector."
   }
@@ -126,6 +131,12 @@ variable "project" {
     condition     = var.project == null ? true : can(regex("^[a-z0-9]([a-z0-9]|-[a-z0-9])*$", var.project))
     error_message = "project is lowercase letters, digits and single hyphens (no --)."
   }
+}
+
+variable "shared_headroom_mb" {
+  description = "Memory kept free on a host shared with other projects, in MB: a deploy that would reserve more than the host's memory minus this is refused."
+  type        = number
+  default     = 1024
 }
 
 variable "registries" {

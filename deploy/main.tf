@@ -98,8 +98,8 @@ locals {
   ])
   # On a host shared with other projects every service of an app has a memory limit in its Compose file
   # (deploy.resources.limits.memory or mem_limit), which is what the app reserves of the host.
-  shared_apps    = { for name, a in local.apps : name => a if try(var.hosts[a.host].shared, false) }
-  shared_compose = { for name, a in local.shared_apps : name => try(yamldecode(file(a.compose)), { services = {} }) if fileexists(a.compose) }
+  vm_apps        = { for name, a in local.apps : name => a if !contains(keys(local.platforms), a.host) }
+  shared_compose = { for name, a in local.vm_apps : name => try(yamldecode(file(a.compose)), { services = {} }) if fileexists(a.compose) }
   shared_service_mb = {
     for name, c in local.shared_compose : name => {
       for sname, s in try(c.services, {}) : sname => (
@@ -115,7 +115,7 @@ locals {
   }
   shared_memory_problems = sort([
     for name, m in local.shared_service_mb : "${name}: on ${local.apps[name].host}, which other projects share, every service needs a memory limit in its Compose file, as deploy.resources.limits.memory or mem_limit (for example 512m). Without one: ${join(", ", [for s, v in m : s if v == null])}"
-    if length(m) > 0 && anytrue([for v in values(m) : v == null])
+    if length(m) > 0 && anytrue([for v in values(m) : v == null]) && try(var.hosts[local.apps[name].host].shared, false)
   ])
 
   shared_host_problems = sort(flatten([

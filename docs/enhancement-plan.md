@@ -390,7 +390,7 @@ for capacity the account no longer has.
   (`deploy.resources.limits.memory` or `mem_limit`; `deploy/` already reads these for
   Northflank plans, reuse that local). Missing: an error naming the app and both spellings.
   `targets` carries each app's limit in MB
-- [ ] `app_target` (section 2) and `remote_script` use the tenant layout when the target is
+- [x] `app_target` (section 2) and `remote_script` use the tenant layout when the target is
   shared: folder `<project>--<app>`, network `freelunch-<project>`, connector folder
   `<project>--cloudflared`, job and backup unit names prefixed `freelunch-<project>--`.
   `REMOTE_STATUS` on a shared host lists only this project's folders. `volume`, `logs`,
@@ -398,11 +398,11 @@ for capacity the account no longer has.
   one fake host, an owner project and a tenant project both with an app named `api`,
   deployed in turn; both folders exist, neither deploy touches the other's files, each
   `status` shows only its own apps
-- [ ] The tenant registry: every deploy rewrites its project's `apps` and `jobs` files under
+- [x] The tenant registry: every deploy rewrites its project's `apps` and `jobs` files under
   `/opt/freelunch/tenants/` (the owner under `_owner`) in one step (`.new` then `mv`, like
   `put`). A project's `destroy` of a shared target removes its folders, volumes, units,
   network and registry folder, and nothing else. Tests
-- [ ] The room check, before anything is copied: read the host's memory total and every
+- [x] The room check, before anything is copied: read the host's memory total and every
   tenant's `apps` file over SSH; refuse when the sum of all limits plus this project's
   exceeds the total minus headroom (`shared_headroom_mb` in `apps.tfvars`, default 1024):
   "deploy: <host> has 12 GB; other projects reserve 9.5 GB and this one asks for 2 GB, which

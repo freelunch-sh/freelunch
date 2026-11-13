@@ -1064,6 +1064,11 @@ record_push() {
 
 # --- OCI sign-in ----------------------------------------------------------------------
 
+# tfvar_number <file> <name>: a number variable set on one line of a tfvars file
+tfvar_number() {
+  sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\([0-9][0-9]*\)[[:space:]]*\(#.*\)\{0,1\}$/\1/p" "$1" | head -1
+}
+
 tfvar() { # tfvar <file> <name>: a string variable set on one line of a tfvars file
   sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -1
 }
@@ -2298,13 +2303,19 @@ echo "#host|${disk:-|}|${mem:-|}|${load}"
 for f in /opt/freelunch/backup/*.env; do
   [ -e "$f" ] || continue
   b="$(basename "$f" .env)"
-  echo "#backup|$b|$(cat "/opt/freelunch/backup/$b.last" 2>/dev/null)|$(head -n 1 "/opt/freelunch/backup/$b.failed" 2>/dev/null | tr "|" " ")|$(date +%s)"
+  if [ -n "$ns" ]; then case "$b" in "$ns"*) ;; *) continue ;; esac; else case "$b" in *--*) continue ;; esac; fi
+  echo "#backup|${b#"$ns"}|$(cat "/opt/freelunch/backup/$b.last" 2>/dev/null)|$(head -n 1 "/opt/freelunch/backup/$b.failed" 2>/dev/null | tr "|" " ")|$(date +%s)"
 done
 for d in /opt/freelunch/apps/*/; do
   [ -f "$d/compose.yaml" ] || continue
   app="$(basename "$d")"
-  (cd "$d" && docker compose ps -a --format "{{.Service}}|{{.State}}|{{.Health}}") | sed "s/^/$app|/"
+  if [ -n "$ns" ]; then case "$app" in "$ns"*) ;; *) continue ;; esac; else case "$app" in *--*) continue ;; esac; fi
+  (cd "$d" && docker compose ps -a --format "{{.Service}}|{{.State}}|{{.Health}}") | sed "s/^/${app#"$ns"}|/"
 done'
+
+# remote_status_script <host>: REMOTE_STATUS with the project's prefix on that host (ns), which limits it to
+# this project's folders on a shared host and leaves other projects' alone on the owner's
+remote_status_script() { printf 'ns=%s\n%s\n' "$(shq "$(host_ns "$1")")" "$REMOTE_STATUS"; }
 
 # status_hosts: the hosts, or why there are none yet. Fails with 1 when no host stack is
 # configured or deployed, and with 2 when one is but has no host yet.
@@ -2390,7 +2401,7 @@ status_apps() {
       continue
     fi
     # shellcheck disable=SC2016 # expanded by the remote shell
-    if ! out="$(printf '%s\n' "$REMOTE_STATUS" | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' 2>/dev/null)"; then
+    if ! out="$(remote_status_script "$host" | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' 2>/dev/null)"; then
       echo "  can't reach $user@$address over SSH"
       continue
     fi
@@ -2501,6 +2512,8 @@ cmd_status() {
   status_hosts || found=$?
   # A platform is somewhere to deploy to, like a host that exists.
   if status_platforms; then found=0; fi
+  # A project that lives on a host another project made has no host stack of its own to list
+  if [[ $found -eq 1 && -n "$(shared_hosts)" ]]; then found=0; fi
   if [[ $found -eq 1 ]]; then
     echo "Nothing is deployed here yet."
     status_waits
@@ -3265,6 +3278,110 @@ graph_gate() {
   [[ -z "$bad" ]] || die "deploy: ${bad%; }. Fix it, or FREELUNCH_CHECK_NEEDS=0 to deploy anyway"
 }
 
+# --- shared hosts ----------------------------------------------------------------------
+# A host another project made holds this project as a tenant: its apps live in /opt/freelunch/apps/<project>--<app>
+# (Compose takes the folder name as the project name, so containers and volumes are namespaced with no flag), its
+# network is freelunch-<project>, its units and backups carry the same prefix. The owner keeps the plain layout.
+HOST_NS=""
+# host_ns <host>: "<project>--" on a shared host, nothing otherwise (from $TMP/targets.json)
+host_ns() { jq -r --arg h "$1" 'if .[$h].shared == true then "\(.[$h].project)--" else empty end' "$TMP/targets.json" 2>/dev/null || true; }
+
+# registry_dir: this project's folder in /opt/freelunch/tenants/ on the host: its name on a shared host, else _owner
+registry_dir() { local d="${HOST_NS%--}"; echo "${d:-_owner}"; }
+
+# remote_registry <host>: the part of the deploy script that tells the host who is on it: the apps (folder and
+# memory limit in MB, ? when unknown) and the jobs (name, the minutes of the week they start at, timeout in
+# minutes, heavy 0|1) of this project, one line each, replaced in one step. Plain text, so the host needs no jq.
+remote_registry() {
+  local host="$1" dir name mb sched timeout heavy
+  dir="$(registry_dir)"
+  echo "install -d -m 0755 /opt/freelunch/tenants/$dir"
+  echo "putf /opt/freelunch/tenants/$dir/apps 0644 <<'FREELUNCH_EOF'"
+  jq -r --arg h "$host" --arg ns "$HOST_NS" '.[$h].apps | to_entries[] | "\($ns)\(.key) \(.value.memory_mb // "?")"' "$TMP/targets.json" | b64
+  echo "FREELUNCH_EOF"
+  echo "putf /opt/freelunch/tenants/$dir/jobs 0644 <<'FREELUNCH_EOF'"
+  {
+    while IFS=$'\t' read -r name sched timeout heavy; do
+      [[ -n "$name" ]] || continue
+      echo "$HOST_NS$name $timeout $heavy $(schedule_minutes "$sched")"
+    done < <(jq -r --arg h "$host" '((.[$h].jobs // {}) | to_entries[] | [.key, .value.schedule, .value.timeout_minutes, (if .value.heavy then 1 else 0 end)]), (.[$h].apps | to_entries[] | select(.value.backup != null) | ["backup-" + .key, .value.backup.schedule, 60, 1]) | @tsv' "$TMP/targets.json")
+  } | b64
+  echo "FREELUNCH_EOF"
+}
+
+# mb_gb <MB>: gigabytes with one decimal
+mb_gb() { awk -v m="$1" 'BEGIN { printf "%.1f", m / 1024 }'; }
+
+# shared_room_script: what the room check runs on the host, as one line per fact
+shared_room_script() {
+  cat <<'SCRIPT'
+proc="${FREELUNCH_PROC:-/proc}"
+echo "#mem|$(awk '/^MemTotal:/ { printf "%d", $2 / 1024 }' "$proc/meminfo" 2>/dev/null)"
+echo "#disk|$(df -P / 2>/dev/null | awk 'NR == 2 { gsub("%", "", $5); print $5 }')"
+for d in /opt/freelunch/tenants/*/; do
+  [ -f "${d}apps" ] || continue
+  t="$(basename "$d")"
+  while read -r f mb; do [ -z "$f" ] || echo "#tenant|$t|$f|$mb"; done < "${d}apps"
+done
+SCRIPT
+}
+
+# shared_room_check <host> <dry run 0|1>: before anything is copied to a shared host, read its memory and what
+# every project reserved there, and refuse a deploy that leaves less than shared_headroom_mb free, or a disk more
+# than 85% full. The table of who reserves what is printed for a dry run. Owner apps without a limit count as
+# unknown, and are named.
+shared_room_check() {
+  local host="$1" dry="$2" address user out total disk headroom mine me others=0 unknown="" t folder mb
+  address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
+  user="$(jq -r --arg h "$host" '.[$h].user // empty' "$TMP/targets.json")"
+  HOST_NS="$(host_ns "$host")"
+  me="$(registry_dir)"
+  # a dry run says it would be refused; a deploy is
+  refuse() { if [[ "$dry" == 1 ]]; then log "would be refused: ${1#deploy: }"; else die "$1"; fi; }
+  mine="$(jq -r --arg h "$host" '[.[$h].apps[].memory_mb // 0] | add // 0' "$TMP/targets.json")"
+  if ! ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1; then
+    [[ "$dry" == 1 ]] || return 0
+    log "$host: shared with other projects; its key isn't pinned yet, so what they reserve isn't read (freelunch trust $host)"
+    return 0
+  fi
+  ssh_options yes
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  out="$(shared_room_script | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' 2>/dev/null)" || {
+    [[ "$dry" == 1 ]] && return 0
+    die "deploy: $host is shared with other projects, and what they reserve can't be read over SSH, so there is no telling whether this one fits"
+  }
+  total="$(sed -n 's/^#mem|//p' <<< "$out" | head -n1)"
+  disk="$(sed -n 's/^#disk|//p' <<< "$out" | head -n1)"
+  headroom="$(tfvar_number "$(state_root)/apps.tfvars" shared_headroom_mb)"; headroom="${headroom:-1024}"
+  while IFS='|' read -r _ t folder mb; do
+    [[ -n "$t" ]] || continue
+    [[ "$t" == "$me" ]] && continue
+    if [[ "$mb" =~ ^[0-9]+$ ]]; then others=$((others + mb)); else unknown="${unknown:+$unknown, }$folder"; fi
+  done < <(grep '^#tenant|' <<< "$out")
+  if [[ "$dry" == 1 ]]; then
+    {
+      echo "$host: memory reserved on the host (${total:-?} MB in all, $headroom MB kept free)"
+      printf '  %-14s %-24s %s\n' project app reserved
+      while IFS='|' read -r _ t folder mb; do
+        [[ -n "$t" ]] || continue
+        [[ "$t" == "$me" ]] && continue
+        printf '  %-14s %-24s %s\n' "$t" "$folder" "${mb//\?/unknown}"
+      done < <(grep '^#tenant|' <<< "$out")
+      jq -r --arg h "$host" --arg me "$me" '.[$h].apps | to_entries[] | "  \($me)\t\(.key)\t\(.value.memory_mb // "unknown")"' "$TMP/targets.json" | awk -F'\t' '{ printf "%-16s %-24s %s\n", $1, $2, $3 }'
+    } >&2
+  fi
+  if [[ -n "$unknown" ]]; then
+    log "$host: no memory limit is known for $unknown, which other projects run there, so they count as nothing here"
+  fi
+  if [[ "$total" =~ ^[0-9]+$ && $((others + mine + headroom)) -gt $total ]]; then
+    refuse "deploy: $host has $(mb_gb "$total") GB; other projects reserve $(mb_gb "$others") GB and this one asks for $(mb_gb "$mine") GB, which leaves less than the $(mb_gb "$headroom") GB kept free. Lower a limit, or use another target"
+  fi
+  if [[ "$disk" =~ ^[0-9]+$ && "$disk" -gt 85 ]]; then
+    refuse "deploy: the disk of $host is $disk% full, and other projects use it too. Free some space there before adding more (docker system df)"
+  fi
+}
+
+
 # --- backups ---------------------------------------------------------------------------
 # An app with `backup` in apps.tfvars is saved with restic (a container, no install on the host) to
 # a bucket freelunch knows, on a timer, and can be brought back with freelunch restore.
@@ -3306,24 +3423,25 @@ mounts+=(-v $(shq "$p:/paths$p:ro")); targets+=($(shq "/paths$p"))"; done
 # freelunch backup of $app: written by freelunch deploy, run by freelunch-backup-$app.timer
 set -uo pipefail
 app=$(shq "$app")
-dir=/opt/freelunch/apps/\$app
+folder=$(shq "$HOST_NS$app")
+dir=/opt/freelunch/apps/\$folder
 state=/opt/freelunch/backup
 image=$(restic_image)
 log="\$(mktemp)"
 trap 'rm -f "\$log"' EXIT
 fail() {
   echo "!! \$app: \$1" >&2
-  { echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) \$1"; tail -n 20 "\$log"; } > "\$state/\$app.failed"
+  { echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) \$1"; tail -n 20 "\$log"; } > "\$state/\$folder.failed"
   exit 1
 }
 exec > >(tee -a "\$log") 2>&1
 mounts=() targets=()
-for v in \$(docker volume ls -q --filter "label=com.docker.compose.project=\$app"); do
+for v in \$(docker volume ls -q --filter "label=com.docker.compose.project=\$folder"); do
   mp="\$(docker volume inspect --format '{{.Mountpoint}}' "\$v")" || fail "can't find the volume \$v"
   mounts+=(-v "\$mp:/data/\$v:ro"); targets+=("/data/\$v")
 done$paths
 [ \${#targets[@]} -gt 0 ] || fail "there is nothing to back up: \$app has no volumes on this host and no paths"
-restic() { docker run --rm --env-file "\$state/\$app.env" --hostname "\$app" "\${mounts[@]}" "\$image" "\$@"; }
+restic() { docker run --rm --env-file "\$state/\$folder.env" --hostname "\$app" "\${mounts[@]}" "\$image" "\$@"; }
 SCRIPT
   if [[ -n "$before" ]]; then
     cat <<SCRIPT
@@ -3343,8 +3461,8 @@ echo "--> \$app: backing up"
 restic cat config >/dev/null 2>&1 || restic init || fail "can't open or make the repository"
 restic backup "\${targets[@]}" || fail "restic backup failed"
 restic forget --prune --host "\$app" --keep-daily $daily --keep-weekly $weekly || fail "restic forget failed"
-date -u +%s > "\$state/\$app.last"
-rm -f "\$state/\$app.failed"
+date -u +%s > "\$state/\$folder.last"
+rm -f "\$state/\$folder.failed"
 echo "--> \$app: backed up"
 SCRIPT
 }
@@ -3352,16 +3470,16 @@ SCRIPT
 # backup_units <app> <schedule>: the wrapper the job list knows, the service and the timer, apart by %%%%
 backup_units() {
   local app="$1" schedule="$2"
-  printf '#!/bin/bash\nexec /opt/freelunch/bin/backup-%s\n' "$app"
+  printf '#!/bin/bash\nexec /opt/freelunch/bin/backup-%s\n' "$HOST_NS$app"
   echo "%%%%"
   cat <<UNIT
 [Unit]
-Description=freelunch backup of $app
+Description=freelunch backup of $HOST_NS$app
 
 [Service]
 Type=oneshot
 TimeoutStartSec=180m
-ExecStart=/usr/bin/flock /opt/freelunch/locks/heavy.lock /bin/bash /opt/freelunch/jobs/backup-$app.sh
+ExecStart=/usr/bin/flock /opt/freelunch/locks/heavy.lock /bin/bash /opt/freelunch/jobs/backup-$HOST_NS$app.sh
 UNIT
   echo "%%%%"
   cat <<UNIT
@@ -3395,10 +3513,10 @@ remote_backups() {
     if [[ "$redact" == 1 ]]; then
       echo "# backup of $app: $schedule, restic $(restic_image | cut -c1-40)..., to $(backup_repository "$app")"
     fi
-    echo "putf /opt/freelunch/bin/backup-$app 0700 <<'FREELUNCH_EOF'"
+    echo "putf /opt/freelunch/bin/backup-$HOST_NS$app 0700 <<'FREELUNCH_EOF'"
     backup_script "$app" "$svc" "$before" "$daily" "$weekly" ${paths[@]+"${paths[@]}"} | b64
     echo "FREELUNCH_EOF"
-    echo "putf /opt/freelunch/backup/$app.env 0600 <<'FREELUNCH_EOF'"
+    echo "putf /opt/freelunch/backup/$HOST_NS$app.env 0600 <<'FREELUNCH_EOF'"
     if [[ "$redact" == 1 ]]; then
       echo "<restic repository, password and the bucket's keys, redacted>"
     else
@@ -3410,13 +3528,13 @@ remote_backups() {
     fi
     echo "FREELUNCH_EOF"
     files="$(backup_units "$app" "$schedule")"
-    echo "putf /opt/freelunch/jobs/backup-$app.sh 0750 <<'FREELUNCH_EOF'"
+    echo "putf /opt/freelunch/jobs/backup-$HOST_NS$app.sh 0750 <<'FREELUNCH_EOF'"
     awk '/^%%%%$/ { exit } { print }' <<< "$files" | b64
     echo "FREELUNCH_EOF"
-    echo "putf /etc/systemd/system/freelunch-backup-$app.service 0644 <<'FREELUNCH_EOF'"
+    echo "putf /etc/systemd/system/freelunch-backup-$HOST_NS$app.service 0644 <<'FREELUNCH_EOF'"
     awk '/^%%%%$/ { n++; next } n == 1' <<< "$files" | b64
     echo "FREELUNCH_EOF"
-    echo "putf /etc/systemd/system/freelunch-backup-$app.timer 0644 <<'FREELUNCH_EOF'"
+    echo "putf /etc/systemd/system/freelunch-backup-$HOST_NS$app.timer 0644 <<'FREELUNCH_EOF'"
     awk '/^%%%%$/ { n++; next } n == 2' <<< "$files" | b64
     echo "FREELUNCH_EOF"
   done
@@ -3479,7 +3597,7 @@ job_unit_files() {
 #!/bin/bash
 # freelunch job $job: $schedule, in $app
 set -euo pipefail
-dir=/opt/freelunch/apps/$app
+dir=/opt/freelunch/apps/$HOST_NS$app
 svc=$(shq "$service")
 if [ -z "\$svc" ]; then
   list="\$(docker compose --project-directory "\$dir" config --services)"
@@ -3525,23 +3643,23 @@ remote_jobs() {
       echo 'install -d -m 0750 /opt/freelunch/jobs'
       install_jobs_dir=1
     fi
-    kept="$kept $job"
-    files="$(job_unit_files "$job" "$app" "$command" "$schedule" "$service" "$([[ "$heavy" == true ]] && echo 1 || echo 0)" "$minutes")"
+    kept="$kept $HOST_NS$job"
+    files="$(job_unit_files "$HOST_NS$job" "$app" "$command" "$schedule" "$service" "$([[ "$heavy" == true ]] && echo 1 || echo 0)" "$minutes")"
     if [[ "$redact" == 1 ]]; then
       echo "# job $job: $schedule (OnCalendar=$(schedule_oncalendar "$schedule")), $command in $app$([[ "$heavy" == true ]] && echo ', heavy: one at a time on the host')"
     fi
-    echo "putf /opt/freelunch/jobs/$job.sh 0750 <<'FREELUNCH_EOF'"
+    echo "putf /opt/freelunch/jobs/$HOST_NS$job.sh 0750 <<'FREELUNCH_EOF'"
     awk 'BEGIN { n = 0 } /^%%%%$/ { n++; exit } { print }' <<< "$files" | b64
     echo "FREELUNCH_EOF"
-    echo "putf /etc/systemd/system/freelunch-$job.service 0644 <<'FREELUNCH_EOF'"
+    echo "putf /etc/systemd/system/freelunch-$HOST_NS$job.service 0644 <<'FREELUNCH_EOF'"
     awk '/^%%%%$/ { n++; next } n == 1' <<< "$files" | b64
     echo "FREELUNCH_EOF"
-    echo "putf /etc/systemd/system/freelunch-$job.timer 0644 <<'FREELUNCH_EOF'"
+    echo "putf /etc/systemd/system/freelunch-$HOST_NS$job.timer 0644 <<'FREELUNCH_EOF'"
     awk '/^%%%%$/ { n++; next } n == 2' <<< "$files" | b64
     echo "FREELUNCH_EOF"
   done < <(jq -r --arg h "$host" '(.[$h].jobs // {}) | to_entries[] | [.key, .value.app, .value.command, .value.schedule, (.value.service // ""), (.value.heavy | tostring), (.value.timeout_minutes | tostring)] | join("\u001f")' "$TMP/targets.json")
   for app in $(backup_apps "$host"); do
-    kept="$kept backup-$app"
+    kept="$kept backup-$HOST_NS$app"
     install_jobs_dir=1
   done
   if [[ $install_jobs_dir -eq 1 ]]; then
@@ -3552,7 +3670,7 @@ remote_jobs() {
     done
   fi
   # a job that left apps.tfvars loses its timer; only on a host that has had jobs
-  echo "if [ -d /opt/freelunch/jobs ]; then drop_jobs $(shq "${kept# }"); fi"
+  echo "if [ -d /opt/freelunch/jobs ]; then drop_jobs $(shq "$HOST_NS") $(shq "${kept# }"); fi"
 }
 
 # remote_script <host> <redact>: the script deploy pipes to `sudo bash -s` on a host.
@@ -3560,6 +3678,7 @@ remote_jobs() {
 remote_script() {
   local host="$1" redact="$2" name compose env_file server username var token what needs_env service pre_deploy post_deploy
   local targets="$TMP/targets.json"
+  HOST_NS="$(host_ns "$host")"
 
   cat <<EOF
 # Everything runs inside main(), so bash reads the whole script before running
@@ -3567,6 +3686,7 @@ remote_script() {
 main() {
 set -euo pipefail
 apps=/opt/freelunch/apps
+ns=$(shq "$HOST_NS")
 locks=/opt/freelunch/locks
 timeout=${FREELUNCH_DEPLOY_TIMEOUT:-180}
 lock_wait=${FREELUNCH_LOCK_WAIT:-900}
@@ -3595,13 +3715,16 @@ putf() {
   mv "$1.new" "$1"
 }
 
-# drop_jobs <names kept>: remove the timer, service and script of every job that is not in the list
+# drop_jobs <prefix> <names kept>: remove the timer, service and script of every job of this project (the prefix
+# on a shared host, else the jobs without one) that is not in the list; other projects' jobs stay
 drop_jobs() {
-  local s n changed=0
+  local s n changed=0 own
   for s in /opt/freelunch/jobs/*.sh; do
     [ -e "$s" ] || continue
     n="$(basename "$s" .sh)"
-    case " $1 " in *" $n "*) continue ;; esac
+    own="${n#backup-}"
+    if [ -n "$1" ]; then case "$own" in "$1"*) ;; *) continue ;; esac; else case "$own" in *--*) continue ;; esac; fi
+    case " $2 " in *" $n "*) continue ;; esac
     systemctl disable --now "freelunch-$n.timer" >/dev/null 2>&1 || true
     rm -f "/etc/systemd/system/freelunch-$n.timer" "/etc/systemd/system/freelunch-$n.service" "$s"
     case "$n" in backup-*) rm -f "/opt/freelunch/bin/$n" "/opt/freelunch/backup/${n#backup-}".* ;; esac
@@ -3629,7 +3752,7 @@ hook_service() {
 up() {
   local svc
   echo "--> $1"
-  cd "$apps/$1"
+  cd "$apps/$ns$1"
   docker compose pull --quiet
   if [ -n "${3:-}" ]; then
     svc="$(hook_service "$1" "${2:-}")"
@@ -3667,8 +3790,9 @@ trap 'for r in ${registries[@]+"${registries[@]}"}; do docker logout "$r" >/dev/
 if command -v cloud-init >/dev/null 2>&1; then timeout 900 cloud-init status --wait >/dev/null 2>&1 || true; fi
 docker compose version >/dev/null 2>&1 || { echo "!! docker compose is not installed on this host" >&2; exit 1; }
 install -d -m 0750 "$apps"
-# apps that need each other on this host reach one another by name in this network
-docker network create freelunch >/dev/null 2>&1 || true
+# apps that need each other on this host reach one another by name in this network (a project that
+# shares the host has one of its own, freelunch-<project>)
+docker network create "freelunch${ns:+-${ns%--}}" >/dev/null 2>&1 || true
 EOF
 
   while IFS=$'\t' read -r server username var; do
@@ -3681,14 +3805,14 @@ EOF
   # Fields split at \x1f, which unlike a tab keeps an empty env_file in its place.
   while IFS=$'\x1f' read -r name compose env_file bucket database service pre_deploy post_deploy; do
     [[ -n "$name" ]] || continue
-    echo "put \"\$apps/$name/compose.yaml\" 0640 <<'FREELUNCH_EOF'"
+    echo "put \"\$apps/\${ns}$name/compose.yaml\" 0640 <<'FREELUNCH_EOF'"
     if [[ "$redact" == 1 ]]; then echo "<$compose>"; else b64 < "$compose"; fi
     echo "FREELUNCH_EOF"
     # The bucket's settings and the database's URL come first, so the env_file can override them.
     needs_env=""
     jq -e --arg a "$name" 'has($a)' "$TMP/app_env.json" >/dev/null && needs_env=1
     if [[ -n "$env_file$bucket$database$needs_env" ]]; then
-      echo "put \"\$apps/$name/.env\" 0600 <<'FREELUNCH_EOF'"
+      echo "put \"\$apps/\${ns}$name/.env\" 0600 <<'FREELUNCH_EOF'"
       if [[ "$redact" == 1 ]]; then
         what=""
         [[ -z "$bucket" ]] || what="the S3 settings of $bucket"
@@ -3705,16 +3829,17 @@ EOF
   done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // ""), (.value.database // ""), (.value.service // ""), (.value.pre_deploy // ""), (.value.post_deploy // "")] | join("\u001f")' "$targets")
 
   if [[ "$(jq -r --arg h "$host" '.[$h].tunnel' "$targets")" == "true" ]]; then
-    echo "put \"\$apps/cloudflared/compose.yaml\" 0640 <<'FREELUNCH_EOF'"
+    echo "put \"\$apps/\${ns}cloudflared/compose.yaml\" 0640 <<'FREELUNCH_EOF'"
     if [[ "$redact" == 1 ]]; then echo "<providers/cloudflare/apps/cloudflared/compose.yaml>"; else b64 < "$PROVIDERS_DIR/cloudflare/apps/cloudflared/compose.yaml"; fi
     echo "FREELUNCH_EOF"
-    echo "put \"\$apps/cloudflared/.env\" 0600 <<'FREELUNCH_EOF'"
+    echo "put \"\$apps/\${ns}cloudflared/.env\" 0600 <<'FREELUNCH_EOF'"
     if [[ "$redact" == 1 ]]; then echo "<TUNNEL_TOKEN, redacted>"; else printf 'TUNNEL_TOKEN=%s\n' "$(jq -r --arg h "$host" '.[$h]' "$TMP/tunnel_tokens.json")" | b64; fi
     echo "FREELUNCH_EOF"
     echo "up cloudflared"
   fi
 
   remote_jobs "$host" "$redact"
+  remote_registry "$host"
 
   cat <<'EOF'
 echo "--> removing unused images"
@@ -3754,6 +3879,7 @@ deploy_host() { # deploy_host <host> <dry run 0|1>
 
   if [[ "$dry_run" == 1 ]]; then
     log "$host: would run this on $user@$address (dry run)"
+    [[ "$(jq -r --arg h "$host" '.[$h].shared // false' "$TMP/targets.json")" != true ]] || shared_room_check "$host" 1
     remote_script "$host" 1
     return 0
   fi
@@ -3770,6 +3896,8 @@ deploy_host() { # deploy_host <host> <dry run 0|1>
     log "$host: first connection, trusted this host key without checking it (freelunch trust $host checks it first):"
     while IFS= read -r line; do echo "      $line" >&2; done <<< "$fp"
   fi
+  # a host other projects share: is there room for this one (the key is pinned by now)
+  [[ "$(jq -r --arg h "$host" '.[$h].shared // false' "$TMP/targets.json")" != true ]] || shared_room_check "$host" 0
   # Run as root: apps live in /opt/freelunch/apps, which cloud-init created as root.
   # shellcheck disable=SC2016 # expanded by the remote shell
   if ! remote_script "$host" 0 | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi'; then
@@ -4359,7 +4487,8 @@ host_ssh_info() {
 }
 
 # app_target <area> <app> [host]: the host an app runs on, as APP_HOST, APP_ADDR, APP_USER, APP_KIND
-# (vm or platform) and APP_DIR (the app's folder on a VM host). <area> is the word error messages
+# (vm or platform), APP_FOLDER (the app's folder name on a VM host: <project>--<app> on a shared host, else
+# the app's name), APP_NS (the prefix, if any) and APP_DIR (the folder's path on the host). <area> is the word error messages
 # start with (volume, logs, ...). A VM host's key has to be pinned; a platform has no address, so
 # the caller decides what a platform means for it.
 app_target() {
@@ -4371,9 +4500,11 @@ app_target() {
   if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   cmd_hybrid >/dev/null
   deploy_plan "$apps_file" "$tunnel_state" >/dev/null
-  APP_HOST="$want" APP_KIND=vm APP_ADDR="" APP_USER="" APP_DIR="/opt/freelunch/apps/$app"
+  APP_HOST="$want" APP_KIND=vm APP_ADDR="" APP_USER="" APP_NS="" APP_FOLDER="$app" APP_DIR="/opt/freelunch/apps/$app"
   [[ -n "$APP_HOST" ]] || APP_HOST="$(jq -r --arg a "$app" 'to_entries[] | select((.value.apps | has($a)) or (.value.tunnel and $a == "cloudflared")) | .key' "$TMP/targets.json" | head -n1)"
   [[ -n "$APP_HOST" ]] || die "$area: no host runs an app named $app (apps: $(jq -r '[.[].apps | keys[]] | unique | join(", ")' "$TMP/targets.json"))"
+  HOST_NS="$(host_ns "$APP_HOST")" APP_NS="$HOST_NS" APP_FOLDER="$HOST_NS$app"
+  APP_DIR="/opt/freelunch/apps/$APP_FOLDER"
   if jq -e --arg h "$APP_HOST" 'has($h)' "$TMP/targets.json" >/dev/null; then
     [[ "$(jq -r --arg h "$APP_HOST" '.[$h].kind' "$TMP/targets.json")" != platform ]] || { APP_KIND=platform; return 0; }
     APP_ADDR="$(jq -r --arg h "$APP_HOST" '.[$h].address // empty' "$TMP/targets.json")"
@@ -4399,7 +4530,7 @@ host_ssh() {
   "$SSH" "${SSH_OPTS[@]}" "$APP_USER@$APP_ADDR" "S=''; [ \"\$(id -u)\" -eq 0 ] || S='sudo -n'; $1"
 }
 
-# vol_list <app>: the names of the app's volumes on the host
+# vol_list <folder>: the names of the volumes of the app in that folder on the host
 vol_list() {
   host_ssh "\$S docker volume ls -q --filter label=com.docker.compose.project=$1"
 }
@@ -4407,7 +4538,7 @@ vol_list() {
 # vol_pull <app> <dir>: one <volume>.tar.gz in <dir> for each volume of the app
 vol_pull() {
   local app="$1" dir="$2" v mp n=0 vols
-  vols="$(vol_list "$app")" || die "volume: can't list the volumes of $app on $APP_HOST"
+  vols="$(vol_list "$APP_FOLDER")" || die "volume: can't list the volumes of $app on $APP_HOST"
   [[ -n "$vols" ]] || { log "volume: $app has no Docker volumes on $APP_HOST"; return 0; }
   mkdir -p "$dir"
   # VOL_STOP=1: a copy of a running app can be half-written, so a move stops the old one first
@@ -4433,7 +4564,7 @@ vol_push() {
   local app="$1" dir="$2" f v mp have n=0 compose
   compose="--project-directory $APP_DIR"
   compgen -G "$dir/*.tar.gz" >/dev/null || die "volume: no .tar.gz files in $(rel "$dir")"
-  have="$(vol_list "$app")" || die "volume: can't list the volumes of $app on $APP_HOST"
+  have="$(vol_list "$APP_FOLDER")" || die "volume: can't list the volumes of $app on $APP_HOST"
   for f in "$dir"/*.tar.gz; do
     v="$(basename "$f" .tar.gz)"
     grep -qxF "$v" <<< "$have" || die "volume: $APP_HOST has no volume $v for $app (it has: ${have:-none}). Deploy the app there first (freelunch deploy)"
@@ -4507,7 +4638,7 @@ up_copy_data() {
     # an app with a backup is backed up first, from the old host, before anything is stopped
     if jq -e --arg a "$app" '[.[].apps | select(has($a)) | .[$a].backup] | any(. != null)' "$TMP/targets.json" >/dev/null 2>&1; then
       app_target up "$app" "$from_host"
-      ( unit_run up "backup-$app" ) || log "up: no backup of $app was taken first; the copy below is what is kept"
+      ( unit_run up "backup-$APP_FOLDER" ) || log "up: no backup of $app was taken first; the copy below is what is kept"
     fi
     log "up: copying the data of $app from $from_host to $to_host (a copy stays in $(rel "$dir"))"
     VOL_STOP=1 vol_target "$app" "$from_host"
@@ -4523,6 +4654,7 @@ backup_fresh() {
   local app="$1" host="$2" sched interval address user out last now
   sched="$(jq -r --arg h "$host" --arg a "$app" '.[$h].apps[$a].backup.schedule // empty' "$TMP/targets.json")"
   [[ -n "$sched" ]] || return 1
+  HOST_NS="$(host_ns "$host")"
   schedule_parse "$sched"
   case "$SCHED_KIND" in hourly) interval=3600 ;; daily) interval=86400 ;; *) interval=604800 ;; esac
   address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
@@ -4531,7 +4663,7 @@ backup_fresh() {
   ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1 || return 1
   ssh_options yes
   # the backup folder is root's
-  out="$("$SSH" "${SSH_OPTS[@]}" "$user@$address" "S=''; [ \"\$(id -u)\" -eq 0 ] || S='sudo -n'; echo last=\$(\$S cat /opt/freelunch/backup/$app.last 2>/dev/null); echo now=\$(date +%s)" 2>/dev/null)" || return 1
+  out="$("$SSH" "${SSH_OPTS[@]}" "$user@$address" "S=''; [ \"\$(id -u)\" -eq 0 ] || S='sudo -n'; echo last=\$(\$S cat /opt/freelunch/backup/$HOST_NS$app.last 2>/dev/null); echo now=\$(date +%s)" 2>/dev/null)" || return 1
   last="$(sed -n 's/^last=//p' <<< "$out")"; now="$(sed -n 's/^now=//p' <<< "$out")"
   [[ "$last" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]] || return 1
   [[ $((now - last)) -lt $interval ]]
@@ -4549,7 +4681,7 @@ up_restore_data() {
     while IFS= read -r p; do [[ -z "$p" ]] || paths+=("$p"); done < <(jq -r --arg a "$app" '[.[].apps | select(has($a)) | .[$a].backup.paths[]?] | .[]' "$TMP/targets.json")
     rc=0; out="$(restore_script "$app" check "" 0 0 ${paths[@]+"${paths[@]}"} | restore_ssh)" || rc=$?
     [[ $rc -eq 0 && "$out" != *nonempty* ]] || continue
-    time="$(host_ssh "\$S docker run --rm --env-file /opt/freelunch/backup/$app.env $(restic_image) snapshots --json --host $app" 2>/dev/null | jq -r '.[-1].time // empty' 2>/dev/null || true)"
+    time="$(host_ssh "\$S docker run --rm --env-file /opt/freelunch/backup/$APP_FOLDER.env $(restic_image) snapshots --json --host $app" 2>/dev/null | jq -r '.[-1].time // empty' 2>/dev/null || true)"
     [[ -n "$time" ]] || continue
     if [[ "$doit" -eq 1 ]]; then
       restore_script "$app" restore latest 0 "${FREELUNCH_DEPLOY_TIMEOUT:-180}" ${paths[@]+"${paths[@]}"} | restore_ssh \
@@ -4617,7 +4749,7 @@ up_stop_cloudflared() {
   ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1 || return 1
   ssh_options yes
   # shellcheck disable=SC2016 # expanded by the remote shell
-  printf '%s\n' 'cd /opt/freelunch/apps/cloudflared 2>/dev/null && docker compose stop' \
+  printf '%s\n' "cd /opt/freelunch/apps/$(host_ns "$host")cloudflared 2>/dev/null && docker compose stop" \
     | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' >/dev/null 2>&1
 }
 
@@ -6887,14 +7019,14 @@ cmd_backup() {
     host="$(jq -r --arg a "$a" 'to_entries[] | select(.value.apps | has($a)) | .key' "$TMP/targets.json" | head -n1)"
     app_target backup "$a" "$host"
     if [[ "$sub" == list ]]; then
-      snapshots="$(host_ssh "\$S docker run --rm --env-file /opt/freelunch/backup/$a.env $(restic_image) snapshots --json --host $a")" \
+      snapshots="$(host_ssh "\$S docker run --rm --env-file /opt/freelunch/backup/$APP_FOLDER.env $(restic_image) snapshots --json --host $a")" \
         || die "backup: can't read the snapshots of $a on $APP_HOST (has freelunch deploy set the backup up?)"
       if [[ "$(jq 'length' <<< "$snapshots")" -eq 0 ]]; then echo "$a: no snapshots yet"; continue; fi
       echo "$a ($(backup_repository "$a" 2>/dev/null || echo "repository"))"
       jq -r '.[] | [.short_id, .time, (.summary.total_bytes_processed // 0)] | @tsv' <<< "$snapshots" \
         | awk -F'\t' '{ s = $3; u = "B"; if (s >= 1073741824) { s /= 1073741824; u = "GB" } else if (s >= 1048576) { s /= 1048576; u = "MB" } else if (s >= 1024) { s /= 1024; u = "KB" } printf "  %-10s %-26s %.1f %s\n", $1, $2, s, u }'
     else
-      unit_run backup "backup-$a"
+      unit_run backup "backup-$APP_FOLDER"
     fi
   done
 }
@@ -6910,12 +7042,13 @@ mounts+=(-v $(shq "$p:/paths$p")); mps+=($(shq "$p"))"; done
   cat <<SCRIPT
 set -uo pipefail
 app=$(shq "$app")
-dir=/opt/freelunch/apps/\$app
+folder=$(shq "$HOST_NS$app")
+dir=/opt/freelunch/apps/\$folder
 state=/opt/freelunch/backup
 image=$(restic_image)
-[ -f "\$state/\$app.env" ] || { echo "!! \$app has no backup settings on this host: run freelunch deploy for it here first" >&2; exit 4; }
+[ -f "\$state/\$folder.env" ] || { echo "!! \$app has no backup settings on this host: run freelunch deploy for it here first" >&2; exit 4; }
 mounts=() mps=()
-for v in \$(docker volume ls -q --filter "label=com.docker.compose.project=\$app"); do
+for v in \$(docker volume ls -q --filter "label=com.docker.compose.project=\$folder"); do
   mp="\$(docker volume inspect --format '{{.Mountpoint}}' "\$v")" || exit 1
   mounts+=(-v "\$mp:/data/\$v"); mps+=("\$mp")
 done$mountlines
@@ -6931,7 +7064,7 @@ SCRIPT
     return 0
   fi
   cat <<SCRIPT
-restic() { docker run --rm --env-file "\$state/\$app.env" --hostname "\$app" "\${mounts[@]}" "\$image" "\$@"; }
+restic() { docker run --rm --env-file "\$state/\$folder.env" --hostname "\$app" "\${mounts[@]}" "\$image" "\$@"; }
 echo "--> \$app: stopping"
 docker compose --project-directory "\$dir" stop || true
 if [ $overwrite -eq 1 ]; then
@@ -7037,7 +7170,7 @@ cmd_jobs() {
     [[ -n "$host" ]] || die "jobs: no job named $job (jobs: $(jq -r '[.[].jobs // {} | keys[]] | join(", ")' "$TMP/targets.json"))"
     app="$(jq -r --arg h "$host" --arg j "$job" '.[$h].jobs[$j].app' "$TMP/targets.json")"
     app_target jobs "$app" "$host"
-    unit_run jobs "$job"
+    unit_run jobs "$APP_NS$job"
     return 0
   fi
   for host in $(jq -r 'to_entries[] | select(.value.jobs // {} | length > 0) | .key' "$TMP/targets.json"); do
@@ -7050,7 +7183,7 @@ cmd_jobs() {
     app_target jobs "$(jq -r --arg h "$host" '.[$h].jobs | to_entries[0].value.app' "$TMP/targets.json")" "$host"
     while IFS=$'\t' read -r name app schedule heavy; do
       [[ -n "$name" ]] || continue
-      state="$(job_state "$name")"
+      state="$(job_state "$APP_NS$name")"
       IFS='|' read -r last result next <<< "$state"
       printf '  %-16s %-18s last: %s%s, next: %s%s\n' "$name" "$schedule" "$last" "${result:+ ($result)}" "$next" "$([[ "$heavy" == true ]] && echo ', heavy')"
     done < <(jq -r --arg h "$host" '.[$h].jobs | to_entries[] | [.key, .value.app, .value.schedule, (.value.heavy | tostring)] | @tsv' "$TMP/targets.json")
@@ -9341,7 +9474,7 @@ probe_hosts_and_apps() {
     reach=null; why=""; out=""
     if [[ -z "$address" ]]; then why="it has no address"
     elif ! ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1; then why="its host key isn't pinned yet (freelunch trust $host)"
-    elif ! out="$(printf '%s\n' "$REMOTE_STATUS" | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' 2>/dev/null)"; then
+    elif ! out="$(remote_status_script "$host" | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' 2>/dev/null)"; then
       reach=false; why="can't reach $user@$address over SSH"
     else reach=true; fi
     if [[ "$reach" == true ]]; then

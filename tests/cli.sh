@@ -109,7 +109,9 @@ case "$1 ${2:-}" in
   "compose config") echo "example/$(basename "$PWD"):1.0" ;;
   # One container per app, stopped when the app is in FAKE_STOPPED.
   "compose ps")
-    if [[ " ${FAKE_STOPPED:-} " == *" $(basename "$PWD") "* ]]; then echo "$(basename "$PWD")|exited|"; else echo "$(basename "$PWD")|running|healthy"; fi ;;
+    # the service is the app's name: a folder <project>--<app> on a shared host holds the service <app>
+    svc="$(basename "$PWD")"; svc="${svc##*--}"
+    if [[ " ${FAKE_STOPPED:-} " == *" $(basename "$PWD") "* ]]; then echo "$svc|exited|"; else echo "$svc|running|healthy"; fi ;;
   # volumes live in $FAKE_ROOT/volumes/<name>/_data, labelled by the app: <app>_<name>
   "volume ls") app="${last#label=com.docker.compose.project=}"; ls "$FAKE_ROOT/volumes" 2>/dev/null | grep "^${app}_" || true ;;
   "volume inspect") echo "$FAKE_ROOT/volumes/$last/_data" ;;
@@ -2546,6 +2548,126 @@ TFVARS
   sed -n "$(grep -n '^shared_hosts() {' "$CLI" | cut -d: -f1),/^}/p" "$CLI" > "$p/fn.sh"
   out="$(cd "$p" && bash -c 'state_root() { echo "$PWD/.freelunch"; }; . ./fn.sh; shared_hosts')"
   equals "$out" "$(printf 'oci-big\ngcp-small')"
+}
+
+# shared_in <dir> <host dir> <command> [args]: a command in a project, against a fake host folder two projects share
+shared_in() {
+  local dir="$1" root="$2"; shift 2
+  (cd "$dir" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$root" GHCR_TOKEN=x \
+    FAKE_HOST_KEY="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")" "$CLI" "$@")
+}
+
+# A second project on a host another project made: its apps live under <project>--<app>, in a network of its own,
+# next to the owner's, and neither deploy nor status touches the other's.
+test_two_projects_share_a_host() {
+  local owner="$WORK/shared-owner" tenant="$WORK/shared-tenant" root="$WORK/shared-root" out
+  new_project "$owner"
+  new_project "$tenant"
+  rm -f "$tenant/.freelunch/oci/terraform.tfstate"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:2.0.0\n    mem_limit: 512m\n' > "$tenant/compose.yaml"
+  cat > "$tenant/.freelunch/apps.tfvars" <<'TFVARS'
+project = "shopb"
+hosts = {
+  oci-main = { address = "203.0.113.10", shared = true, arch = "arm64" }
+}
+apps = {
+  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env" }
+}
+registries = {
+  "ghcr.io" = { username = "me", password_env = "GHCR_TOKEN" }
+}
+TFVARS
+  mkdir -p "$root"
+  shared_in "$owner" "$root" deploy >/dev/null 2>&1 || { echo "the owner's deploy failed"; return 1; }
+  exists "$root/apps/api/compose.yaml"
+  contains "$(cat "$root/apps/api/compose.yaml")" "api:1.0.0"
+  : > "$tenant/fake.log"
+  out="$(shared_in "$tenant" "$root" deploy 2>&1)" || { echo "$out" >&2; return 1; }
+  # both folders are there, and the owner's files are as they were
+  exists "$root/apps/shopb--api/compose.yaml"
+  contains "$(cat "$root/apps/shopb--api/compose.yaml")" "api:2.0.0"
+  contains "$(cat "$root/apps/api/compose.yaml")" "api:1.0.0"
+  # the tenant's app runs from its own folder, in a network of its own
+  grep -q 'docker compose up .* @ shopb--api$' "$tenant/fake.log"
+  grep -q 'docker network create freelunch-shopb' "$tenant/fake.log"
+  fails grep -q ' @ api$' "$tenant/fake.log"
+  # each status shows only its own apps
+  out="$(shared_in "$tenant" "$root" status 2>&1)"
+  contains "$out" "Apps on oci-main"
+  contains "$out" "  api                  running, healthy"
+  lacks "$out" "shopb--"
+  equals "$(grep -c '^  api ' <<< "$out")" 1
+  out="$(shared_in "$owner" "$root" status 2>&1)"
+  equals "$(grep -c '^  api ' <<< "$out")" 1
+  lacks "$out" "shopb"
+  # jobs carry the project's prefix, and another project's deploy leaves them alone
+  printf 'jobs = {\n  report = { app = "api", command = "bin/report", schedule = "daily 03:30" }\n}\n' >> "$tenant/.freelunch/apps.tfvars"
+  printf 'jobs = {\n  report = { app = "api", command = "bin/mine", schedule = "daily 05:00" }\n}\n' >> "$owner/.freelunch/apps.tfvars"
+  shared_in "$tenant" "$root" deploy >/dev/null 2>&1
+  shared_in "$owner" "$root" deploy >/dev/null 2>&1
+  exists "$root/systemd/freelunch-shopb--report.timer"
+  exists "$root/systemd/freelunch-report.timer"
+  contains "$(cat "$root/jobs/shopb--report.sh")" "dir=/opt/freelunch/apps/shopb--api"
+  contains "$(cat "$root/jobs/report.sh")" "dir=/opt/freelunch/apps/api"
+  sed -i.bak '/^jobs = {/,/^}/d' "$owner/.freelunch/apps.tfvars"
+  shared_in "$owner" "$root" deploy >/dev/null 2>&1
+  absent "$root/systemd/freelunch-report.timer"
+  exists "$root/systemd/freelunch-shopb--report.timer"
+  exists "$root/jobs/shopb--report.sh"
+  # the host knows who is on it: apps with their limits, and jobs with their start minutes
+  equals "$(cat "$root/tenants/_owner/apps")" "api ?"
+  equals "$(cat "$root/tenants/shopb/apps")" "shopb--api 512"
+  equals "$(cut -d' ' -f1-3 "$root/tenants/shopb/jobs")" "shopb--report 60 0"
+  equals "$(cat "$root/tenants/_owner/jobs")" ""
+}
+
+# A deploy to a shared host is refused when the projects there, and this one, would leave less than the headroom
+# of its memory free, or when its disk is nearly full; the dry run says who reserves what.
+test_a_shared_host_has_room_for_the_deploy() {
+  local owner="$WORK/room-owner" tenant="$WORK/room-tenant" root="$WORK/room-root" out
+  new_project "$owner"
+  new_project "$tenant"
+  rm -f "$tenant/.freelunch/oci/terraform.tfstate"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:2.0.0\n    mem_limit: 2g\n' > "$tenant/compose.yaml"
+  cat > "$tenant/.freelunch/apps.tfvars" <<'TFVARS'
+project = "shopb"
+hosts = {
+  oci-main = { address = "203.0.113.10", shared = true, arch = "arm64" }
+}
+apps = {
+  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env" }
+}
+registries = {
+  "ghcr.io" = { username = "me", password_env = "GHCR_TOKEN" }
+}
+TFVARS
+  mkdir -p "$root"
+  shared_in "$owner" "$root" deploy >/dev/null 2>&1
+  # the owner has 9.5 GB reserved of the 12 GB, and this project asks for 2
+  printf 'api 9728\nworker ?\n' > "$root/tenants/_owner/apps"
+  out="$(shared_in "$tenant" "$root" deploy 2>&1)" && { echo "deploy should have been refused"; return 1; }
+  contains "$out" "deploy: oci-main has 12.0 GB; other projects reserve 9.5 GB and this one asks for 2.0 GB, which leaves less than the 1.0 GB kept free. Lower a limit, or use another target"
+  contains "$out" "no memory limit is known for worker"
+  absent "$root/apps/shopb--api"
+  # the dry run prints the table
+  out="$(shared_in "$tenant" "$root" deploy --dry-run 2>&1)"
+  contains "$out" "would be refused: oci-main has 12.0 GB;"
+  contains "$out" "oci-main: memory reserved on the host (12288 MB in all, 1024 MB kept free)"
+  contains "$out" "_owner         api                      9728"
+  contains "$out" "_owner         worker                   unknown"
+  contains "$out" "shopb"
+  # with room it goes through; headroom is the project's to set
+  printf 'api 2048\n' > "$root/tenants/_owner/apps"
+  shared_in "$tenant" "$root" deploy >/dev/null 2>&1 || { echo "deploy should have fitted"; return 1; }
+  exists "$root/apps/shopb--api/compose.yaml"
+  rm -rf "$root/apps/shopb--api"
+  printf 'shared_headroom_mb = 9000\n' >> "$tenant/.freelunch/apps.tfvars"
+  out="$(shared_in "$tenant" "$root" deploy 2>&1)" && { echo "deploy should have been refused"; return 1; }
+  contains "$out" "which leaves less than the 8.8 GB kept free"
+  # a nearly full disk
+  sed -i.bak '/^shared_headroom_mb/d' "$tenant/.freelunch/apps.tfvars"
+  out="$(FAKE_DF_PERCENT=91 shared_in "$tenant" "$root" deploy 2>&1)" && { echo "deploy should have been refused"; return 1; }
+  contains "$out" "the disk of oci-main is 91% full"
 }
 
 # freelunch jobs lists each job with its last run, its result and its next run, and jobs run starts one.
