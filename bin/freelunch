@@ -99,7 +99,8 @@ Project:
   upgrade [version] [--force]
                           Install a release (the latest by default, or v1.2.0, main or a commit)
                           as the freelunch on this machine, and pin the project to it
-  trust <host>            Pin a host's SSH keys in known_hosts from its serial console, so the
+  trust <host> [--instance <ocid>]
+                          Pin a host's SSH keys in known_hosts from its serial console, so the
                           first deploy talks to the right machine (OCI hosts)
   domain suggest <name...>
                           Whether the name you typed is registered, then free names like it
@@ -3525,7 +3526,10 @@ cmd_host() {
     # shellcheck disable=SC2016 # expanded by the remote shell
     out="$(host_report_script | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' 2>/dev/null)" || die "host: can't ask $host over SSH"
     total="$(sed -n 's/^#mem|//p' <<< "$out" | head -n1)"; disk="$(sed -n 's/^#disk|//p' <<< "$out" | head -n1)"
-    result+=("$(host_report_json "$host" "$total" "$disk" "$out")")
+    local cpu="" row
+    row="$(oci_find_instances 2>/dev/null | awk -F'\t' -v a="$address" '$3 == a { print; exit }' || true)"
+    if [[ -n "$row" ]]; then cpu="$(oci_cpu_p95 "$(cut -f2 <<< "$row")" "$(cut -f7 <<< "$row")")"; fi
+    result+=("$(host_report_json "$host" "$total" "$disk" "$out" | jq -c --arg c "$cpu" '. + {cpu_p95_percent: ($c | tonumber? // null)}')")
   done
   if [[ $json -eq 1 ]]; then
     printf '%s\n' "${result[@]}" | jq -s '.'
@@ -3564,6 +3568,8 @@ host_report_text() {
   json="$(cat)"
   reserved="$(jq -r '[.apps[].reserved_mb // 0] | add // 0' <<< "$json")"
   jq -r '"\(.host): \(.memory_mb // "?") MB of memory, \(.disk_percent // "?")% of the disk used"' <<< "$json"
+  local cpu; cpu="$(cpu_note "$(jq -r '.cpu_p95_percent // empty' <<< "$json")")"
+  [[ -z "$cpu" ]] || echo "  $cpu"
   printf '  %-14s %-24s %10s %10s\n' project app reserved "in use"
   jq -r '.apps[] | [.project, .app, ((.reserved_mb // "unknown") | tostring), (.in_use_mb | tostring)] | @tsv' <<< "$json" \
     | awk -F'\t' '{ printf "  %-14s %-24s %10s %10s\n", $1, $2, ($3 == "unknown" ? $3 : $3 " MB"), $4 " MB" }'
@@ -4608,6 +4614,65 @@ up_keeps_data() {
   return 1
 }
 
+# shared_write_config <host name> <address> <arch>: put this project on a host another project made: project, the
+# host with shared = true, and that host on every app that has none
+shared_write_config() {
+  local name="$1" address="$2" arch="$3" file project
+  file="$(state_root)/apps.tfvars"
+  project="$(tfvar "$file" project)"
+  [[ -n "$project" ]] || project="$(project_name "$(basename "$(dirname "$PROJECT")")")"
+  [[ -n "$(tfvar "$file" project)" ]] || printf 'project = "%s"\n' "$project" >> "$file"
+  if grep -qE '^[[:space:]]*hosts[[:space:]]*=[[:space:]]*\{' "$file"; then
+    awk -v e="  $name = { address = \"$address\", shared = true, arch = \"$arch\" }" '{ print } /^[ \t]*hosts[ \t]*=[ \t]*[{]/ && !done { print e; done = 1 }' "$file" > "$file.new" && mv "$file.new" "$file"
+  else
+    printf 'hosts = {\n  %s = { address = "%s", shared = true, arch = "%s" }\n}\n' "$name" "$address" "$arch" >> "$file"
+  fi
+  # an app without a host goes to the new one
+  awk -v h="$name" '
+    /^[ \t]*apps[ \t]*=[ \t]*[{]/ { inapps = 1; depth = 0 }
+    {
+      line = $0
+      if (inapps && depth == 1 && match(line, /^[ \t]*"?[A-Za-z0-9_.-]+"?[ \t]*=[ \t]*[{]/) && line !~ /host[ \t]*=/) {
+        sub(/[{]/, "{ host = \"" h "\",", $0)
+      }
+      if (inapps) { depth += gsub(/[{]/, "{", line) - gsub(/[}]/, "}", line); if (depth <= 0) inapps = 0 }
+      print
+    }' "$file" > "$file.new" && mv "$file.new" "$file"
+}
+
+# up_offer_shared: before OCI is asked for a machine of its own, look for one freelunch already runs in the tenancy. When
+# it uses the whole free Arm allowance, a second machine could not be made: offer to put this project on it. Returns 0 when
+# the project was moved onto it (up stops there), 1 when there is nothing to offer.
+up_offer_shared() {
+  local rows name id addr ocpus mem arch comp max used=0 line project
+  has_hosts && return 1
+  rows="$(oci_find_instances 2>/dev/null)" || return 1
+  [[ -n "$rows" ]] || return 1
+  max="$(awk '/a1_flex:/ { f = 1 } f && /max_ocpus:/ { print $2; exit }' "$PROVIDERS_DIR/oci/provider.yaml")"
+  while IFS=$'\t' read -r name id addr ocpus mem arch comp; do
+    [[ "$arch" == arm64 ]] && used=$((used + ${ocpus%.*}))
+  done <<< "$rows"
+  [[ $used -ge ${max:-2} ]] || return 1
+  line="$(awk -F'\t' '$3 != "" { print; exit }' <<< "$rows")"
+  [[ -n "$line" ]] || return 1
+  IFS=$'\t' read -r name id addr ocpus mem arch comp <<< "$line"
+  project="$(project_name "$(basename "$(dirname "$PROJECT")")")"
+  if ! interactive; then
+    log "up: $name (${ocpus%.*} OCPU, ${mem%.*} GB) already runs in this tenancy and uses the whole free Arm allowance, so OCI could not make a second machine. To put this project on it, add to $(rel "$(state_root)")/apps.tfvars:"
+    printf '      project = "%s"\n      hosts = { oci-%s = { address = "%s", shared = true, arch = "%s" } }\n      and on each app: host = "oci-%s"\n' "$project" "$name" "$addr" "$arch" "$name" >&2
+    die "up: stopped here, since asking OCI for a machine would fail. Add the lines above, then freelunch trust oci-$name and freelunch deploy"
+  fi
+  local note
+  note="$(cpu_note "$(oci_cpu_p95 "$id" "$(awk -F'\t' -v i="$id" '$2 == i { print $7; exit }' <<< "$rows")")")"
+  case "$(ask "$name (${ocpus%.*} OCPU, ${mem%.*} GB${note:+, $note}) already runs in this tenancy and uses the whole free allowance. Put this project on it? (y/n)" n)" in
+    y|Y|yes) ;;
+    *) return 1 ;;
+  esac
+  shared_write_config "oci-$name" "$addr" "$arch"
+  log "up: this project is on oci-$name now (project, hosts and the apps' host in $(rel "$(state_root)")/apps.tfvars). Next: freelunch trust oci-$name --instance $id, then freelunch deploy"
+  return 0
+}
+
 # up_apply <provider>: apply a host or platform stack for up, in every availability domain
 # when the stack rotates them. Exits with NO_ROOM when none has room.
 up_apply() {
@@ -5146,6 +5211,7 @@ cmd_up() {
       break
     fi
     if [[ $dry_run -eq 1 ]]; then log "up: would make $t"; continue; fi
+    if [[ "$t" == oci ]] && up_offer_shared; then return 0; fi
     log "up: making $t"
     state_dirty "$t"
     out="$TMP/up.$t.out"
@@ -8786,8 +8852,16 @@ oci_instance_age() {
 }
 
 cmd_trust() {
-  local host="${1:-}" provider id address names known keys pinned shown key fp state=()
-  [[ $# -eq 1 ]] || die "trust: name one host, e.g. freelunch trust oci-main (freelunch inventory lists them)"
+  local host="" instance="" provider id address names known keys pinned shown key fp state=() a found
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --instance) [[ -n "${2:-}" ]] || die "trust: --instance takes an OCID"; instance="$2"; shift ;;
+      -*) die "trust: unknown option $1" ;;
+      *) [[ -z "$host" ]] || die "trust: name one host, e.g. freelunch trust oci-main (freelunch inventory lists them)"; host="$1" ;;
+    esac
+    shift
+  done
+  [[ -n "$host" ]] || die "trust: name one host, e.g. freelunch trust oci-main (freelunch inventory lists them)"
   need_tf
   command -v jq >/dev/null || die "jq is required for 'trust'"
   cmd_hybrid >/dev/null 2>&1 || die "trust: can't read the inventory (freelunch hybrid says why)"
@@ -8797,6 +8871,8 @@ cmd_trust() {
   if tf_for hybrid "$ROOT/hybrid" output ${state[@]+"${state[@]}"} -json platforms 2>/dev/null | jq -e --arg h "$host" 'any(.[]; "\(.provider)-\(.name)" == $h)' >/dev/null 2>&1; then
     die "trust: $host is a container platform, which deploy reaches through its API, not SSH, so there is no host key to pin"
   fi
+  # a host another project made has no stack here: its console is found by its instance
+  if [[ -z "${provider:-}" ]] && grep -qxF "$host" <<< "$(shared_hosts)"; then provider=oci; id="$instance"; address=""; fi
   [[ -n "${provider:-}" ]] || die "trust: $host is not in the inventory (freelunch inventory lists the hosts)"
   [[ "$provider" == "oci" ]] || die "trust: reading host keys from the console works for OCI hosts so far. For $provider, compare the key deploy shows on first contact with the serial console (docs/deploy-a-container.md#check-the-host-key)"
 
@@ -8806,9 +8882,15 @@ cmd_trust() {
   if [[ -f "$(state_root)/apps.tfvars" ]] && deploy_plan "$(state_root)/apps.tfvars" "" >/dev/null 2>&1; then
     address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
     address="${address:-$names}"
-    [[ "$address" == "$names" ]] || names="$names,$address"
+    if [[ -z "$names" ]]; then names="$address"; elif [[ "$address" != "$names" ]]; then names="$names,$address"; fi
   fi
   [[ -n "$address" ]] || die "trust: $host has no address"
+  if [[ -z "$id" ]]; then
+    # the instance of a shared host is the one of the tenancy that answers at its address
+    found="$(oci_find_instances | awk -F'\t' -v a="$address" '$3 == a { print $2; exit }' || true)"
+    [[ -n "$found" ]] || die "trust: $host is a shared host, so its instance isn't in this project. Give it with --instance <ocid> (the console shows it), or sign in to the tenancy that owns it (the OCI CLI) so freelunch can find it by its address"
+    id="$found"
+  fi
 
   log "$host: reading its SSH host keys from the serial console"
   keys="$(oci_console_keys "$id")"
@@ -9019,6 +9101,50 @@ oci_search() {
     && jq -ce '.data.items // .data // []' <<< "$out" 2>/dev/null && return 0
   echo "$out"
   return 1
+}
+
+# oci_find_instances: the running instances freelunch made in the tenancy of the project's OCI sign-in, one per line:
+# name, OCID, public address, OCPUs, memory in GB and architecture, tab separated. Nothing when the OCI CLI isn't there or
+# can't ask. Written from the OCI Search and compute documentation; not run against Oracle yet.
+oci_find_instances() {
+  local tfvars tenancy items id addr name shape ocpus mem comp
+  command -v oci >/dev/null || return 1
+  tfvars="$(config_dir oci)/terraform.tfvars"
+  [[ -f "$tfvars" ]] || tfvars=/dev/null
+  oci_args "$tfvars"
+  tenancy="$(tfvar "$tfvars" tenancy_ocid)"
+  [[ -n "$tenancy" ]] || tenancy="$(awk -v p="[${OCI_ARGS[1]}]" '$0 == p { s = 1; next } /^\[/ { s = 0 } s && /^tenancy[ \t]*=/ { sub(/^[^=]*=[ \t]*/, ""); print; exit }' "$HOME/.oci/config" 2>/dev/null)"
+  [[ -n "$tenancy" ]] || return 1
+  items="$(oci_search "$tenancy" "query instance resources where lifeCycleState = 'RUNNING' && freeformTags.key = 'managed-by' && freeformTags.value = 'freelunch' return allAdditionalFields")" || return 1
+  while IFS=$'\t' read -r name id shape ocpus mem comp; do
+    [[ -n "$id" ]] || continue
+    addr="$(oci compute instance list-vnics --instance-id "$id" "${OCI_ARGS[@]}" 2>/dev/null | jq -r '.data[0]["public-ip"] // empty' 2>/dev/null || true)"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$id" "$addr" "$ocpus" "$mem" "$(shape_arch "$shape")" "$comp"
+  done < <(jq -r '.[] | [(.["display-name"] // ""), .identifier, ((.["additional-details"].shape // "")), ((.["additional-details"].shapeConfig.ocpus // .["additional-details"]["shapeConfig.ocpus"] // 0) | tostring), ((.["additional-details"].shapeConfig.memoryInGBs // .["additional-details"]["shapeConfig.memoryInGBs"] // 0) | tostring), (.["compartment-id"] // "")] | @tsv' <<< "$items")
+}
+
+# oci_cpu_p95 <instance OCID> <compartment OCID>: the week's 95th percentile of the instance's CPU use, in percent, from
+# OCI Monitoring (namespace oci_computeagent, metric CpuUtilization, hourly 95th percentiles; the 95th percentile of
+# those hours is an approximation of the week's). Nothing when the OCI CLI or the metric isn't there. The query follows
+# Oracle's MQL reference; not run against Oracle yet.
+oci_cpu_p95() {
+  local out start end tf
+  command -v oci >/dev/null || return 0
+  [[ -n "$2" ]] || return 0
+  tf="$(config_dir oci)/terraform.tfvars"
+  [[ -f "$tf" ]] || tf=/dev/null
+  oci_args "$tf"
+  end="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  start="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)"
+  out="$(oci monitoring metric-data summarize-metrics-data --compartment-id "$2" --namespace oci_computeagent \
+    --query-text "CpuUtilization[1h]{resourceId = \"$1\"}.percentile(0.95)" --start-time "$start" --end-time "$end" "${OCI_ARGS[@]}" 2>/dev/null)" || return 0
+  jq -r '[.data[]?."aggregated-datapoints"[]?.value] | sort | length as $n | if $n == 0 then empty else (((($n * 0.95) | floor) | if . >= $n then $n - 1 else . end) as $i | .[$i] | round) end' <<< "$out" 2>/dev/null || true
+}
+
+# cpu_note <p95 percent>: "quiet most of the week (p95 CPU 6%)", the free tier's idle rule being under 20%
+cpu_note() {
+  [[ "$1" =~ ^[0-9]+$ ]] || return 0
+  if [[ "$1" -lt 20 ]]; then echo "quiet most of the week (p95 CPU $1%)"; else echo "busy at times (p95 CPU $1%)"; fi
 }
 
 # oci_billing_state <tenancy>: "paid" when the tenancy may create paid compute (a free trial's

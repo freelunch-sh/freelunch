@@ -420,7 +420,7 @@ for capacity the account no longer has.
 - [x] `freelunch host [name]`: for a shared or owned host, the table of projects, their
   apps and reserved memory, measured use now (`docker stats --no-stream`, per folder
   prefix), disk, and the week's schedule of heavy jobs in time order. `--json` too. Test
-- [ ] Finding the machine. In `setup` and in `up` when OCI is a target and this project has
+- [x] Finding the machine. In `setup` and in `up` when OCI is a target and this project has
   no host yet: ask the tenancy for running instances tagged `managed-by = freelunch`
   (`oci_search`, the compute module sets that tag) and compare with the A1 allowance in
   `providers/oci/provider.yaml`. When one exists and the allowance is used up, do not start
@@ -429,16 +429,16 @@ for capacity the account no longer has.
   lines to add to `apps.tfvars`. Yes writes `project`, the `hosts` entry (`shared`, address,
   `arch`) and reminds to `freelunch trust`. Tests with a fake search result: found and
   accepted, found without a terminal, none found (today's behaviour)
-- [ ] `trust` for a shared host: the tenant project has no stack state for it, so `trust`
+- [x] `trust` for a shared host: the tenant project has no stack state for it, so `trust`
   takes the instance's OCID from the search above (or `--instance <ocid>`) to read the
   console keys. Read `cmd_trust` and `oci_console_keys` first. Test
-- [ ] Measured idleness, as a second opinion in the question above and in `freelunch host`:
+- [x] Measured idleness, as a second opinion in the question above and in `freelunch host`:
   the week's 95th-percentile CPU of the instance from OCI Monitoring
   (`oci monitoring metric-data summarize-metrics-data`, namespace `oci_computeagent`,
   metric `CpuUtilization`; confirm the exact query from `--help` and Oracle's docs before
   writing it). Shown as "quiet most of the week (p95 CPU 6%)". Silent when the CLI or the
   metric is missing
-- [ ] Docs: `docs/shared-host.md` (who owns, who joins, limits, what is and is not
+- [x] Docs: `docs/shared-host.md` (who owns, who joins, limits, what is and is not
   isolated, jobs and the locks, leaving), a row in `docs/graph.md`, the README
 - [ ] ⛔ Live: a second project on the existing VM, with a job from each
 
@@ -695,6 +695,13 @@ Tick one when it is fixed, and say how.
   a pull on the VM.
 - [ ] Litestream (SQLite streaming) was researched but not built; its current version could not be confirmed from its own
   pages. See the answer under section 5.
+
+- [ ] `setup` does not offer a machine the tenancy already runs; only `up` does (the plan asks for both).
+- [ ] The week's CPU is the 95th percentile of hourly 95th percentiles, an approximation of Oracle's 7-day p95 rule, and the
+  query follows Oracle's MQL reference without having run against Oracle. Same for the OCI Search item fields
+  (`shapeConfig`, `compartment-id`) that `oci_find_instances` reads.
+- [ ] `up` stops after joining a host (project, hosts and the apps' host are written); it doesn't go on to `trust` and
+  `deploy` by itself, and the apps' `host` edit is a regex on `apps.tfvars` that only handles the usual one-app-per-line form.
 
 **Housekeeping**
 

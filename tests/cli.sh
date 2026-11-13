@@ -267,7 +267,14 @@ case "$1 ${2:-}" in
         printf 'Ubuntu 24.04 LTS main ttyS0\r\n\r\nmain login: \r\n' ;;
     esac
     exit 0 ;;
+  "monitoring metric-data")
+    # the hourly 95th percentiles of the CPU: FAKE_CPU is a list of values (nothing by default)
+    vals=""; for v in ${FAKE_CPU:-}; do vals="${vals:+$vals,}{\"value\": $v}"; done
+    [[ -z "$vals" ]] && { echo '{"data": []}'; exit 0; }
+    printf '{"data": [{"aggregated-datapoints": [%s]}]}\n' "$vals"; exit 0 ;;
   "compute instance")
+    # list-vnics: the public address of the instance (FAKE_SHARED_IP)
+    if [[ "${3:-}" == "list-vnics" ]]; then printf '{"data": [{"public-ip": "%s"}]}\n' "${FAKE_SHARED_IP:-203.0.113.77}"; exit 0; fi
     # list: FAKE_INSTANCES is the JSON it answers with; with none, nothing, as the real CLI does for no instances
     if [[ "${3:-}" == "list" ]]; then [[ -z "${FAKE_INSTANCES:-}" ]] || echo "$FAKE_INSTANCES"; exit 0; fi
     # get: the instance was created FAKE_INSTANCE_AGE seconds ago (a minute by default)
@@ -310,6 +317,8 @@ case "$1 ${2:-}" in
     # FAKE_VOLUME_GB are the sizes of one boot and one block volume, FAKE_LOOSE_IP an
     # unattached reserved IP, FAKE_LBS how many load balancers there are.
     case "$5" in
+      # the instances freelunch made in the tenancy: FAKE_SHARED_INSTANCES is the items array (none by default)
+      "query instance"*) printf '{"data": {"items": %s}}\n' "${FAKE_SHARED_INSTANCES:-[]}" ;;
       "query bootvolume"*) printf '{"data": {"items": [{"lifecycle-state": "AVAILABLE", "additional-details": {"sizeInGBs": "%s"}}]}}\n' "${FAKE_BOOT_GB:-50}" ;;
       "query volume"*)     printf '{"data": {"items": [{"lifecycle-state": "AVAILABLE", "additional-details": {"sizeInGBs": "%s"}}]}}\n' "${FAKE_VOLUME_GB:-0}" ;;
       "query publicip"*)
@@ -2236,6 +2245,39 @@ test_trust_pins_host_keys_from_the_console() {
   equals "$(grep -c '^203.0.113.10 ' "$p/.freelunch/known_hosts")" 2
 }
 
+# A host another project made has no stack here: its console is found by --instance, or by the address.
+test_trust_works_for_a_shared_host() {
+  local p="$WORK/trust-shared" out key
+  new_project "$p"
+  rm -f "$p/.freelunch/oci/terraform.tfstate"
+  cp "$ROOT/providers/oci/stack/project.tfvars.example" "$p/.freelunch/oci/terraform.tfvars"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  cat > "$p/.freelunch/apps.tfvars" <<'TFVARS'
+project = "shopb"
+hosts = {
+  oci-big = { address = "203.0.113.77", shared = true, arch = "arm64" }
+}
+apps = {
+  api = { host = "oci-big", compose = "../compose.yaml", env_file = "api.env" }
+}
+TFVARS
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    mem_limit: 512m\n' > "$p/compose.yaml"
+  # given the instance
+  out="$(FAKE_CONSOLE_KEYS="$key root@big" FAKE_SCANNED="$key" trust_in "$p" oci-big --instance ocid1.instance.oc1..big 2>&1)" || { echo "$out" >&2; return 1; }
+  grep -qxF "203.0.113.77 $key" "$p/.freelunch/known_hosts"
+  grep -q 'console-history capture --instance-id ocid1.instance.oc1..big ' "$p/fake.log"
+  # found by its address among the tenancy's instances
+  rm "$p/.freelunch/known_hosts"
+  out="$(FAKE_SHARED_INSTANCES='[{"display-name": "main", "identifier": "ocid1.instance.oc1..found", "additional-details": {"shape": "VM.Standard.A1.Flex"}}]' \
+    FAKE_CONSOLE_KEYS="$key root@big" FAKE_SCANNED="$key" trust_in "$p" oci-big 2>&1)" || { echo "$out" >&2; return 1; }
+  grep -q 'console-history capture --instance-id ocid1.instance.oc1..found ' "$p/fake.log"
+  grep -qxF "203.0.113.77 $key" "$p/.freelunch/known_hosts"
+  # nothing finds it: it says what to give
+  rm "$p/.freelunch/known_hosts"
+  if out="$(trust_in "$p" oci-big 2>&1)"; then echo "trust should have failed"; return 1; fi
+  contains "$out" "trust: oci-big is a shared host, so its instance isn't in this project. Give it with --instance <ocid>"
+}
+
 test_trust_refuses_keys_that_dont_match() {
   local p="$WORK/trust-mismatch" out key other
   new_project "$p"
@@ -2674,6 +2716,17 @@ TFVARS
   out="$(FAKE_STATS='shopb--api-api-1|10MiB / 1GiB' shared_in "$tenant" "$root" host oci-main --json 2>&1)"
   equals "$(jq -r '.[0] | "\(.host) \(.memory_mb) \(.disk_percent) \(.apps | length) \(.heavy_jobs[0].start) \(.heavy_jobs[0].project)"' <<< "$out")" "oci-main 12288 41 2 Sun 03:30 shopb"
   equals "$(jq -r '.[0].apps[] | select(.project == "shopb") | "\(.reserved_mb) \(.in_use_mb)"' <<< "$out")" "512 10"
+  # the week's CPU, when the tenancy can say (the tenancy comes from the OCI config: this project has no oci stack)
+  mkdir -p "$tenant/home/.oci"
+  printf '[DEFAULT]\ntenancy=ocid1.tenancy.oc1..t\nregion=eu-frankfurt-1\n' > "$tenant/home/.oci/config"
+  local found='[{"display-name": "main", "identifier": "ocid1.instance.oc1..main", "compartment-id": "ocid1.compartment.oc1..c", "additional-details": {"shape": "VM.Standard.A1.Flex"}}]'
+  out="$(HOME="$tenant/home" PATH="$WORK/up-bin:$PATH" FAKE_SHARED_INSTANCES="$found" FAKE_SHARED_IP=203.0.113.10 FAKE_CPU="5 6 7 4" shared_in "$tenant" "$root" host 2>&1)"
+  contains "$out" "  quiet most of the week (p95 CPU 7%)"
+  grep -q 'monitoring metric-data summarize-metrics-data --compartment-id ocid1.compartment.oc1..c --namespace oci_computeagent --query-text CpuUtilization\[1h\]{resourceId = "ocid1.instance.oc1..main"}.percentile(0.95)' "$tenant/fake.log"
+  out="$(HOME="$tenant/home" PATH="$WORK/up-bin:$PATH" FAKE_SHARED_INSTANCES="$found" FAKE_SHARED_IP=203.0.113.10 FAKE_CPU="45 60" shared_in "$tenant" "$root" host --json 2>&1)"
+  equals "$(jq -r '.[0].cpu_p95_percent' <<< "$out")" 60
+  out="$(shared_in "$tenant" "$root" host --json 2>&1)"
+  equals "$(jq -r '.[0].cpu_p95_percent' <<< "$out")" null
   if out="$(shared_in "$tenant" "$root" host nothing 2>&1)"; then echo "host should have failed"; return 1; fi
   contains "$out" "host: nothing isn't a VM host of this project"
 }
@@ -6890,6 +6943,38 @@ test_destroy_keeps_the_projects_that_share_a_host() {
   up_project "$p-b" oci
   FAKE_UP="oci=ok" up_in "$p-b" >/dev/null 2>&1
   UP_CMD=destroy up_in "$p-b" oci >/dev/null 2>&1 || { echo "destroy should have gone ahead"; return 1; }
+}
+
+# A tenancy that already runs freelunch's machine and has no free Arm allowance left can't make a second one: up offers
+# to put the project on it, and without a terminal says what to add.
+test_up_offers_the_machine_the_tenancy_already_runs() {
+  local p="$WORK/up-shared" out
+  local found='[{"display-name": "main", "identifier": "ocid1.instance.oc1..found", "compartment-id": "ocid1.compartment.oc1..c", "additional-details": {"shape": "VM.Standard.A1.Flex", "shapeConfig": {"ocpus": 2, "memoryInGBs": 12}}}]'
+  up_project "$p" oci
+  : > "$p/fake.log"
+  # no terminal: stops with the lines to add, and asks OCI for nothing
+  if out="$(FAKE_SHARED_INSTANCES="$found" FAKE_UP="oci=ok" up_in "$p" </dev/null 2>&1)"; then echo "up should have stopped"; return 1; fi
+  contains "$out" "up: main (2 OCPU, 12 GB) already runs in this tenancy and uses the whole free Arm allowance"
+  contains "$out" 'hosts = { oci-main = { address = "203.0.113.77", shared = true, arch = "arm64" } }'
+  contains "$out" 'and on each app: host = "oci-main"'
+  fails grep -q 'providers/oci/stack apply' "$p/fake.log"
+  # at a terminal, yes writes the project onto it
+  out="$(FREELUNCH_INTERACTIVE=1 FAKE_CPU="3 4 2" FAKE_SHARED_INSTANCES="$found" FAKE_UP="oci=ok" up_in "$p" <<< "y" 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "(2 OCPU, 12 GB, quiet most of the week (p95 CPU 4%)) already runs in this tenancy"
+  contains "$out" "up: this project is on oci-main now"
+  contains "$out" "freelunch trust oci-main --instance ocid1.instance.oc1..found"
+  contains "$(cat "$p/.freelunch/apps.tfvars")" 'oci-main = { address = "203.0.113.77", shared = true, arch = "arm64" }'
+  contains "$(cat "$p/.freelunch/apps.tfvars")" 'api = { host = "oci-main", compose'
+  contains "$(cat "$p/.freelunch/apps.tfvars")" 'project = "'
+  fails grep -q 'providers/oci/stack apply' "$p/fake.log"
+  # no, and it goes on as before
+  up_project "$p-n" oci
+  out="$(FREELUNCH_INTERACTIVE=1 FAKE_SHARED_INSTANCES="$found" FAKE_UP="oci=ok" up_in "$p-n" <<< "n" 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "up: making oci"
+  # an instance that doesn't fill the allowance, or none at all, changes nothing
+  up_project "$p-s" oci
+  out="$(FAKE_SHARED_INSTANCES='[{"display-name": "small", "identifier": "ocid1.instance.oc1..s", "additional-details": {"shape": "VM.Standard.A1.Flex", "shapeConfig": {"ocpus": 1, "memoryInGBs": 6}}}]' FAKE_UP="oci=ok" up_in "$p-s" </dev/null 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "up: making oci"
 }
 
 # A VM that has restarted no longer has its host keys on the console: trust says so, and up

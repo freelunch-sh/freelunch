@@ -12,6 +12,11 @@ release can change commands and the project layout.
 
 ### Added
 
+- **One VM, several projects.** A project can move onto a host another project made (`hosts` with `shared = true`, a
+  `project` name): its apps, units, backups and network are prefixed `<project>--`, the host keeps a registry of who is
+  on it, `deploy` refuses what doesn't fit (memory limits required, headroom kept free), `up` offers the machine the
+  tenancy already runs, `trust` takes `--instance`, `freelunch host` shows who is on a host, and `destroy` of a shared
+  host takes only this project off it. See `docs/shared-host.md`.
 - **`freelunch restore <app>`** puts an app's volumes back from its backup on any host (the latest snapshot, or
   `--snapshot`; `--overwrite` for volumes that have files), and `up --restore` does it for an app on a new host before the
   address moves there. `status` and `check --json` report the age of the last backup, `destroy` accepts a fresh backup in
