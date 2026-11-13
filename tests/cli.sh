@@ -79,6 +79,18 @@ cat > "$WORK/bin/sudo" <<'EOF'
 exec "$@"
 EOF
 chmod +x "$WORK/bin/sudo"
+# df: 93 GB of disk, FAKE_DF_PERCENT used (41 by default). /proc is read from $FREELUNCH_PROC: 12 GB of
+# memory with 10 GB available, and a load of 0.10
+cat > "$WORK/bin/df" <<'EOF'
+#!/usr/bin/env bash
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/sda1 97517568 40000000 57517568 ${FAKE_DF_PERCENT:-41}% /"
+EOF
+chmod +x "$WORK/bin/df"
+mkdir -p "$WORK/proc"
+printf 'MemTotal:       12582912 kB\nMemFree: 1 kB\nMemAvailable:   10485760 kB\n' > "$WORK/proc/meminfo"
+echo "0.10 0.05 0.01 1/200 1234" > "$WORK/proc/loadavg"
+export FREELUNCH_PROC="$WORK/proc"
 cat > "$WORK/bin/nc" <<'EOF'
 #!/usr/bin/env bash
 # nc -z -w 5 <host> <port>: answers, unless host:port is in FAKE_TCP_DOWN
@@ -1901,7 +1913,15 @@ test_status_shows_the_project() {
   # After a deploy it asks the host what runs there.
   GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$p" >/dev/null 2>&1
   out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" FAKE_STOPPED=api status_in "$p")"
-  contains "$out" "$(printf 'Apps on oci-main\n  api                  exited\n  cloudflared          running, healthy')"
+  contains "$out" "$(printf 'Apps on oci-main\n  disk 41%% of 93 GB, memory 2.0 of 12 GB, load 0.10\n  api                  exited\n  cloudflared          running, healthy')"
+  lacks "$out" "nearly full"
+  out="$(FAKE_DF_PERCENT=91 TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" status_in "$p")"
+  contains "$out" "disk 91% of 93 GB"
+  contains "$out" "  nearly full: freelunch shell api, or docker system df on the host"
+  # a host that says nothing about memory or load shows the disk alone
+  out="$(FREELUNCH_PROC="$WORK/no-proc" TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" FAKE_STOPPED=api status_in "$p")"
+  contains "$out" "$(printf 'Apps on oci-main\n  disk 41%% of 93 GB\n  api')"
+  out="$(TEST_CF_TOKEN=cf-token FAKE_ZONES="example.com:active" FAKE_STOPPED=api status_in "$p")"
   contains "$out" "$(printf 'Tunnels\n  oci-main       connected (4 connections)\n                 https://api.example.com')"
   grep -qx 'api GET /accounts/acc1/cfd_tunnel/f70ff985-a4ef-4643-bbbc-4a0ed4fc8415 token=cf-token' "$p/fake.log"
   contains "$out" "Service tokens"
@@ -3902,6 +3922,8 @@ test_check_probes_each_node_type() {
   out="$(check_in "$p" --json)"
   equals "$(jq -r '.[] | select(.node == "oci-main") | "\(.type) \(.exists) \(.reachable) \(.healthy)"' <<< "$out")" "host true true true"
   equals "$(jq -r '.[] | select(.node == "api") | "\(.type) \(.exists) \(.reachable) \(.healthy)"' <<< "$out")" "app true true true"
+  equals "$(jq -r '.[] | select(.node == "oci-main") | "\(.disk_percent) \(.memory_used_mb) \(.memory_total_mb)"' <<< "$out")" "41 2048 12288"
+  equals "$(jq -r '.[] | select(.node == "api") | has("disk_percent")' <<< "$out")" "false"
   equals "$(jq -r '.[] | select(.node == "neon-main") | "\(.type) \(.healthy)"' <<< "$out")" "database true"
   equals "$(jq -r '.[] | select(.node == "backblaze-b2-results") | "\(.type) \(.healthy)"' <<< "$out")" "bucket true"
   equals "$(jq -r '.[] | select(.type == "tunnel") | "\(.node) \(.reachable) \(.reason)"' <<< "$out")" "tunnel-oci-main null not checked without CLOUDFLARE_API_TOKEN"
@@ -3928,6 +3950,11 @@ test_check_reports_broken_nodes() {
   # a stopped container
   if out="$(FAKE_STOPPED=api check_in "$p" --json)"; then echo "check should have failed"; return 1; fi
   equals "$(jq -r '.[] | select(.node == "api") | "\(.exists) \(.healthy) \(.reason)"' <<< "$out")" "true false 1 of its containers on oci-main aren't running and healthy"
+  # a nearly full disk makes the host unhealthy
+  if out="$(FAKE_DF_PERCENT=96 check_in "$p" --json)"; then echo "check should have failed"; return 1; fi
+  equals "$(jq -r '.[] | select(.node == "oci-main") | "\(.disk_percent) \(.healthy) \(.reason)"' <<< "$out")" "96 false its disk is 96% full: look with docker system df on the host, or freelunch shell <app>"
+  out="$(FAKE_DF_PERCENT=94 check_in "$p" --json)"
+  equals "$(jq -r '.[] | select(.node == "oci-main") | .healthy' <<< "$out")" "true"
   # an app that was never deployed
   rm -r "$p/host/apps/api"
   if out="$(check_in "$p" --json)"; then echo "check should have failed"; return 1; fi

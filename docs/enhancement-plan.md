@@ -159,14 +159,14 @@ whether a VM's disk is filling.
   named like the app, else the only service, else die listing the services. VM hosts only;
   on a platform die with the provider's own command. Test with a command, and the
   service-choice errors
-- [ ] Host numbers in `status`: extend `REMOTE_STATUS` to print one first line
+- [x] Host numbers in `status`: extend `REMOTE_STATUS` to print one first line
   `#host|<disk used %>|<disk total GB>|<memory used MB>|<memory total MB>|<load 1m>` (from
   `df -P /`, `/proc/meminfo`, `/proc/loadavg`), and have `status_apps` print it under
   "Apps on <host>" as `disk 41% of 93 GB, memory 2.1 of 12 GB, load 0.10`. The app loop must
   skip that line. At 85% disk or more, add "nearly full: freelunch shell <app>, or docker
   system df on the host". Tests need a fake `df` and readable fake `/proc` values (make the
   script read them through variables the fake can point elsewhere)
-- [ ] The same numbers in `freelunch check <host> --json` (`disk_percent`, `memory_used_mb`,
+- [x] The same numbers in `freelunch check <host> --json` (`disk_percent`, `memory_used_mb`,
   `memory_total_mb`), and the host node is unhealthy at 95% disk with that reason. Update
   the node table in `docs/graph.md`
 - [ ] Docs: a "Day two" section in `docs/deploy-a-container.md` covering logs, restart,

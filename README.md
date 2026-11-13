@@ -239,7 +239,7 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 | `freelunch logs <app> [--lines n] [--follow] [--host h]` | The last lines an app (or `cloudflared`) logged: over SSH on a VM host, through the API on Northflank (`--follow` is for VM hosts) |
 | `freelunch restart <app> [--host h]` | Restart an app on its VM host and wait until it is healthy; if it is not, the last 50 log lines say why |
 | `freelunch shell <app> [--service s] [--host h] [-- command...]` | Run a command in an app's container on its VM host and return its exit code, or open a shell in it |
-| `freelunch status` | One screen after setup: hosts and platforms, the apps on each one and whether they run, tunnels and their URLs, service token expiry, capacity waits |
+| `freelunch status` | One screen after setup: hosts and platforms, the apps on each one and whether they run (with the host's disk, memory and load), tunnels and their URLs, service token expiry, capacity waits |
 | `freelunch doctor` | Check what plan, apply and deploy will need before they run: tools, the OCI sign-in, home region and the VCNs and A1 cores the tenancy has left, the Northflank token, region and project, SSH keys, images and registry logins, the Cloudflare token, its permissions and the zone. It changes nothing |
 | `freelunch hybrid` | Re-aggregate deployed host and platform stacks |
 | `freelunch inventory` | Write `inventory.json` |

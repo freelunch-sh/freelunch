@@ -12,6 +12,9 @@ release can change commands and the project layout.
 
 ### Added
 
+- **Host numbers.** `status` shows each VM host's disk, memory and load under "Apps on <host>" and warns at 85%
+  disk. `check --json` gives a host `disk_percent`, `memory_used_mb` and `memory_total_mb`, and a host at 95% disk is
+  unhealthy.
 - **`freelunch shell <app> [-- command]`.** Runs a command in an app's container on its VM host (and
   returns its exit code), or opens a shell with a terminal. `--service` picks one when an app has several.
 - **`freelunch restart <app>`.** Restarts an app on its VM host and waits for it to be healthy, failing

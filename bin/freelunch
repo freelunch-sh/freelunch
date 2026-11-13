@@ -2041,9 +2041,15 @@ token_reminders() {
   done < <(service_token_expiries)
 }
 
-# The script status runs on a host: app, service, state and health of every container.
+# The script status runs on a host: one #host line (disk used %, disk GB, memory used MB, memory total MB,
+# load) and then app, service, state and health of every container.
 # shellcheck disable=SC2016 # expanded by the remote shell
-REMOTE_STATUS='for d in /opt/freelunch/apps/*/; do
+REMOTE_STATUS='proc="${FREELUNCH_PROC:-/proc}"
+disk="$(df -P / 2>/dev/null | awk "NR == 2 { gsub(\"%\", \"\", \$5); printf \"%d|%d\", \$5, \$2 / 1048576 + 0.5 }")"
+mem="$(awk "/^MemTotal:/ { t = \$2 } /^MemAvailable:/ { a = \$2 } END { if (t > 0) printf \"%d|%d\", (t - a) / 1024, t / 1024 }" "$proc/meminfo" 2>/dev/null)"
+load="$(cut -d" " -f1 "$proc/loadavg" 2>/dev/null)"
+echo "#host|${disk:-|}|${mem:-|}|${load}"
+for d in /opt/freelunch/apps/*/; do
   [ -f "$d/compose.yaml" ] || continue
   app="$(basename "$d")"
   (cd "$d" && docker compose ps -a --format "{{.Service}}|{{.State}}|{{.Health}}") | sed "s/^/$app|/"
@@ -2085,8 +2091,19 @@ status_platforms() {
   printf '%s' "$lines"
 }
 
+# host_numbers_text <#host line>: "disk 41% of 93 GB, memory 2.1 of 12 GB, load 0.10", leaving out what the
+# host did not say
+host_numbers_text() {
+  local tag dp dgb mu mt load parts=""
+  IFS='|' read -r tag dp dgb mu mt load <<< "$1"
+  [[ -z "$dp" ]] || parts="disk ${dp}% of ${dgb} GB"
+  [[ -z "$mt" ]] || parts="${parts:+$parts, }memory $(awk -v u="$mu" -v t="$mt" 'BEGIN { printf "%.1f of %.0f GB", u / 1024, t / 1024 }')"
+  [[ -z "$load" ]] || parts="${parts:+$parts, }load $load"
+  printf '%s' "$parts"
+}
+
 status_apps() {
-  local apps_file tunnel_state="" host address user out app service state health expected seen
+  local apps_file tunnel_state="" host address user out app service state health expected seen numbers line
   apps_file="$(state_root)/apps.tfvars"
   [[ -n "$TF" ]] || return 0
   if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
@@ -2117,8 +2134,14 @@ status_apps() {
       continue
     fi
     seen=""
+    line="$(grep '^#host|' <<< "$out" | head -n1)"
+    numbers="$(host_numbers_text "$line")"
+    if [[ -n "$numbers" ]]; then
+      echo "  $numbers"
+      if [[ "$(cut -d'|' -f2 <<< "$line")" -ge 85 ]] 2>/dev/null; then echo "  nearly full: freelunch shell ${expected%%$'\n'*}, or docker system df on the host"; fi
+    fi
     while IFS='|' read -r app service state health; do
-      [[ -n "$app" ]] || continue
+      [[ -n "$app" && "$app" != "#host" ]] || continue
       seen="$seen $app "
       [[ "$service" != "$app" ]] || service=""
       printf '  %-20s %s\n' "$app${service:+ ($service)}" "$state${health:+, $health}"
@@ -8249,9 +8272,12 @@ probe_dns() {
 # same state as status and doctor, and changes nothing.
 
 # probe_row <node> <type> <exists> <reachable> <healthy> <reason>: one JSON line per node
+# A seventh argument is a JSON object of more properties for the node (a host's disk and memory).
 probe_row() {
-  jq -nc --arg n "$1" --arg t "$2" --argjson e "$3" --argjson r "$4" --argjson h "$5" --arg why "$6" \
-    '{node: $n, type: $t, exists: $e, reachable: $r, healthy: $h, reason: (if $why == "" then null else $why end)}'
+  local more="${7:-}"
+  [[ -n "$more" ]] || more='{}'
+  jq -nc --arg n "$1" --arg t "$2" --argjson e "$3" --argjson r "$4" --argjson h "$5" --arg why "$6" --argjson x "$more" \
+    '{node: $n, type: $t, exists: $e, reachable: $r, healthy: $h, reason: (if $why == "" then null else $why end)} + $x'
 }
 
 # tcp_open <host> <port>: whether something answers there within a few seconds
@@ -8310,7 +8336,7 @@ probe_record_nodes() {
 # probe_hosts_and_apps: hosts (over SSH), the apps on them, and the platforms, from the deploy plan
 # shellcheck disable=SC2016 # the remote script is expanded by the remote shell
 probe_hosts_and_apps() {
-  local apps_file tunnel_state="" host kind address user out app service state health seen reach why ok bad
+  local apps_file tunnel_state="" host kind address user out app service state health seen reach why ok bad dp mu mt extra
   apps_file="$(state_root)/apps.tfvars"
   [[ -n "$TF" ]] || return 0
   if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
@@ -8334,7 +8360,15 @@ probe_hosts_and_apps() {
     elif ! out="$(printf '%s\n' "$REMOTE_STATUS" | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' 2>/dev/null)"; then
       reach=false; why="can't reach $user@$address over SSH"
     else reach=true; fi
-    if [[ "$reach" == true ]]; then probe_row "$host" host true true true ""
+    if [[ "$reach" == true ]]; then
+      IFS='|' read -r _ dp _ mu mt _ <<< "$(grep '^#host|' <<< "$out" | head -n1)"
+      extra="$(jq -nc --arg d "$dp" --arg u "${mu:-}" --arg t "${mt:-}" \
+        '{disk_percent: ($d | tonumber? // null), memory_used_mb: ($u | tonumber? // null), memory_total_mb: ($t | tonumber? // null)}')"
+      if [[ "${dp:-0}" -ge 95 ]]; then
+        probe_row "$host" host true true false "its disk is ${dp}% full: look with docker system df on the host, or freelunch shell <app>" "$extra"
+      else
+        probe_row "$host" host true true true "" "$extra"
+      fi
     elif [[ "$reach" == false ]]; then probe_row "$host" host true false false "$why"
     else probe_row "$host" host true null null "$why"; fi
     seen=" "
