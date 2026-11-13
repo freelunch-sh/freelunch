@@ -384,7 +384,8 @@ cmd_upgrade() {
     for f in "$PROJECT"/*/wait.state; do
       [[ -f "$f" && "$(sed -n 's/^state=//p' "$f")" == "waiting" ]] || continue
       pid="$(sed -n 's/^pid=//p' "$f")"
-      [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || continue
+      [[ -n "$pid" ]] || continue
+      kill -0 "$pid" 2>/dev/null || continue
       stack="$(basename "$(dirname "$f")")"
       die "upgrade: a wait for capacity is running for $stack (pid $pid), and replacing freelunch under it can break it. Stop it first (kill $pid), or wait for it to end. --force upgrades anyway"
     done
