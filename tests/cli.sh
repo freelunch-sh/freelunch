@@ -96,6 +96,8 @@ if [[ "$1 ${2:-}" == "run --rm" ]]; then
   for w in ${FAKE_RESTIC_FAIL:-}; do [[ " $* " != *" $w "* ]] || { echo "Fatal: $w failed" >&2; exit 1; }; done
   if [[ " $* " == *" snapshots "* ]]; then cat "$FAKE_ROOT/snapshots.json" 2>/dev/null || echo '[]'; fi
 fi
+# docker stats --no-stream --format ...: FAKE_STATS is its output (Name|MemUsage lines)
+if [[ "$1 ${2:-}" == "stats --no-stream" ]]; then [[ -z "${FAKE_STATS:-}" ]] || printf '%s\n' "$FAKE_STATS"; exit 0; fi
 # docker compose config --services (in the app's folder): FAKE_SERVICES, or one service named like the app
 if [[ "$1 ${2:-} ${3:-} ${4:-}" == "compose config --services " ]]; then
   if [[ -n "${FAKE_SERVICES:-}" ]]; then tr ' ' '\n' <<< "$FAKE_SERVICES"; else basename "$PWD"; fi; exit 0
@@ -2619,6 +2621,99 @@ TFVARS
   equals "$(cat "$root/tenants/shopb/apps")" "shopb--api 512"
   equals "$(cut -d' ' -f1-3 "$root/tenants/shopb/jobs")" "shopb--report 60 0"
   equals "$(cat "$root/tenants/_owner/jobs")" ""
+  # destroy of the shared host takes this project off it and nothing else
+  : > "$tenant/fake.log"
+  out="$(FREELUNCH_AUTO_APPROVE=1 shared_in "$tenant" "$root" destroy oci-main 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "destroy: shopb is off oci-main; nothing of the other projects was touched"
+  grep -q 'docker compose --project-directory .*/apps/shopb--api down --volumes' "$tenant/fake.log"
+  grep -q 'docker network rm freelunch-shopb' "$tenant/fake.log"
+  grep -q 'systemctl disable --now freelunch-shopb--report.timer' "$tenant/fake.log"
+  absent "$root/apps/shopb--api"
+  absent "$root/tenants/shopb"
+  absent "$root/systemd/freelunch-shopb--report.timer"
+  absent "$root/jobs/shopb--report.sh"
+  exists "$root/apps/api/compose.yaml"
+  exists "$root/tenants/_owner/apps"
+  # not a shared host of this project: not this command
+  if out="$(FREELUNCH_AUTO_APPROVE=1 shared_in "$tenant" "$root" destroy oci 2>&1)"; then echo "destroy oci should not have worked"; return 1; fi
+}
+
+# freelunch host: who is on the host, what they reserve and use, and the heavy jobs in time order.
+test_host_shows_the_projects_on_it() {
+  local owner="$WORK/host-owner" tenant="$WORK/host-tenant" root="$WORK/host-root" out
+  new_project "$owner"
+  new_project "$tenant"
+  rm -f "$tenant/.freelunch/oci/terraform.tfstate"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:2.0.0\n    mem_limit: 512m\n' > "$tenant/compose.yaml"
+  cat > "$tenant/.freelunch/apps.tfvars" <<'TFVARS'
+project = "shopb"
+hosts = {
+  oci-main = { address = "203.0.113.10", shared = true, arch = "arm64" }
+}
+apps = {
+  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env" }
+}
+jobs = {
+  report = { app = "api", command = "bin/report", schedule = "weekly sun 03:30", heavy = true, timeout_minutes = 30 }
+}
+registries = {
+  "ghcr.io" = { username = "me", password_env = "GHCR_TOKEN" }
+}
+TFVARS
+  mkdir -p "$root"
+  shared_in "$owner" "$root" deploy >/dev/null 2>&1
+  shared_in "$tenant" "$root" deploy >/dev/null 2>&1
+  export FAKE_STATS=$'api-api-1|300MiB / 12GiB\nshopb--api-api-1|120.5MiB / 512MiB\nshopb--cloudflared-cloudflared-1|20MiB / 12GiB'
+  out="$(shared_in "$tenant" "$root" host 2>&1)"
+  unset FAKE_STATS
+  contains "$out" "oci-main: 12288 MB of memory, 41% of the disk used"
+  contains "$out" "_owner         api                         unknown     300 MB"
+  contains "$out" "shopb          api                          512 MB     121 MB"
+  contains "$out" "heavy jobs this week (UTC), one at a time:"
+  contains "$out" "Sun 03:30  shopb/report (up to 30 min)"
+  out="$(FAKE_STATS='shopb--api-api-1|10MiB / 1GiB' shared_in "$tenant" "$root" host oci-main --json 2>&1)"
+  equals "$(jq -r '.[0] | "\(.host) \(.memory_mb) \(.disk_percent) \(.apps | length) \(.heavy_jobs[0].start) \(.heavy_jobs[0].project)"' <<< "$out")" "oci-main 12288 41 2 Sun 03:30 shopb"
+  equals "$(jq -r '.[0].apps[] | select(.project == "shopb") | "\(.reserved_mb) \(.in_use_mb)"' <<< "$out")" "512 10"
+  if out="$(shared_in "$tenant" "$root" host nothing 2>&1)"; then echo "host should have failed"; return 1; fi
+  contains "$out" "host: nothing isn't a VM host of this project"
+}
+
+# Heavy jobs of other projects on a shared host queue on the same lock, so they are compared too, and the
+# suggestion keeps clear of them.
+test_heavy_jobs_of_other_projects_count() {
+  local owner="$WORK/jobs-owner" tenant="$WORK/jobs-tenant" root="$WORK/jobs-root" out mins="" d sug
+  new_project "$owner"
+  new_project "$tenant"
+  rm -f "$tenant/.freelunch/oci/terraform.tfstate"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:2.0.0\n    mem_limit: 512m\n' > "$tenant/compose.yaml"
+  cat > "$tenant/.freelunch/apps.tfvars" <<'TFVARS'
+project = "shopb"
+hosts = {
+  oci-main = { address = "203.0.113.10", shared = true, arch = "arm64" }
+}
+apps = {
+  api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env" }
+}
+jobs = {
+  report = { app = "api", command = "bin/report", schedule = "daily 03:30", heavy = true, timeout_minutes = 30 }
+}
+registries = {
+  "ghcr.io" = { username = "me", password_env = "GHCR_TOKEN" }
+}
+TFVARS
+  mkdir -p "$root"
+  shared_in "$owner" "$root" deploy >/dev/null 2>&1
+  shared_in "$tenant" "$root" deploy >/dev/null 2>&1 || { echo "the tenant's deploy failed"; return 1; }
+  # the owner has a heavy job at 03:40 every day
+  for d in 0 1 2 3 4 5 6; do mins="$mins $((d * 1440 + 220))"; done
+  printf 'nightly 60 1%s\n' "$mins" > "$root/tenants/_owner/jobs"
+  out="$(shared_in "$tenant" "$root" deploy --dry-run 2>&1)"
+  contains "$out" "jobs: report and _owner/nightly on oci-main can overlap (report: daily 03:30, _owner/nightly: another project's job)"
+  sug="$(sed -n 's/.*move report to "\(.*\)".*/\1/p' <<< "$out")"
+  [[ -n "$sug" ]] || { echo "no suggestion: $out" >&2; return 1; }
+  sed -i.bak "s|daily 03:30|$sug|" "$tenant/.freelunch/apps.tfvars"
+  out="$(shared_in "$tenant" "$root" deploy --dry-run 2>&1)"
+  lacks "$out" "_owner/nightly"
 }
 
 # A deploy to a shared host is refused when the projects there, and this one, would leave less than the headroom
@@ -6775,6 +6870,26 @@ JSON
   contains "$out" "up: restored api from the backup of 2026-11-12T02:00:03Z"
   grep -q ' restore latest --target / --host api' "$p/fake.log"
   equals "$(grep -n 'up: restored api\|up: live on\|up: oci has no\|up: making oci' <<< "$out" | sed 's/^[0-9]*://' | cut -c1-24 | tr '\n' '|')" "==> up: making oci|==> up: restored api fro|==> up: live on oci-main|"
+}
+
+# A host that other projects run on is not destroyed under them.
+test_destroy_keeps_the_projects_that_share_a_host() {
+  local p="$WORK/destroy-tenants" out
+  up_project "$p" oci
+  FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1
+  mkdir -p "$p/host/tenants/shopb" "$p/host/tenants/_owner"
+  printf 'shopb--api 512\n' > "$p/host/tenants/shopb/apps"
+  : > "$p/fake.log"
+  if out="$(UP_CMD=destroy up_in "$p" oci 2>&1)"; then echo "destroy should have refused"; return 1; fi
+  contains "$out" "destroy: oci-main also runs shopb, projects of their own, and destroying it would take their apps and data with it"
+  fails grep -q 'providers/oci/stack destroy' "$p/fake.log"
+  out="$(UP_CMD=destroy up_in "$p" oci --evict-tenants 2>&1)" || { echo "$out" >&2; return 1; }
+  grep -q 'providers/oci/stack destroy' "$p/fake.log"
+  # a host nobody else is on goes as before
+  rm -rf "$p/host/tenants/shopb"
+  up_project "$p-b" oci
+  FAKE_UP="oci=ok" up_in "$p-b" >/dev/null 2>&1
+  UP_CMD=destroy up_in "$p-b" oci >/dev/null 2>&1 || { echo "destroy should have gone ahead"; return 1; }
 }
 
 # A VM that has restarted no longer has its host keys on the console: trust says so, and up

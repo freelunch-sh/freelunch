@@ -160,7 +160,10 @@ Infrastructure:
   destroy <p...|all>      Destroy provider stacks in reverse layer order, then refresh hybrid. On
                           a platform it also deletes what apply and deploy made there
                           Refuses while an app's data in Docker volumes has no backup in
-                          .freelunch/backups (freelunch volume pull); --discard-data removes it anyway
+                          .freelunch/backups (freelunch volume pull); --discard-data removes it anyway.
+                          A host that other projects run on is not destroyed under them
+                          (--evict-tenants does it anyway); destroy <shared host> takes this project
+                          off a host another project made, and nothing else
   status                  Hosts and platforms, the apps on each one and whether they run,
                           tunnels and their URLs, service token expiry, and capacity waits
   agent [claude|codex|cursor|copilot|all]
@@ -193,6 +196,8 @@ Infrastructure:
   restore <app> [--snapshot id] [--host h] [--overwrite]
                           Stop the app, put its volumes back from its backup (the latest snapshot, or one),
                           and start it. It works on any host that has the app deployed
+  host [name] [--json]    Who is on a VM host: the projects, their apps with the memory they reserve and use
+                          now, the disk, and the week's heavy jobs in time order
   restart <app> [--host h] Restart an app on its VM host and wait until it is healthy; if it is not,
                           the last 50 log lines say why
   doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in and
@@ -2088,6 +2093,7 @@ cmd_lifecycle() { # plan|apply|destroy
       --show-user-data)    user_data=1 ;;
       --detach)            detach=1 ;;
       --discard-data)      discard_data=1 ;;
+      --evict-tenants)     FREELUNCH_EVICT_TENANTS=1 ;;
       --out|--plan)        [[ $# -gt 1 ]] || die "$action: $1 takes a file"
                            if [[ "$1" == "--out" ]]; then out="$2"; else plan_file="$2"; fi
                            shift ;;
@@ -2116,6 +2122,15 @@ cmd_lifecycle() { # plan|apply|destroy
   fi
   if [[ $detach -eq 1 && -z "$plan_file" && "${FREELUNCH_AUTO_APPROVE:-0}" != "1" ]]; then
     die "apply: nobody is at the prompt of a wait in the background, so --detach needs a reviewed plan: freelunch plan <stack> --out <file>, then freelunch apply <stack> --plan <file> --wait-for-capacity --detach"
+  fi
+  # destroy of a shared host takes this project off it, and nothing else
+  if [[ "$action" == destroy && ${#names[@]} -gt 0 ]]; then
+    local sh_all=1 sh_name
+    for sh_name in "${names[@]}"; do grep -qxF "$sh_name" <<< "$(shared_hosts)" || sh_all=0; done
+    if [[ $sh_all -eq 1 ]]; then
+      for sh_name in "${names[@]}"; do shared_leave "$sh_name" "$discard_data"; done
+      return 0
+    fi
   fi
   local resolved providers=()
   resolved="$(resolve ${names[@]+"${names[@]}"})" || exit 1
@@ -2185,6 +2200,8 @@ cmd_lifecycle() { # plan|apply|destroy
     destroy)
       # A host or platform takes its volumes with it: not while an app's data has no backup.
       [[ $discard_data -eq 1 ]] || destroy_data_guard ${hosts[@]+"${hosts[@]}"} ${platforms[@]+"${platforms[@]}"}
+      # ... and a host other projects share keeps them
+      [[ ${#hosts[@]} -eq 0 ]] || destroy_tenant_guard "${hosts[@]}"
       # destroy all first removes the records the project made, while it still knows the hosts
       if [[ " ${names[*]-} " == *" all "* ]]; then dns_all destroy; fi
       for a in ${hosts[@]+"${hosts[@]}"}; do ci_wait_guard "$a" ""; done
@@ -3381,6 +3398,182 @@ shared_room_check() {
   fi
 }
 
+
+# shared_leave_script <project> <folders...>: what removing a project from a shared host runs there: its apps
+# (containers, volumes, folders), cloudflared, jobs and backups with their units, its network and its registry
+# folder, and nothing of any other project
+shared_leave_script() {
+  local project="$1" ns f
+  ns="$project--"
+  shift
+  cat <<SCRIPT
+set -u
+ns=$(shq "$ns")
+for f in $(printf '%s ' "$@"); do
+  if [ -f "/opt/freelunch/apps/\$f/compose.yaml" ]; then
+    echo "--> removing \$f"
+    docker compose --project-directory "/opt/freelunch/apps/\$f" down --volumes --remove-orphans || true
+    rm -rf "/opt/freelunch/apps/\$f"
+  fi
+done
+for s in /opt/freelunch/jobs/*.sh; do
+  [ -e "\$s" ] || continue
+  n="\$(basename "\$s" .sh)"
+  case "\${n#backup-}" in "\$ns"*) ;; *) continue ;; esac
+  systemctl disable --now "freelunch-\$n.timer" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/freelunch-\$n.timer" "/etc/systemd/system/freelunch-\$n.service" "\$s"
+  case "\$n" in backup-*) rm -f "/opt/freelunch/bin/\$n" /opt/freelunch/backup/"\${n#backup-}".* ;; esac
+done
+systemctl daemon-reload 2>/dev/null || true
+docker network rm $(shq "freelunch-$project") >/dev/null 2>&1 || true
+rm -rf $(shq "/opt/freelunch/tenants/$project")
+echo "--> $project is off this host"
+SCRIPT
+}
+
+# shared_leave <host>: take this project off a host that other projects share. Asks first (the data of its
+# apps goes), and refuses an app with data and no backup unless --discard-data.
+shared_leave() {
+  local host="$1" discard="$2" apps_file tunnel_state="" project app address user risky="" folders=() f
+  apps_file="$(state_root)/apps.tfvars"
+  [[ -f "$apps_file" ]] || die "destroy: no $(rel "$apps_file")"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1 || die "destroy: apps.tfvars doesn't resolve yet (freelunch deploy --dry-run says why)"
+  jq -e --arg h "$host" '.[$h].shared == true' "$TMP/targets.json" >/dev/null 2>&1 || die "destroy: $host isn't a shared host of this project (hosts: $(shared_hosts | paste -sd, -))"
+  HOST_NS="$(host_ns "$host")"
+  project="${HOST_NS%--}"
+  address="$(jq -r --arg h "$host" '.[$h].address' "$TMP/targets.json")"; user="$(jq -r --arg h "$host" '.[$h].user' "$TMP/targets.json")"
+  ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1 || die "destroy: the host key of $host isn't pinned yet: freelunch trust $host"
+  if [[ "$discard" -eq 0 ]]; then
+    for app in $(up_data_apps); do
+      jq -e --arg h "$host" --arg a "$app" '.[$h].apps | has($a)' "$TMP/targets.json" >/dev/null 2>&1 || continue
+      compgen -G "$(state_root)/backups/$app/*/*.tar.gz" >/dev/null || backup_fresh "$app" "$host" || risky="${risky:+$risky; }$app"
+    done
+    [[ -z "$risky" ]] || die "destroy: this would remove data nothing has a backup of: $risky on $host. freelunch volume pull <app> saves it, a backup does too, or add --discard-data to remove it anyway"
+  fi
+  for app in $(jq -r --arg h "$host" '.[$h].apps | keys[]' "$TMP/targets.json"); do folders+=("$HOST_NS$app"); done
+  folders+=("${HOST_NS}cloudflared")
+  if [[ "${FREELUNCH_AUTO_APPROVE:-0}" != 1 ]]; then
+    interactive || die "destroy: this removes $project's apps, data and units from $host. Run it at a terminal, or with FREELUNCH_AUTO_APPROVE=1"
+    f="$(ask "Remove $project (${folders[*]}) from $host? (y/n)" n)"
+    case "$f" in y|Y|yes) ;; *) die "destroy: nothing was changed" ;; esac
+  fi
+  ssh_options yes
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  shared_leave_script "$project" "${folders[@]}" | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' \
+    || die "destroy: removing $project from $host did not finish (see above)"
+  log "destroy: $project is off $host; nothing of the other projects was touched"
+}
+
+# host_report_script: what freelunch host runs on a host: memory, disk, what every project registered, and what
+# its containers use now, one line per fact
+host_report_script() {
+  cat <<'SCRIPT'
+proc="${FREELUNCH_PROC:-/proc}"
+echo "#mem|$(awk '/^MemTotal:/ { printf "%d", $2 / 1024 }' "$proc/meminfo" 2>/dev/null)"
+echo "#disk|$(df -P / 2>/dev/null | awk 'NR == 2 { gsub("%", "", $5); print $5 }')"
+for d in /opt/freelunch/tenants/*/; do
+  t="$(basename "$d")"
+  [ -f "${d}apps" ] && while read -r f mb; do [ -z "$f" ] || echo "#app|$t|$f|$mb"; done < "${d}apps"
+  [ -f "${d}jobs" ] && while read -r n to heavy mins; do [ -z "$n" ] || echo "#job|$t|$n|$to|$heavy|$mins"; done < "${d}jobs"
+done
+docker stats --no-stream --format '{{.Name}}|{{.MemUsage}}' 2>/dev/null | awk -F'|' '{
+  split($2, u, " / "); v = u[1]; n = v + 0
+  if (v ~ /GiB/) n *= 1024; else if (v ~ /KiB/) n /= 1024; else if (v ~ /[0-9]B$/ && v !~ /MiB/) n /= 1048576
+  printf "#stat|%s|%d\n", $1, n + 0.5 }' || true
+true
+SCRIPT
+}
+
+# week_time <minute of the week>: "Mon 03:30"
+week_time() {
+  local days=(Mon Tue Wed Thu Fri Sat Sun) m="$1"
+  printf '%s %02d:%02d' "${days[$((m / 1440))]}" $((m % 1440 / 60)) $((m % 60))
+}
+
+# cmd_host [name] [--json]: who is on a VM host: the projects, their apps with what they reserve and use now, the
+# disk, and the week's heavy jobs in time order
+cmd_host() {
+  local want="" json=0 a apps_file tunnel_state="" host address user out total disk
+  for a in "$@"; do
+    case "$a" in
+      --json) json=1 ;;
+      -*) die "host: unknown option $a" ;;
+      *) [[ -z "$want" ]] || die "host: one host at a time"; want="$a" ;;
+    esac
+  done
+  apps_file="$(state_root)/apps.tfvars"
+  [[ -f "$apps_file" ]] || die "host: no $(rel "$apps_file")"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1 || die "host: apps.tfvars doesn't resolve yet (freelunch deploy --dry-run says why)"
+  local hosts=()
+  if [[ -n "$want" ]]; then
+    jq -e --arg h "$want" 'has($h) and .[$h].kind != "platform"' "$TMP/targets.json" >/dev/null || die "host: $want isn't a VM host of this project (hosts: $(jq -r '[to_entries[] | select(.value.kind != "platform") | .key] | join(", ")' "$TMP/targets.json"))"
+    hosts=("$want")
+  else
+    while IFS= read -r a; do hosts+=("$a"); done < <(jq -r 'to_entries[] | select(.value.kind != "platform") | .key' "$TMP/targets.json")
+  fi
+  [[ ${#hosts[@]} -gt 0 ]] || die "host: no VM host runs anything of this project yet"
+  ssh_options yes
+  local result=()
+  for host in "${hosts[@]}"; do
+    address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
+    user="$(jq -r --arg h "$host" '.[$h].user // "ubuntu"' "$TMP/targets.json")"
+    ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1 || die "host: the host key of $host isn't pinned yet: freelunch trust $host"
+    # shellcheck disable=SC2016 # expanded by the remote shell
+    out="$(host_report_script | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' 2>/dev/null)" || die "host: can't ask $host over SSH"
+    total="$(sed -n 's/^#mem|//p' <<< "$out" | head -n1)"; disk="$(sed -n 's/^#disk|//p' <<< "$out" | head -n1)"
+    result+=("$(host_report_json "$host" "$total" "$disk" "$out")")
+  done
+  if [[ $json -eq 1 ]]; then
+    printf '%s\n' "${result[@]}" | jq -s '.'
+    return 0
+  fi
+  local r
+  for r in "${result[@]}"; do host_report_text <<< "$r"; done
+}
+
+# host_report_json <host> <total MB> <disk %> <script output>: one host as JSON
+host_report_json() {
+  local host="$1" total="$2" disk="$3" out="$4" apps jobs mins m line
+  # the apps: project, app, reserved MB, and what the containers of its folder use now
+  apps="$(grep '^#app|' <<< "$out" | awk -F'|' '{ print $2 "\t" $3 "\t" $4 }' | while IFS=$'\t' read -r t folder mb; do
+    app="$folder"; [[ "$t" == _owner ]] || app="${folder#"$t--"}"
+    use=0
+    while IFS='|' read -r _ cname cmb; do
+      if [[ "$cname" == "$folder"-* ]]; then use=$((use + cmb)); fi
+    done < <(grep '^#stat|' <<< "$out")
+    jq -nc --arg t "$t" --arg a "$app" --arg mb "$mb" --argjson u "$use" '{project: $t, app: $a, reserved_mb: ($mb | tonumber? // null), in_use_mb: $u}'
+  done | jq -s '.')"
+  # the heavy jobs, one entry for each start in the week
+  jobs="$(grep '^#job|' <<< "$out" | while IFS='|' read -r _ t n to heavy mins; do
+    [[ "$heavy" == 1 ]] || continue
+    [[ "$t" == _owner ]] || n="${n#"$t--"}"
+    for m in $mins; do printf '%s\t%s\t%s\t%s\n' "$m" "$t" "$n" "$to"; done
+  done | sort -n | jq -R -s -c 'split("\n") | map(select(. != "") | split("\t") | {minute: (.[0] | tonumber), project: .[1], job: .[2], timeout_minutes: (.[3] | tonumber)})')"
+  jobs="$(jq -c --argjson d "$(jq -nc '["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]')" 'map(. + {start: ($d[(.minute / 1440 | floor)] + " " + ("0" + ((.minute % 1440 / 60 | floor) | tostring))[-2:] + ":" + ("0" + ((.minute % 60) | tostring))[-2:])})' <<< "$jobs")"
+  jq -nc --arg host "$host" --arg total "$total" --arg disk "$disk" --argjson apps "${apps:-[]}" --argjson jobs "${jobs:-[]}" \
+    '{host: $host, memory_mb: ($total | tonumber? // null), disk_percent: ($disk | tonumber? // null), apps: $apps, heavy_jobs: $jobs}'
+}
+
+# host_report_text: a host's JSON (stdin) as a table
+host_report_text() {
+  local json reserved
+  json="$(cat)"
+  reserved="$(jq -r '[.apps[].reserved_mb // 0] | add // 0' <<< "$json")"
+  jq -r '"\(.host): \(.memory_mb // "?") MB of memory, \(.disk_percent // "?")% of the disk used"' <<< "$json"
+  printf '  %-14s %-24s %10s %10s\n' project app reserved "in use"
+  jq -r '.apps[] | [.project, .app, ((.reserved_mb // "unknown") | tostring), (.in_use_mb | tostring)] | @tsv' <<< "$json" \
+    | awk -F'\t' '{ printf "  %-14s %-24s %10s %10s\n", $1, $2, ($3 == "unknown" ? $3 : $3 " MB"), $4 " MB" }'
+  printf '  reserved %s MB\n' "$reserved"
+  if [[ "$(jq '.heavy_jobs | length' <<< "$json")" -gt 0 ]]; then
+    echo "  heavy jobs this week (UTC), one at a time:"
+    jq -r '.heavy_jobs[:40][] | "    \(.start)  \(.project)/\(.job) (up to \(.timeout_minutes) min)"' <<< "$json"
+    [[ "$(jq '.heavy_jobs | length' <<< "$json")" -le 40 ]] || echo "    ... and more"
+  fi
+}
 
 # --- backups ---------------------------------------------------------------------------
 # An app with `backup` in apps.tfvars is saved with restic (a container, no install on the host) to
@@ -4626,13 +4819,15 @@ up_data_apps() {
 # move (up --move): a backup is pulled from the old host, with its app stopped, and pushed into
 # the new one. Only between VMs: a platform keeps its volumes behind its own API.
 up_copy_data() {
-  local src="$1" dst="$2" from_host to_host app dir stamp
+  local src="$1" dst="$2" from_host to_host app dir stamp tenants
   if is_platform "$src" || is_platform "$dst"; then
     log "up: the data stays on $src: volumes on a container platform aren't copied over SSH"
     return 0
   fi
   from_host="$(target_host "$src")"; to_host="$(target_host "$dst")"
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  tenants="$(host_tenants "$from_host" 2>/dev/null || true)"
+  [[ -z "$tenants" ]] || log "up: $(paste -sd, - <<< "$tenants" | sed 's/,/, /g') also run on $from_host, and stay there: only this project's apps move"
   for app in $(up_data_apps); do
     dir="$(state_root)/backups/$app/move-$stamp"
     # an app with a backup is backed up first, from the old host, before anything is stopped
@@ -4690,6 +4885,42 @@ up_restore_data() {
     else
       log "up: $app has a backup from $time, and its volumes on $host are empty. freelunch up --restore puts it back before the address moves here (or freelunch restore $app)"
     fi
+  done
+}
+
+# host_tenants <host>: the projects other than the owner that registered on the host (their names), asked over
+# SSH. Returns 2 when this machine has never connected to the host (no pinned key: nothing to ask), 1 when it
+# is pinned and still can't be asked.
+host_tenants() {
+  local info address user out
+  info="$(host_ssh_info "$1")" || return 2
+  IFS=$'\t' read -r address user <<< "$info"
+  [[ -n "${address:-}" ]] || return 2
+  ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1 || return 2
+  ssh_options yes
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  out="$(printf '%s\n' 'for d in /opt/freelunch/tenants/*/; do [ -f "${d}apps" ] && basename "$d"; done; true' \
+    | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' 2>/dev/null)" || return 1
+  grep -v '^_owner$' <<< "$out" || true
+}
+
+# destroy_tenant_guard <host stack...>: a host that other projects run on is not destroyed under them
+destroy_tenant_guard() {
+  local p host tenants state rc
+  for p in "$@"; do
+    state="$(config_dir "$p")/terraform.tfstate"
+    [[ -f "$state" ]] || continue
+    for host in $(jq -r '.outputs.hosts.value[]? | "\(.provider)-\(.name)"' "$state" 2>/dev/null); do
+      rc=0; tenants="$(host_tenants "$host")" || rc=$?
+      if [[ $rc -eq 2 ]]; then continue; fi
+      if [[ $rc -ne 0 ]]; then
+        log "destroy: $host couldn't be asked whether other projects run on it (it doesn't answer over SSH)"
+        [[ "${FREELUNCH_EVICT_TENANTS:-0}" == 1 ]] && continue
+        die "destroy: stopped, since destroying $host could take other projects' apps with it. Run it again when $host answers, or add --evict-tenants to destroy it anyway"
+      fi
+      [[ -z "$tenants" ]] || [[ "${FREELUNCH_EVICT_TENANTS:-0}" == 1 ]] \
+        || die "destroy: $host also runs $(paste -sd, - <<< "$tenants" | sed 's/,/, /g'), projects of their own, and destroying it would take their apps and data with it. Ask them to leave first (freelunch destroy $host in their project), or add --evict-tenants to destroy it anyway"
+    done
   done
 }
 
@@ -7190,11 +7421,39 @@ cmd_jobs() {
   done
 }
 
+# host_address_user <host>: "<address>\t<user>" of a host, from the deploy plan when it is in it (a shared host is, and
+# is not in the inventory), else from the inventory
+host_address_user() {
+  local out
+  if [[ -f "$TMP/targets.json" ]]; then
+    out="$(jq -r --arg h "$1" 'select(has($h)) | .[$h] | select(.address != null) | [.address, (.user // "ubuntu")] | @tsv' "$TMP/targets.json" 2>/dev/null || true)"
+    if [[ -n "$out" ]]; then printf '%s\n' "$out"; return 0; fi
+  fi
+  host_ssh_info "$1"
+}
+
+# host_other_jobs <host>: the heavy jobs other projects registered on the host, as "<project>/<job>|<timeout>|<minutes>",
+# asked over SSH; nothing when it can't be asked
+host_other_jobs() {
+  local info address user me
+  info="$(host_address_user "$1")" || return 0
+  IFS=$'\t' read -r address user <<< "$info"
+  [[ -n "${address:-}" ]] || return 0
+  ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1 || return 0
+  ssh_options yes
+  me="$(registry_dir)"
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  printf 'me=%s\n%s\n' "$(shq "$me")" 'for d in /opt/freelunch/tenants/*/; do
+  t="$(basename "$d")"; [ "$t" = "$me" ] && continue; [ -f "${d}jobs" ] || continue
+  while read -r n to heavy mins; do [ "$heavy" = 1 ] && echo "$t/$n|$to|$mins"; done < "${d}jobs"
+done; true' | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' 2>/dev/null || true
+}
+
 # job_overlap_lines: one line for every pair of heavy jobs on a host (the host's own reboot window counts as
 # one) whose start times are closer than the longer one's timeout, from $TMP/targets.json. Heavy jobs queue
 # on the host's lock, so this is a warning, with a time in the widest free gap for the later one.
 job_overlap_lines() {
-  local host provider reboot rows="" name schedule minutes mins a sa b sb sug_job sug_sched
+  local host provider reboot rows="" name schedule minutes mins timeout a sa b sb sug_job sug_sched
   for host in $(jq -r 'to_entries[] | select((.value.jobs // {} | length > 0) or ([.value.apps[] | select(.backup != null)] | length > 0)) | .key' "$TMP/targets.json"); do
     rows=""
     while IFS=$'\t' read -r name schedule minutes; do
@@ -7212,6 +7471,12 @@ job_overlap_lines() {
     if [[ "$reboot" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
       rows="${rows}reboot|daily $reboot|30|$(schedule_minutes "daily $reboot")|daily"$'\n'
     fi
+    # the heavy jobs of the other projects on the host, which queue on the same lock
+    HOST_NS="$(host_ns "$host")"
+    while IFS='|' read -r name timeout mins; do
+      [[ -n "$name" ]] || continue
+      rows="${rows}$name|another project's job|$timeout|$mins|other"$'\n'
+    done < <(host_other_jobs "$host")
     [[ "$(grep -c . <<< "$rows")" -ge 2 ]] || continue
     while IFS='|' read -r a sa b sb sug_job sug_sched; do
       [[ -n "$a" ]] || continue
@@ -7232,10 +7497,11 @@ job_overlap_lines() {
       }
       END {
         for (i = 1; i <= NR; i++) for (j = i + 1; j <= NR; j++) {
+          if ((kind[i] == "other" || name[i] == "reboot") && (kind[j] == "other" || name[j] == "reboot")) continue
           lim = to[i] > to[j] ? to[i] : to[j]; hit = 0
           for (x = 1; x <= n[i] && !hit; x++) for (y = 1; y <= n[j] && !hit; y++) if (dist(fire[i, x], fire[j, y]) < lim) hit = 1
           if (!hit) continue
-          mv = (name[j] == "reboot") ? i : j
+          mv = (name[j] == "reboot" || kind[j] == "other") ? i : j
           best = -1; bs = ""
           step = kind[mv] == "hourly" ? 5 : (kind[mv] == "daily" ? 5 : 15)
           span = kind[mv] == "hourly" ? 60 : (kind[mv] == "daily" ? 1440 : W)
@@ -12005,6 +12271,7 @@ main() {
     shell)                cmd_shell "$@" ;;
     jobs)                 cmd_jobs "$@" ;;
     backup)               cmd_backup "$@" ;;
+    host)                 cmd_host "$@" ;;
     restore)              cmd_restore "$@" ;;
     doctor)               cmd_doctor ;;
     journey)              resolve_state_refs; sync_start status; cmd_journey "$@" ;;

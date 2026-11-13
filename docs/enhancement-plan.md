@@ -410,14 +410,14 @@ for capacity the account no longer has.
   with no limit counts as unknown and is named in a warning. Disk: refuse above 85% used.
   `deploy --dry-run` prints the table (project, app, reserved). Tests: fits, does not fit,
   unknown owner app
-- [ ] The owner protects its tenants: `destroy` of a host stack whose host has tenants
+- [x] The owner protects its tenants: `destroy` of a host stack whose host has tenants
   (asked over SSH; when it can't be asked, say so and stop) refuses with their names;
   `--evict-tenants` goes on. `up --move` of the owner's apps leaves tenants alone and says
   they stay. Tests
-- [ ] Jobs across projects: the overlap check of section 4 reads every tenant's `jobs` file
+- [x] Jobs across projects: the overlap check of section 4 reads every tenant's `jobs` file
   on the host, so two projects' heavy jobs are compared, and the suggestion avoids all of
   them. The `heavy.lock` and `deploy.lock` are already host-wide. Test with two projects
-- [ ] `freelunch host [name]`: for a shared or owned host, the table of projects, their
+- [x] `freelunch host [name]`: for a shared or owned host, the table of projects, their
   apps and reserved memory, measured use now (`docker stats --no-stream`, per folder
   prefix), disk, and the week's schedule of heavy jobs in time order. `--json` too. Test
 - [ ] Finding the machine. In `setup` and in `up` when OCI is a target and this project has
