@@ -12,6 +12,9 @@ release can change commands and the project layout.
 
 ### Added
 
+- **`pre_deploy` and `post_deploy` hooks per app** (and `service` to say which Compose service they run in).
+  `pre_deploy` runs in the new image after the pull and before anything is replaced; if it fails the running
+  version is left alone. `post_deploy` runs in the running container once it is healthy. VM hosts only.
 - **`freelunch upgrade` leaves a running wait alone.** It refuses while a wait for capacity runs in the project
   (`--force` overrides), because replacing the script under a running wait can break it.
 - **The Pay As You Go hint says more.** After a long wait the hint names the card authorization the upgrade makes

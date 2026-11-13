@@ -177,6 +177,58 @@ run "registry_password_must_come_from_an_env_var" {
   expect_failures = [var.registries]
 }
 
+# Hooks -----------------------------------------------------------------------------------
+
+run "hooks_and_service_reach_the_target" {
+  command = plan
+
+  variables {
+    apps = { api = { host = "oci-main", compose = "compose.yaml", pre_deploy = "bin/migrate", post_deploy = "bin/warm", service = "web" } }
+  }
+
+  assert {
+    condition = (
+      output.targets["oci-main"].apps.api.pre_deploy == "bin/migrate" &&
+      output.targets["oci-main"].apps.api.post_deploy == "bin/warm" &&
+      output.targets["oci-main"].apps.api.service == "web"
+    )
+    error_message = "Hooks and the service they run in are part of the app's target."
+  }
+}
+
+run "a_hook_is_one_line" {
+  command = plan
+
+  variables {
+    apps = { api = { host = "oci-main", compose = "compose.yaml", pre_deploy = "a\nb" } }
+  }
+
+  expect_failures = [var.apps]
+}
+
+run "a_service_is_a_service_name" {
+  command = plan
+
+  variables {
+    apps = { api = { host = "oci-main", compose = "compose.yaml", service = "web; rm -rf /" } }
+  }
+
+  expect_failures = [var.apps]
+}
+
+run "hooks_are_an_error_on_a_platform" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = null
+    apps                 = { api = { host = "northflank-main", compose = "api.yaml", pre_deploy = "bin/migrate" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
 # Container platforms --------------------------------------------------------------------
 
 run "apps_on_a_platform_become_services" {

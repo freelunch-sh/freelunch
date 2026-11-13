@@ -22,12 +22,29 @@ variable "apps" {
     port = optional(number)
     # Compute plan of the app on a container platform; without it the stack's plan.
     plan = optional(string)
+    # One command each, run in the app's service on a VM host: pre_deploy in the new image after the
+    # pull and before anything is replaced (a failure leaves the running version alone), post_deploy
+    # in the running container once it is healthy. service names the Compose service they run in;
+    # without it the one named like the app, or the only one.
+    pre_deploy  = optional(string)
+    post_deploy = optional(string)
+    service     = optional(string)
   }))
   default = {}
 
   validation {
     condition     = alltrue([for name in keys(var.apps) : can(regex("^[a-z0-9][a-z0-9_-]*$", name))])
     error_message = "App names must be lowercase and contain only letters, digits, '-' and '_'."
+  }
+
+  validation {
+    condition     = alltrue([for a in values(var.apps) : (a.pre_deploy == null ? true : !strcontains(a.pre_deploy, "\n")) && (a.post_deploy == null ? true : !strcontains(a.post_deploy, "\n"))])
+    error_message = "pre_deploy and post_deploy are one command each, on one line. For more, put a script in the image and call it."
+  }
+
+  validation {
+    condition     = alltrue([for a in values(var.apps) : a.service == null ? true : can(regex("^[A-Za-z0-9][A-Za-z0-9_.-]*$", a.service))])
+    error_message = "service must be the name of a service in the app's Compose file."
   }
 
   validation {

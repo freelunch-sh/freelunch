@@ -3215,7 +3215,7 @@ graph_gate() {
 # remote_script <host> <redact>: the script deploy pipes to `sudo bash -s` on a host.
 # Files travel as base64 heredocs; with redact=1 (dry run) contents and secrets are left out.
 remote_script() {
-  local host="$1" redact="$2" name compose env_file server username var token what needs_env
+  local host="$1" redact="$2" name compose env_file server username var token what needs_env service pre_deploy post_deploy
   local targets="$TMP/targets.json"
 
   cat <<EOF
@@ -3236,18 +3236,47 @@ put() {
   mv "$1.new" "$1"
 }
 
-# up <app>: pull and start the app, then wait until every container is running, and
-# healthy when it has a healthcheck. Prints the digest each image tag resolved to, so a
-# deploy can be traced to (or pinned at) the exact build.
+# hook_service <app> <service>: the Compose service a hook runs in: the one named, else the one
+# named like the app, else the only one
+hook_service() {
+  local list
+  if [ -n "$2" ]; then echo "$2"; return; fi
+  list="$(docker compose config --services)"
+  if printf '%s\n' "$list" | grep -qx "$1"; then echo "$1"
+  elif [ "$(printf '%s\n' "$list" | grep -c .)" -eq 1 ]; then echo "$list"
+  else echo "!! $1 has several services; name the one the hooks run in with service in apps.tfvars" >&2; exit 1; fi
+}
+
+# up <app> [service] [pre_deploy] [post_deploy]: pull and start the app, then wait until every
+# container is running, and healthy when it has a healthcheck. pre_deploy runs in the new image
+# before anything is replaced, post_deploy in the running container once it is healthy. Prints
+# the digest each image tag resolved to, so a deploy can be traced to (or pinned at) the exact build.
 up() {
+  local svc
   echo "--> $1"
   cd "$apps/$1"
   docker compose pull --quiet
+  if [ -n "${3:-}" ]; then
+    svc="$(hook_service "$1" "${2:-}")"
+    echo "    pre_deploy in $svc: $3"
+    if ! docker compose run --rm -T "$svc" sh -c "$3"; then
+      echo "!! $1: pre_deploy failed, so the running version was left alone" >&2
+      exit 1
+    fi
+  fi
   if ! docker compose up -d --remove-orphans --wait --wait-timeout "$timeout"; then
     echo "!! $1 is not healthy after ${timeout}s" >&2
     docker compose ps -a >&2 || true
     docker compose logs --no-color --tail 50 >&2 || true
     exit 1
+  fi
+  if [ -n "${4:-}" ]; then
+    svc="$(hook_service "$1" "${2:-}")"
+    echo "    post_deploy in $svc: $4"
+    if ! docker compose exec -T "$svc" sh -c "$4"; then
+      echo "!! $1: post_deploy failed. The new version is running" >&2
+      exit 1
+    fi
   fi
   docker compose config --images | while read -r image; do
     echo "    $image = $(docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}' "$image" | sed 's/.*@//')"
@@ -3275,7 +3304,7 @@ EOF
   done < <(jq -r 'to_entries[] | [.key, .value.username, .value.password_env] | @tsv' "$TMP/registries.json")
 
   # Fields split at \x1f, which unlike a tab keeps an empty env_file in its place.
-  while IFS=$'\x1f' read -r name compose env_file bucket database; do
+  while IFS=$'\x1f' read -r name compose env_file bucket database service pre_deploy post_deploy; do
     [[ -n "$name" ]] || continue
     echo "put \"\$apps/$name/compose.yaml\" 0640 <<'FREELUNCH_EOF'"
     if [[ "$redact" == 1 ]]; then echo "<$compose>"; else b64 < "$compose"; fi
@@ -3297,8 +3326,8 @@ EOF
       fi
       echo "FREELUNCH_EOF"
     fi
-    echo "up $name"
-  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // ""), (.value.database // "")] | join("\u001f")' "$targets")
+    echo "up $name $(shq "$service") $(shq "$pre_deploy") $(shq "$post_deploy")"
+  done < <(jq -r --arg h "$host" '.[$h].apps | to_entries[] | [.key, .value.compose, (.value.env_file // ""), (.value.bucket // ""), (.value.database // ""), (.value.service // ""), (.value.pre_deploy // ""), (.value.post_deploy // "")] | join("\u001f")' "$targets")
 
   if [[ "$(jq -r --arg h "$host" '.[$h].tunnel' "$targets")" == "true" ]]; then
     echo "put \"\$apps/cloudflared/compose.yaml\" 0640 <<'FREELUNCH_EOF'"

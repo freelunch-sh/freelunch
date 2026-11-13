@@ -224,9 +224,9 @@ before and after a deploy, a timer, and a way for heavy work to queue.
 `schedule_oncalendar` turns one into a systemd `OnCalendar` value and `schedule_minutes`
 into the minutes of the week it fires at. Anything else is refused with the three forms.
 
-- [ ] `deploy/variables.tf`: per app, `pre_deploy`, `post_deploy` (optional strings) and
+- [x] `deploy/variables.tf`: per app, `pre_deploy`, `post_deploy` (optional strings) and
   `service` (optional string). Validation: no newline in a hook. Tests in `deploy/tests/`
-- [ ] `remote_script`: for an app with `pre_deploy`, after `docker compose pull` and before
+- [x] `remote_script`: for an app with `pre_deploy`, after `docker compose pull` and before
   `up -d`, run `docker compose run --rm -T <service> sh -c <hook>` (the new image, the app's
   env and volumes). A failing hook stops the deploy of that app before anything is replaced,
   and prints "!! <app>: pre_deploy failed, so the running version was left alone".

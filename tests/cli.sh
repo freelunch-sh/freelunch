@@ -57,9 +57,16 @@ fi
 if [[ "$1 ${2:-}" == "compose --project-directory" && " $* " == *" exec "* ]]; then exit "${FAKE_EXEC_RC:-0}"; fi
 # docker compose --project-directory <dir> logs ...: a line named after the app's folder
 if [[ "$1 ${2:-}" == "compose --project-directory" && " $* " == *" logs "* ]]; then echo "log line from $(basename "$3")"; exit 0; fi
+# docker compose config --services (in the app's folder): FAKE_SERVICES, or one service named like the app
+if [[ "$1 ${2:-} ${3:-} ${4:-}" == "compose config --services " ]]; then
+  if [[ -n "${FAKE_SERVICES:-}" ]]; then tr ' ' '\n' <<< "$FAKE_SERVICES"; else basename "$PWD"; fi; exit 0
+fi
 case "$1 ${2:-}" in
   "login "*)   echo "stdin: $(cat)" >> "$FAKE_LOG" ;;
   "compose up") [[ "$(basename "$PWD")" != "${FAKE_UNHEALTHY:-}" ]] || exit 1 ;;
+  # hooks: pre_deploy runs with `run`, post_deploy with `exec`; FAKE_PRE_FAIL and FAKE_POST_FAIL name the app
+  "compose run")  [[ "$(basename "$PWD")" != "${FAKE_PRE_FAIL:-}" ]] || exit 1 ;;
+  "compose exec") [[ "$(basename "$PWD")" != "${FAKE_POST_FAIL:-}" ]] || exit 1 ;;
   "compose config") echo "example/$(basename "$PWD"):1.0" ;;
   # One container per app, stopped when the app is in FAKE_STOPPED.
   "compose ps")
@@ -2209,6 +2216,48 @@ test_trust_refuses_keys_that_dont_match() {
   fails trust_in "$p" gcp-main
   fails trust_in "$p"
   fails trust_in "$p" oci-main oci-edge-1
+}
+
+# pre_deploy runs in the new image after the pull and before the app is replaced; post_deploy in the
+# running container once it is healthy. A failing pre_deploy leaves the running version alone.
+test_deploy_runs_hooks_around_the_update() {
+  local p="$WORK/hooks" out
+  new_project "$p"
+  sed -i.bak 's|api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env" }|api = { host = "oci-main", compose = "../compose.yaml", env_file = "api.env", pre_deploy = "bin/migrate --safe", post_deploy = "bin/warm" }|' "$p/.freelunch/apps.tfvars"
+  out="$(GHCR_TOKEN=x deploy_in "$p" --dry-run 2>&1)"
+  contains "$out" "up api '' 'bin/migrate --safe' 'bin/warm'"
+  GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  equals "$(awk '/^docker compose (pull|run|up|exec) .* @ api$/ { printf "%s ", $3 }' "$p/fake.log")" "pull run up exec "
+  grep -q 'docker compose run --rm -T api sh -c bin/migrate --safe @ api' "$p/fake.log"
+  grep -q 'docker compose exec -T api sh -c bin/warm @ api' "$p/fake.log"
+  # a failing pre_deploy stops before the app is replaced
+  rm "$p/fake.log"
+  if out="$(GHCR_TOKEN=x FAKE_PRE_FAIL=api deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "!! api: pre_deploy failed, so the running version was left alone"
+  fails grep -q 'docker compose up .* @ api$' "$p/fake.log"
+  # a failing post_deploy fails the deploy and says the new version runs
+  rm "$p/fake.log"
+  if out="$(GHCR_TOKEN=x FAKE_POST_FAIL=api deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "!! api: post_deploy failed. The new version is running"
+  grep -q 'docker compose up .* @ api$' "$p/fake.log"
+  # several services: name the one, or it stops
+  rm "$p/fake.log"
+  if out="$(GHCR_TOKEN=x FAKE_SERVICES="web worker" deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "!! api has several services; name the one the hooks run in with service in apps.tfvars"
+  sed -i.bak 's|pre_deploy = "bin/migrate --safe"|service = "worker", pre_deploy = "bin/migrate --safe"|' "$p/.freelunch/apps.tfvars"
+  rm "$p/fake.log"
+  GHCR_TOKEN=x FAKE_SERVICES="web worker" deploy_in "$p" >/dev/null 2>&1
+  grep -q 'docker compose run --rm -T worker sh -c bin/migrate --safe @ api' "$p/fake.log"
+  grep -q 'docker compose exec -T worker sh -c bin/warm @ api' "$p/fake.log"
+}
+
+# Hooks are for VM hosts: an app on a platform with one is an error.
+test_hooks_on_a_platform_are_refused() {
+  local p="$WORK/hooks-platform" out
+  nf_project "$p"
+  sed -i.bak 's|api = {|api = { pre_deploy = "bin/migrate",|' "$p/.freelunch/apps.tfvars"
+  if out="$(GHCR_TOKEN=x nf_in "$p" deploy 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "pre_deploy and post_deploy run on VM hosts"
 }
 
 test_deploy_fails_loudly_when_an_app_is_unhealthy() {
