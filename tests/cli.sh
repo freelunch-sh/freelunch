@@ -41,10 +41,24 @@ if [[ -n "${FAKE_HOST_KEY:-}" ]] && ! ssh-keygen -F "${dest#*@}" -f "$known" >/d
   echo "${dest#*@} $FAKE_HOST_KEY" >> "$known"
 fi
 [[ "$last" == "true" ]] && exit 0
+mkdir -p "$FAKE_ROOT/systemd"
 # a command given on the line (freelunch volume), with stdin for the command itself
-if [[ "$last" == "S=''; "* ]]; then exec bash -c "${last//\/opt\/freelunch\/apps/$FAKE_ROOT/apps}"; fi
-sed "s#/opt/freelunch/apps#$FAKE_ROOT/apps#" | bash -s
+if [[ "$last" == "S=''; "* ]]; then last="${last//\/opt\/freelunch\//$FAKE_ROOT/}"; exec bash -c "${last//\/etc\/systemd\/system/$FAKE_ROOT/systemd}"; fi
+sed -e "s#/opt/freelunch/#$FAKE_ROOT/#g" -e "s#/etc/systemd/system#$FAKE_ROOT/systemd#g" | bash -s
 EOF
+# systemctl: logs what it is asked, and answers the timers jobs asks about from $FAKE_ROOT/systemd
+cat > "$WORK/bin/systemctl" <<'EOF'
+#!/bin/sh
+echo "systemctl $*" >> "$FAKE_LOG"
+EOF
+chmod +x "$WORK/bin/systemctl"
+# flock <options> <fd>: logs what it is asked, and says the lock is held when FAKE_FLOCK_BUSY is set
+cat > "$WORK/bin/flock" <<'EOF'
+#!/bin/sh
+echo "flock $*" >> "$FAKE_LOG"
+[ -z "${FAKE_FLOCK_BUSY:-}" ]
+EOF
+chmod +x "$WORK/bin/flock"
 cat > "$WORK/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 echo "docker $* @ $(basename "$PWD")" >> "$FAKE_LOG"
@@ -2249,6 +2263,80 @@ test_deploy_runs_hooks_around_the_update() {
   GHCR_TOKEN=x FAKE_SERVICES="web worker" deploy_in "$p" >/dev/null 2>&1
   grep -q 'docker compose run --rm -T worker sh -c bin/migrate --safe @ api' "$p/fake.log"
   grep -q 'docker compose exec -T worker sh -c bin/warm @ api' "$p/fake.log"
+}
+
+# Two deploys to one host queue on a lock; one that cannot get it in 15 minutes says another holds it.
+test_deploy_takes_the_host_lock() {
+  local p="$WORK/lock" out
+  new_project "$p"
+  GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  grep -q '^flock -w 900 9$' "$p/fake.log"
+  exists "$p/host/locks/deploy.lock"
+  # held by another deploy: nothing is pulled, and the message says why
+  rm "$p/fake.log"
+  if out="$(GHCR_TOKEN=x FAKE_FLOCK_BUSY=1 FREELUNCH_LOCK_WAIT=120 deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" "!! another deploy holds the lock on this host"
+  contains "$out" "did not finish in 2 minutes"
+  fails grep -q 'docker compose pull' "$p/fake.log"
+}
+
+# The three schedule forms become systemd calendar values and the minutes of the week they fire at.
+test_schedules_become_calendar_values_and_minutes() {
+  local out
+  out="$(bash -c '
+    die() { echo "die: $*"; exit 1; }
+    eval "$(sed -n "/^SCHEDULE_FORMS=/,/^# job_unit_files/p" "$1" | sed "\$d")"
+    schedule_oncalendar "hourly :05"; schedule_oncalendar "daily 03:30"; schedule_oncalendar "weekly sun 23:59"
+    schedule_minutes "weekly mon 00:00"; schedule_minutes "weekly sun 23:59"
+    schedule_minutes "daily 01:30" | tr " " "\n" | sed -n "1p;2p;7p"
+    schedule_minutes "hourly :05" | wc -w | tr -d " "
+    schedule_minutes "hourly :05" | tr " " "\n" | sed -n "1p;2p;168p"
+    schedule_oncalendar "weekly funday 03:00"
+  ' _ "$CLI" 2>&1)" || true
+  equals "$out" "$(printf '%s\n' '*-*-* *:05:00 UTC' '*-*-* 03:30:00 UTC' 'Sun *-*-* 23:59:00 UTC' 0 10079 90 1530 8730 168 5 65 10025 'die: schedule: '"'"'weekly funday 03:00'"'"' is not a schedule. Use "hourly :MM", "daily HH:MM" or "weekly <mon..sun> HH:MM" (UTC; for example "daily 03:30")')"
+}
+
+# jobs: a timer and a service per job on the host, a script that runs the command in the app's service,
+# the lock only on heavy ones, and the timer of a job that left apps.tfvars removed.
+test_deploy_writes_a_timer_for_each_job() {
+  local p="$WORK/jobs" out
+  new_project "$p"
+  cat >> "$p/.freelunch/apps.tfvars" <<'TFVARS'
+jobs = {
+  report = { app = "api", command = "bin/report --all", schedule = "daily 03:30", heavy = true, timeout_minutes = 30 }
+  ping   = { app = "api", command = "bin/ping", schedule = "weekly sun 04:15", service = "web" }
+}
+TFVARS
+  out="$(GHCR_TOKEN=x deploy_in "$p" --dry-run 2>&1)"
+  contains "$out" "# job report: daily 03:30 (OnCalendar=*-*-* 03:30:00 UTC), bin/report --all in api, heavy"
+  contains "$out" "# job ping: weekly sun 04:15 (OnCalendar=Sun *-*-* 04:15:00 UTC), bin/ping in api"
+  GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  contains "$(cat "$p/host/systemd/freelunch-report.timer")" "OnCalendar=*-*-* 03:30:00 UTC"
+  contains "$(cat "$p/host/systemd/freelunch-ping.timer")" "OnCalendar=Sun *-*-* 04:15:00 UTC"
+  contains "$(cat "$p/host/systemd/freelunch-report.service")" "ExecStart=/usr/bin/flock /opt/freelunch/locks/heavy.lock /bin/bash /opt/freelunch/jobs/report.sh"
+  contains "$(cat "$p/host/systemd/freelunch-report.service")" "TimeoutStartSec=30m"
+  contains "$(cat "$p/host/systemd/freelunch-ping.service")" "ExecStart=/bin/bash /opt/freelunch/jobs/ping.sh"
+  lacks "$(cat "$p/host/systemd/freelunch-ping.service")" "flock"
+  contains "$(cat "$p/host/jobs/report.sh")" "sh -c 'bin/report --all'"
+  contains "$(cat "$p/host/jobs/ping.sh")" "svc='web'"
+  grep -q '^systemctl daemon-reload$' "$p/fake.log"
+  grep -q '^systemctl enable freelunch-report.timer' "$p/fake.log"
+  grep -q '^systemctl restart freelunch-ping.timer' "$p/fake.log"
+  # the job script runs the command in the service (the fake docker records it)
+  bash "$p/host/jobs/ping.sh" >/dev/null 2>&1 || true
+  # a job that left apps.tfvars loses its units and script, the other stays
+  sed -i.bak '/^  ping /d' "$p/.freelunch/apps.tfvars"
+  rm "$p/fake.log"
+  GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  fails test -e "$p/host/systemd/freelunch-ping.timer"
+  fails test -e "$p/host/systemd/freelunch-ping.service"
+  fails test -e "$p/host/jobs/ping.sh"
+  exists "$p/host/systemd/freelunch-report.timer"
+  grep -q '^systemctl disable --now freelunch-ping.timer' "$p/fake.log"
+  # a schedule that is none of the three forms is refused with them
+  sed -i.bak 's|daily 03:30|every night|' "$p/.freelunch/apps.tfvars"
+  if out="$(GHCR_TOKEN=x deploy_in "$p" 2>&1)"; then echo "deploy should have failed"; return 1; fi
+  contains "$out" 'A schedule is one of'
 }
 
 # Hooks are for VM hosts: an app on a platform with one is an error.

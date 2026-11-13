@@ -86,7 +86,9 @@ locals {
     [for s in data.terraform_remote_state.services : { for n, c in try(nonsensitive(s.outputs.service_credentials), {}) : n => c.env }],
     [{ for n, c in nonsensitive(var.extra_service_credentials) : n => c.env }]
   )...)
-  need_nodes = setunion(keys(var.apps), keys(local.buckets), keys(local.databases), keys(local.services))
+  need_nodes       = setunion(keys(var.apps), keys(local.buckets), keys(local.databases), keys(local.services))
+  unknown_job_apps = sort([for jn, j in var.jobs : "${jn} (app ${j.app})" if !contains(keys(var.apps), j.app)])
+
   unknown_needs = sort(flatten([
     for name, ns in local.needs : [for n in ns : "${name} (needs ${n})" if !contains(local.need_nodes, n) && !(n == var.apps[name].bucket || n == var.apps[name].database)]
   ]))
@@ -178,6 +180,7 @@ locals {
       user     = contains(keys(local.platforms), h) ? null : try(coalesce(try(var.hosts[h].user, null), try(local.inventory[h].ssh_user, null)), "ubuntu")
       arch     = try(local.inventory[h].arch, local.platforms[h].arch, null)
       apps     = { for name, a in local.apps : name => { compose = a.compose, env_file = a.env_file, bucket = a.bucket, database = a.database, pre_deploy = a.pre_deploy, post_deploy = a.post_deploy, service = a.service } if a.host == h }
+      jobs     = { for name, j in var.jobs : name => j if try(local.apps[j.app].host, null) == h }
       tunnel   = contains(keys(local.tunnels), h)
       urls     = sort([for hostname, r in local.routes : "https://${hostname}" if r.host == h])
     }
@@ -306,6 +309,7 @@ locals {
       # A missing compose file is reported with the other missing files.
       !fileexists(a.compose) ? "" : local.compose[name] == null ? "${name}: ${a.compose} isn't a YAML file docker compose can read" : "",
       fileexists(a.compose) && local.compose[name] != null && length(local.compose_services[name]) != 1 ? "${name}: ${a.host} runs one container per app, and this Compose file has ${length(local.compose_services[name])} services. Give each service an app of its own, with a Compose file of its own" : "",
+      [for jn, j in var.jobs : "job ${jn}: jobs run on VM hosts, and the app ${j.app} runs on ${a.host}, a container platform. Run it from your pipeline, or on the platform's own scheduler" if j.app == name],
       a.pre_deploy != null || a.post_deploy != null ? "${name}: pre_deploy and post_deploy run on VM hosts, and ${a.host} is a container platform. Run the step from the app itself, or from your pipeline" : "",
       !can(regex("^[a-z][a-z0-9]*(-[a-z0-9]+)*$", name)) || length(name) < 3 || length(name) > 54 ? "${name}: on ${a.host} the app becomes a service named after it, and such a name has 3 to 54 lowercase letters, digits and single hyphens, starting with a letter" : "",
       try(local.specs[name].image, "") == null ? "${name}: the service has no image. ${a.host} pulls images and builds nothing, so build and push it first (freelunch init --image-workflow)" : "",

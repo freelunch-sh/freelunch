@@ -235,17 +235,17 @@ into the minutes of the week it fires at. Anything else is refused with the thre
   prints the hooks. On a container platform a hook is an error from `deploy/` ("hooks run on
   VM hosts"), listed with the other `platform_problems`. Tests: order in `$FAKE_LOG`, a
   failing `pre_deploy` leaves `compose up` uncalled, the platform error
-- [ ] Host locks. `remote_script` makes `/opt/freelunch/locks/` and runs the whole deploy
+- [x] Host locks. `remote_script` makes `/opt/freelunch/locks/` and runs the whole deploy
   under `flock -w 900 /opt/freelunch/locks/deploy.lock`, so two deploys to one host queue
   instead of pulling at once; if the lock isn't free in 15 minutes it fails saying another
   deploy holds it. Add a fake `flock` (run the command, log the lock file) and change the
   fake `ssh` to rewrite the whole `/opt/freelunch/` prefix to `$FAKE_ROOT/` (so
   `$FAKE_ROOT/apps` stays where tests expect it)
-- [ ] `deploy/variables.tf`: top-level `jobs = map(object({ app, command, schedule,
+- [x] `deploy/variables.tf`: top-level `jobs = map(object({ app, command, schedule,
   service = optional, heavy = optional(bool, false), timeout_minutes = optional(number, 60) }))`.
   Validations: the app exists, the schedule parses (do the format check in HCL with a regex,
   the same three forms), the name matches the app-name pattern
-- [ ] `remote_script`: for each job on this host write
+- [x] `remote_script`: for each job on this host write
   `/etc/systemd/system/freelunch-<job>.service` and `.timer`, `systemctl daemon-reload`,
   `systemctl enable --now` the timer. The service runs
   `docker compose --project-directory <app dir> exec -T <service> sh -c <command>` with

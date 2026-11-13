@@ -8,6 +8,11 @@ output "targets" {
   }
 
   precondition {
+    condition     = length(local.unknown_job_apps) == 0
+    error_message = "Jobs name apps that aren't in apps.tfvars: ${join(", ", local.unknown_job_apps)}. Known apps: ${length(var.apps) > 0 ? join(", ", sort(keys(var.apps))) : "none"}."
+  }
+
+  precondition {
     condition     = length(local.missing_files) == 0
     error_message = "Files listed in apps.tfvars do not exist: ${join(", ", local.missing_files)}. If this runs in CI, your FREELUNCH_BUNDLE is probably out of date: run freelunch ci secrets on the machine that has the files."
   }

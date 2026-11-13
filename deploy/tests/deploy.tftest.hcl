@@ -229,6 +229,85 @@ run "hooks_are_an_error_on_a_platform" {
   expect_failures = [output.platforms]
 }
 
+# Jobs ------------------------------------------------------------------------------------
+
+run "jobs_reach_the_host_their_app_runs_on" {
+  command = plan
+
+  variables {
+    jobs = {
+      nightly = { app = "api", command = "bin/report", schedule = "daily 03:30", heavy = true, timeout_minutes = 30 }
+      ping    = { app = "api", command = "bin/ping", schedule = "hourly :15", service = "web" }
+    }
+  }
+
+  assert {
+    condition = (
+      output.targets["oci-main"].jobs.nightly.schedule == "daily 03:30" &&
+      output.targets["oci-main"].jobs.nightly.heavy &&
+      output.targets["oci-main"].jobs.nightly.timeout_minutes == 30 &&
+      !output.targets["oci-main"].jobs.ping.heavy &&
+      output.targets["oci-main"].jobs.ping.timeout_minutes == 60 &&
+      output.targets["oci-main"].jobs.ping.service == "web"
+    )
+    error_message = "A job is part of its app's host, with defaults for heavy and the timeout."
+  }
+}
+
+run "a_job_needs_an_app_that_exists" {
+  command = plan
+
+  variables {
+    jobs = { nightly = { app = "nothing", command = "bin/report", schedule = "daily 03:30" } }
+  }
+
+  expect_failures = [output.targets]
+}
+
+run "a_schedule_has_one_of_three_forms" {
+  command = plan
+
+  variables {
+    jobs = { nightly = { app = "api", command = "bin/report", schedule = "every day at 3" } }
+  }
+
+  expect_failures = [var.jobs]
+}
+
+run "a_weekly_schedule_names_a_day" {
+  command = plan
+
+  variables {
+    jobs = { nightly = { app = "api", command = "bin/report", schedule = "weekly someday 03:00" } }
+  }
+
+  expect_failures = [var.jobs]
+}
+
+run "a_job_name_is_a_unit_name" {
+  command = plan
+
+  variables {
+    jobs = { "Night Report" = { app = "api", command = "bin/report", schedule = "daily 03:30" } }
+  }
+
+  expect_failures = [var.jobs]
+}
+
+run "jobs_are_an_error_on_a_platform" {
+  command = plan
+
+  variables {
+    config_dir           = "tests/fixtures/platform"
+    inventory_state_path = "tests/fixtures/platform/hybrid.tfstate"
+    tunnel_state_path    = null
+    apps                 = { api = { host = "northflank-main", compose = "api.yaml" } }
+    jobs                 = { nightly = { app = "api", command = "bin/report", schedule = "daily 03:30" } }
+  }
+
+  expect_failures = [output.platforms]
+}
+
 # Container platforms --------------------------------------------------------------------
 
 run "apps_on_a_platform_become_services" {

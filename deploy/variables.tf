@@ -53,6 +53,49 @@ variable "apps" {
   }
 }
 
+variable "jobs" {
+  description = <<-EOT
+    Scheduled commands, keyed by job name: command runs in the app's service on its VM host on a
+    systemd timer. schedule is one of "hourly :MM", "daily HH:MM" or "weekly <mon..sun> HH:MM", all
+    UTC. A heavy job queues behind other heavy jobs on the host (one at a time), and is stopped
+    after timeout_minutes.
+  EOT
+  type = map(object({
+    app             = string
+    command         = string
+    schedule        = string
+    service         = optional(string)
+    heavy           = optional(bool, false)
+    timeout_minutes = optional(number, 60)
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for name in keys(var.jobs) : can(regex("^[a-z0-9][a-z0-9_-]*$", name))])
+    error_message = "Job names must be lowercase and contain only letters, digits, '-' and '_'."
+  }
+
+  validation {
+    condition     = alltrue([for j in values(var.jobs) : can(regex("^(hourly :[0-5][0-9]|daily ([01][0-9]|2[0-3]):[0-5][0-9]|weekly (mon|tue|wed|thu|fri|sat|sun) ([01][0-9]|2[0-3]):[0-5][0-9])$", j.schedule))])
+    error_message = "A schedule is one of \"hourly :MM\", \"daily HH:MM\" or \"weekly <mon..sun> HH:MM\", in UTC (for example \"daily 03:30\")."
+  }
+
+  validation {
+    condition     = alltrue([for j in values(var.jobs) : !strcontains(j.command, "\n") && j.command != ""])
+    error_message = "A job's command is one line."
+  }
+
+  validation {
+    condition     = alltrue([for j in values(var.jobs) : j.timeout_minutes >= 1 && j.timeout_minutes <= 1440])
+    error_message = "timeout_minutes is between 1 and 1440."
+  }
+
+  validation {
+    condition     = alltrue([for j in values(var.jobs) : j.service == null ? true : can(regex("^[A-Za-z0-9][A-Za-z0-9_.-]*$", j.service))])
+    error_message = "A job's service must be the name of a service in the app's Compose file."
+  }
+}
+
 variable "registries" {
   description = "Private registries to log in to before pulling, keyed by server (ghcr.io, docker.io). The password is read from the environment variable named by password_env."
   type = map(object({

@@ -12,6 +12,12 @@ release can change commands and the project layout.
 
 ### Added
 
+- **Scheduled `jobs` on a VM host.** `jobs` in `apps.tfvars` (`app`, `command`, `schedule`, `service`,
+  `heavy`, `timeout_minutes`) become a systemd timer and service per job on the host. Schedules are
+  `hourly :MM`, `daily HH:MM` or `weekly <mon..sun> HH:MM`, in UTC. Heavy jobs run one at a time per host.
+  A job that is removed from `apps.tfvars` loses its timer at the next deploy.
+- **Deploys to one host queue.** A deploy takes a lock on the host (`flock`, up to 15 minutes), so two
+  deploys, from a laptop and CI say, never pull and replace at once.
 - **`pre_deploy` and `post_deploy` hooks per app** (and `service` to say which Compose service they run in).
   `pre_deploy` runs in the new image after the pull and before anything is replaced; if it fails the running
   version is left alone. `post_deploy` runs in the running container once it is healthy. VM hosts only.
