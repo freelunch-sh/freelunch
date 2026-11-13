@@ -283,10 +283,15 @@ backup is a manual `volume pull` to the laptop.
   `deploy --dry-run` and `doctor`, naming the variable. It is never defaulted.
 - Repository path in the bucket: `freelunch/<project name>/<app>`.
 
-- [ ] 🔬 Pin the restic image by digest. Find the current release and its multi-arch digest
+- [x] 🔬 Pin the restic image by digest. Find the current release and its multi-arch digest
   from the registry (as `cloudflared` is pinned in `providers/cloudflare/apps/`), write tag,
   digest and the date in `shared/` next to where it is used. With no network: leave the tag,
   a `TODO(pin)` comment and a line under this box
+  **Answer (2026-11-13):** `restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510`,
+  the index digest of tag 0.19.1 (built 2026-07-05; linux/amd64 and linux/arm64 among its platforms), read from Docker
+  Hub's registry API. The arm64 image is 16.8 MB compressed, its entrypoint is `/entrypoint.sh`, so the backup
+  script passes restic's arguments after the image name. Recorded in `shared/restic.env` (`RESTIC_IMAGE=`), which the
+  CLI reads. The `latest` tag points at an index with another digest but the same build, so it is not used.
 - [ ] `deploy/variables.tf`: per app `backup = optional(object({ bucket, schedule,
   before = optional(string), keep_daily = optional(number, 7), keep_weekly =
   optional(number, 4), paths = optional(list(string), []) }))`. Validations: the bucket is a
