@@ -169,7 +169,7 @@ whether a VM's disk is filling.
 - [x] The same numbers in `freelunch check <host> --json` (`disk_percent`, `memory_used_mb`,
   `memory_total_mb`), and the host node is unhealthy at 95% disk with that reason. Update
   the node table in `docs/graph.md`
-- [ ] Docs: a "Day two" section in `docs/deploy-a-container.md` covering logs, restart,
+- [x] Docs: a "Day two" section in `docs/deploy-a-container.md` covering logs, restart,
   shell and reading `status`
 
 ## 3. A capacity wait that survives a bad night

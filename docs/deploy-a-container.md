@@ -503,6 +503,37 @@ pulls by digest and refuses any other content. freelunch pins `cloudflared` the 
 `freelunch deploy oci-main` deploys one host and `freelunch deploy oci` all OCI hosts. To
 deploy from CI after each new image, see [Run freelunch from CI](ci.md#5-deploy-from-github-actions).
 
+## Day two: logs, restart, shell and the host's numbers
+
+Once the app runs, these work on a VM host (SSH with the pinned key, nothing to install):
+
+```bash
+freelunch logs api                    # the last 50 lines; --lines 200 for more
+freelunch logs api --follow           # keep reading until Ctrl-C
+freelunch logs cloudflared            # the tunnel connector is an app name too
+freelunch restart api                 # restart, then wait until it is healthy
+freelunch shell api                   # a shell in the app's container
+freelunch shell api -- bin/console    # one command; its exit code is yours
+```
+
+`restart` waits like a deploy does (`FREELUNCH_DEPLOY_TIMEOUT`, 180 seconds) and, if the app
+stays unhealthy, prints the last 50 log lines and fails. `shell` picks the service named like the
+app, or the only one; when an app has several, choose with `--service worker`. If the app runs
+on several hosts, name one with `--host`. On Northflank, `logs` reads its API, and `restart` and
+`shell` tell you to use Northflank's own tools.
+
+`freelunch status` prints the host's numbers under each host:
+
+```
+Apps on oci-main
+  disk 41% of 93 GB, memory 2.1 of 12 GB, load 0.10
+  api                  running, healthy
+```
+
+At 85% disk it adds a line saying so (look with `docker system df` on the host, or in
+`freelunch shell <app>`). `freelunch check --json` gives the same numbers on the host's row
+(`disk_percent`, `memory_used_mb`, `memory_total_mb`), and a host at 95% disk is unhealthy.
+
 ## 8. Tear down
 
 ```bash
