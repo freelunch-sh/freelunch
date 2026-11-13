@@ -153,7 +153,12 @@ A retry applies its plan without asking, so it is careful about what it applies:
 - Only "out of capacity", `TooManyRequests` and errors that leave nothing half done are
   retried: a 401 for clock skew (a request signed before the machine slept and sent after
   it woke), and a network failure while planning, or on a read while applying. Any other
-  error stops it, a failed write among them, since what it was writing may exist.
+  error stops it.
+- A network failure of the request that makes the VM (the answer is lost, the VM may exist)
+  is not simply retried: with the OCI CLI, the wait lists the instances with the plan's name
+  in its compartment, ignoring terminated ones. None, and it tries again. One, and it
+  imports it into the state and goes on; if the import fails it stops with the VM's OCID
+  and the import command. Without the OCI CLI it stops, as it did before.
 - A plan that would destroy or replace anything stops it too. That can happen when the
   tfvars change while it waits.
 - Ctrl-C stops it. When you press it during an attempt, tofu/terraform still stop

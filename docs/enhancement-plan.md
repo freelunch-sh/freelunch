@@ -177,7 +177,7 @@ whether a VM's disk is filling.
 Read first: `retry_reason`, `transient_why`, the wait loop that calls them, `end_wait`,
 `oci_instances`, and [oci-wait-gaps.md](oci-wait-gaps.md) items 1, 2, 4, 6, 8, 9.
 
-- [ ] A lost `LaunchInstance` answer no longer ends the wait (gap 1). When an apply in a
+- [x] A lost `LaunchInstance` answer no longer ends the wait (gap 1). When an apply in a
   wait fails with a network error on `POST .../instances`, look for the VM before deciding:
   `oci compute instance list` in the plan's compartment, filtered by the display name the
   plan creates (both are in the saved plan's JSON), ignoring `TERMINATED` and `TERMINATING`.

@@ -1227,6 +1227,69 @@ transient_why() {
   echo "OCI couldn't be reached${failure:+ ($failure)}"
 }
 
+# lost_launch_error <output>: whether every error in a failed apply is a network failure of the
+# POST that makes an instance, so the VM may exist although OCI's answer never came
+lost_launch_error() {
+  grep 'Error: ' "$1" | strip_colors | awk -v net="$NET_FAILURES" '
+    { line = tolower($0) }
+    line ~ /error: post "[^"]*\/instances\/?"/ && line ~ tolower(net) { lost = 1; next }
+    { other = 1 }
+    END { exit (lost && !other) ? 0 : 1 }'
+}
+
+# check_lost_launch: after a lost answer to a launch, look for the VM before deciding. Returns 0 when
+# no VM of the plan exists (so the attempt can be repeated), 2 when it found VMs and imported them
+# into the state, 1 when it could not tell or the import failed. LOST_WHY says what happened for the
+# first two, LOST_NOTE what to do for 1. It uses the variables of apply_until_capacity.
+check_lost_launch() {
+  local rows addr name comp listed ocid adopted="" absent="" tfvars cmd
+  LOST_WHY="" LOST_NOTE=""
+  if ! command -v oci >/dev/null; then
+    LOST_NOTE="The VM may exist now. With the OCI CLI freelunch would have looked for it and gone on; without it, look in the console, then run freelunch apply $p again"
+    return 1
+  fi
+  if [[ -z "$lookup_json" ]]; then
+    if tf_for "$p" "$dir" plan -input=false -no-color -out="$plan" ${args[@]+"${args[@]}"} ${offset[@]+"${offset[@]}"} > "$TMP/lost.out" 2>&1 \
+      && tf_for "$p" "$dir" show -json "$plan" > "$json" 2>/dev/null; then lookup_json="$json"
+    else
+      LOST_NOTE="The VM may exist now, and freelunch couldn't plan to find out. Look in the console, then run freelunch apply $p again"
+      return 1
+    fi
+  fi
+  rows="$(jq -r '.resource_changes[]? | select((.address | test("oci_core_instance\\.")) and (.change.actions | index("create"))) | [.address, (.change.after.display_name // ""), (.change.after.compartment_id // "")] | @tsv' "$lookup_json" 2>/dev/null)"
+  if [[ -z "$rows" ]]; then
+    LOST_NOTE="The plan makes no instance, so there is nothing to look for"
+    return 1
+  fi
+  tfvars="$(config_dir "$p")/terraform.tfvars"
+  oci_args "$tfvars"
+  while IFS=$'\t' read -r addr name comp; do
+    if [[ -z "$name" || -z "$comp" ]]; then
+      LOST_NOTE="The VM may exist now, but its name or compartment is not known until it is made ($addr). Look in the console, then run freelunch apply $p again"
+      return 1
+    fi
+    listed="$(oci compute instance list --compartment-id "$comp" --display-name "$name" --all "${OCI_ARGS[@]}" 2>&1)" || {
+      LOST_NOTE="The OCI CLI couldn't list the instances ($(oci_error "$listed")), so freelunch can't tell whether $name exists. Look in the console, then run freelunch apply $p again"
+      return 1
+    }
+    ocid="$(jq -r '[.data[]? | select(."lifecycle-state" != "TERMINATED" and ."lifecycle-state" != "TERMINATING")] | .[0].id // empty' <<< "$listed" 2>/dev/null || true)"
+    if [[ -z "$ocid" ]]; then absent="${absent:+$absent, }$name"; continue; fi
+    if ! tf_for "$p" "$dir" import -input=false ${args[@]+"${args[@]}"} ${offset[@]+"${offset[@]}"} "$addr" "$ocid" > "$TMP/import.out" 2>&1; then
+      cat "$TMP/import.out" >&2
+      cmd="$(basename "$TF") -chdir=$dir import -input=false ${args[*]-} '$addr' '$ocid'"
+      LOST_NOTE="The VM $name exists ($ocid), but importing it into the state failed. Import it yourself, then run freelunch apply $p again: $cmd"
+      return 1
+    fi
+    adopted="${adopted:+$adopted, }$name"
+  done <<< "$rows"
+  if [[ -n "$adopted" ]]; then
+    LOST_WHY="the answer to the request that makes $adopted was lost, but the VM had been made: imported it into the state"
+    return 2
+  fi
+  LOST_WHY="the answer to the request that makes $absent was lost, and no such VM exists, so it tries again"
+  return 0
+}
+
 # ads_in <plan json>: the availability domains the plan creates instances in, without the
 # tenancy prefix (Xyz:UK-LONDON-1-AD-2 is UK-LONDON-1-AD-2)
 ads_in() {
@@ -1343,8 +1406,8 @@ nap_sleep() {
 apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or approval, or ""> [extra args]
   local p="$1" reviewed="$2"; shift 2
   local dir out plan json profile="" interval delay pause cap deadline="" summary why a pid unreviewed rotates=0
-  local first=1 exact=0 resumes=0 phase nothing=0 before slept what="the reviewed plan" again reason swept="" sweeping=0
-  local args=() state=() approve=() offset=()
+  local first=1 exact=0 resumes=0 phase nothing=0 before slept what="the reviewed plan" again reason swept="" sweeping=0 lost
+  local args=() state=() approve=() offset=() lookup_json=""
   dir="$(stack_dir "$p")"
   interval="${FREELUNCH_CAPACITY_INTERVAL:-120}"
   [[ "$interval" =~ ^[0-9]+$ ]] || die "FREELUNCH_CAPACITY_INTERVAL is a number of seconds, not '$interval'"
@@ -1426,7 +1489,7 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
     wait_state waiting "attempt $WAIT_ATTEMPT is running"
     if [[ $first -eq 1 && $exact -eq 1 ]]; then
       # A saved plan already holds the variables; only the state has to be pointed at.
-      phase=apply
+      phase=apply lookup_json="$TMP/reviewed.json"
       if tf_for "$p" "$dir" apply -input=false ${state[@]+"${state[@]}"} "$reviewed" 2>&1 | keep "$out"; then break; fi
       # An earlier attempt that made part of the plan changed the state, so the plan can't be
       # applied as it is any more. Planning again goes on with the rest of it.
@@ -1436,13 +1499,14 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
         continue
       fi
     elif [[ $first -eq 1 && -z "$reviewed" ]]; then
-      phase=first
+      phase=first lookup_json=""
       if tf_for "$p" "$dir" apply -input=false ${args[@]+"${args[@]}"} ${approve[@]+"${approve[@]}"} "$@" 2>&1 | keep "$out"; then break; fi
     # Any other attempt shows only the summary of its plan, unless the plan fails or is refused.
     else
-      phase=plan
+      phase=plan lookup_json=""
       if tf_for "$p" "$dir" plan -input=false -no-color -out="$plan" ${args[@]+"${args[@]}"} ${offset[@]+"${offset[@]}"} "$@" > "$out" 2>&1; then
         tf_for "$p" "$dir" show -json "$plan" > "$json"
+        lookup_json="$json"
         summary="$(grep -m1 -E '^(Plan:|No changes)' "$out" || true)"
         WAIT_AD="$(ads_in "$json")" WAIT_SIZE="$(sizes_in "$json")"
         if jq -e 'any(.resource_changes[]?.change.actions[]; . == "delete")' "$json" >/dev/null; then
@@ -1479,12 +1543,21 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
     # What the attempt made goes to the state store now, in case this run ends before the next.
     sync_now "$p"
     reason="$(retry_reason "$out" "$phase")"
+    # A lost answer to the request that makes the VM: the VM may exist, so look for it first.
+    LOST_NOTE=""
+    if [[ -z "$reason" && "$phase" != plan ]] && lost_launch_error "$out"; then
+      lost=0; check_lost_launch || lost=$?
+      case "$lost" in 0) reason=lost ;; 2) reason=adopted ;; esac
+    fi
     case "$reason" in
       capacity)  delay="$interval"; why="out of host capacity" ;;
-      busy)      delay=$((delay * 2 > cap ? cap : delay * 2)); why="OCI asks for fewer requests (TooManyRequests)" ;;
+      busy)      [[ $delay -ge $interval ]] || delay="$interval"
+                 delay=$((delay * 2 > cap ? cap : delay * 2)); why="OCI asks for fewer requests (TooManyRequests)" ;;
       transient) delay="$interval"; why="$(transient_why "$out")" ;;
+      lost)      delay="$interval"; why="$LOST_WHY" ;;
+      adopted)   delay=1; why="$LOST_WHY" ;;
       *)         oci_hints "$out"
-                 die "$p: apply failed, and not for lack of capacity, so it is not retried (see the output above)" ;;
+                 die "$p: apply failed, and not for lack of capacity, so it is not retried (see the output above)${LOST_NOTE:+. $LOST_NOTE}" ;;
     esac
     # No room in one availability domain says nothing about the next: try each of them
     # before the pause. The plan of the next attempt shows when they have all been tried.

@@ -12,6 +12,9 @@ release can change commands and the project layout.
 
 ### Added
 
+- **A lost answer no longer ends a wait for capacity.** When the request that makes the VM fails on the
+  network, the wait looks for a VM of that name with the OCI CLI: none, and it tries again; one, and it
+  imports it into the state and goes on.
 - **Host numbers.** `status` shows each VM host's disk, memory and load under "Apps on <host>" and warns at 85%
   disk. `check --json` gives a host `disk_percent`, `memory_used_mb` and `memory_total_mb`, and a host at 95% disk is
   unhealthy.

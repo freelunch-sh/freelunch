@@ -10,7 +10,7 @@ Status checked against the code on 2026-11-12. **Fixed** means built; **open** m
 
 ### 1. A timed-out LaunchInstance stops the whole wait
 
-**Status: open, section 3.** `retry_reason` still retries a failed POST only in the plan phase.
+**Status: fixed.** A lost answer to the request that makes the VM now makes the wait look for the VM by name (`check_lost_launch`): none and it retries, one and it imports it into the state, an import that fails stops with the OCID and the command. Without the OCI CLI it still stops.
 
 The last wait died at attempt 24 after a 2-hour hang, with `Post ".../instances": read:
 operation timed out`.

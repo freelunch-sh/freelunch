@@ -158,6 +158,9 @@ case "${2:-}" in
     IFS=+ read -ra errors <<< "$end"
     for e in "${errors[@]}"; do oci_error "$e"; done
     exit 1 ;;
+  import)
+    [[ -z "${FAKE_IMPORT_FAIL:-}" ]] || { echo "│ Error: Cannot import non-existent remote object"; exit 1; }
+    exit 0 ;;
   plan)
     for a; do
       [[ "$a" == -out=* ]] || continue
@@ -213,6 +216,8 @@ case "$1 ${2:-}" in
     esac
     exit 0 ;;
   "compute instance")
+    # list: FAKE_INSTANCES is the JSON it answers with; with none, nothing, as the real CLI does for no instances
+    if [[ "${3:-}" == "list" ]]; then [[ -z "${FAKE_INSTANCES:-}" ]] || echo "$FAKE_INSTANCES"; exit 0; fi
     # get: the instance was created FAKE_INSTANCE_AGE seconds ago (a minute by default)
     e=$(( $(/bin/date +%s) - ${FAKE_INSTANCE_AGE:-60} ))
     printf '%s.000000+00:00\n' "$(/bin/date -u -r "$e" +%Y-%m-%dT%H:%M:%S 2>/dev/null || /bin/date -u -d "@$e" +%Y-%m-%dT%H:%M:%S)"
@@ -3238,6 +3243,35 @@ test_doctor_before_the_hosts_exist() {
   absent "$p/.freelunch/hybrid"
 }
 
+# The answer to the request that makes the VM can be lost while the VM is made. The wait looks
+# for it by name: none, and it tries again; one, and it is imported into the state; a VM that is
+# going away does not count; and when the import fails it says how to do it by hand.
+test_capacity_looks_for_a_vm_whose_launch_answer_was_lost() {
+  local p="$WORK/lost-launch" out plan
+  capacity_project "$p"
+  plan='{"resource_changes":[{"address":"module.compute[\"main\"].oci_core_instance.this","change":{"actions":["create"],"after":{"display_name":"main","compartment_id":"ocid1.compartment.oc1..c"}}}]}'
+  out="$(FAKE_APPLY="post ok" FAKE_PLAN="$plan" apply_in "$p" oci --wait-for-capacity 2>&1)"
+  contains "$out" "the answer to the request that makes main was lost, and no such VM exists, so it tries again"
+  contains "$out" "oci: applied on attempt 2"
+  grep -q 'oci compute instance list --compartment-id ocid1.compartment.oc1..c --display-name main --all' "$p/fake.log"
+  fails grep -q ' import ' "$p/fake.log"
+  # a VM that is being terminated is not the one
+  rm "$p/fake.log"*
+  out="$(FAKE_INSTANCES='{"data":[{"id":"ocid1.instance.oc1..old","lifecycle-state":"TERMINATING"}]}' FAKE_APPLY="post ok" FAKE_PLAN="$plan" apply_in "$p" oci --wait-for-capacity 2>&1)"
+  contains "$out" "no such VM exists, so it tries again"
+  # one that exists is adopted, and the wait goes on
+  rm "$p/fake.log"*
+  out="$(FAKE_INSTANCES='{"data":[{"id":"ocid1.instance.oc1..i1","lifecycle-state":"RUNNING"}]}' FAKE_APPLY="post ok" FAKE_PLAN="$plan" apply_in "$p" oci --wait-for-capacity 2>&1)"
+  contains "$out" "but the VM had been made: imported it into the state"
+  grep -q ' import .*module.compute\["main"\].oci_core_instance.this ocid1.instance.oc1..i1' "$p/fake.log"
+  # a failed import stops with the OCID and the command
+  rm "$p/fake.log"*
+  if out="$(FAKE_IMPORT_FAIL=1 FAKE_INSTANCES='{"data":[{"id":"ocid1.instance.oc1..i1","lifecycle-state":"RUNNING"}]}' FAKE_APPLY="post ok" FAKE_PLAN="$plan" apply_in "$p" oci --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
+  contains "$out" "The VM main exists (ocid1.instance.oc1..i1), but importing it into the state failed"
+  contains "$out" "import -input=false"
+  contains "$out" "'ocid1.instance.oc1..i1'"
+}
+
 # A machine that sleeps between signing a request and sending it gets a 401 for the clock
 # skew, and one that has just woken may have no network yet. Planning writes nothing, so
 # both are retried there; while applying, so are a clock skew and a failed read. A failed
@@ -3255,6 +3289,7 @@ test_capacity_retries_transient_errors() {
   rm "$p/fake.log"*
   if out="$(FAKE_APPLY="capacity post" apply_in "$p" oci --wait-for-capacity 2>&1)"; then echo "apply should have failed"; return 1; fi
   contains "$out" "not for lack of capacity, so it is not retried"
+  contains "$out" "its name or compartment is not known until it is made"
   # The first attempt of a wait you approve at the prompt may fail before you did.
   rm "$p/fake.log"*
   FAKE_APPLY="skew ok" fails apply_in "$p" oci --wait-for-capacity
