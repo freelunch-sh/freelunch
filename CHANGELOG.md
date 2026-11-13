@@ -12,6 +12,10 @@ release can change commands and the project layout.
 
 ### Added
 
+- **`freelunch restore <app>`** puts an app's volumes back from its backup on any host (the latest snapshot, or
+  `--snapshot`; `--overwrite` for volumes that have files), and `up --restore` does it for an app on a new host before the
+  address moves there. `status` and `check --json` report the age of the last backup, `destroy` accepts a fresh backup in
+  place of a pulled copy, and `up --move` backs the app up first. See `docs/backups.md`.
 - **Backups to a bucket.** `backup = { bucket, schedule, before, keep_daily, keep_weekly, paths }` on an app saves its
   volumes (and paths) with restic, run as a container, encrypted with `FREELUNCH_BACKUP_PASSPHRASE`, on a timer behind
   the host's heavy lock. `freelunch backup [app]` runs one now and follows it; `backup list <app>` shows the snapshots.

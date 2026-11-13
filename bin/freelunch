@@ -61,7 +61,8 @@ Project:
                           name its other stacks have, or the folder's name. --image-workflow
                           adds a GitHub Actions workflow that builds the image for the hosts
                           and pushes it to ghcr.io, or to --registry (docker-hub, codeberg)
-  up [--dry-run] [--move] Deploy wherever there is room: take the first target (targets in
+  up [--dry-run] [--move] [--restore]
+                          Deploy wherever there is room: take the first target (targets in
                           apps.tfvars, or every configured host and platform stack) that runs
                           the project or can make it, skipping one that is out of capacity or
                           quota, then point Cloudflare at it, pin the host keys and deploy.
@@ -69,7 +70,9 @@ Project:
                           so a push can run it, and running it again is safe. --dry-run says which
                           target it would use. An app with a volume stays on the target that runs it;
                           --move lets a target above it take the app, with its volumes copied
-                          (between VMs; a backup stays in .freelunch/backups)
+                          (between VMs; a backup stays in .freelunch/backups, and an app with a
+                          backup is backed up first). --restore puts the latest backup into the
+                          empty volumes of an app on a new host before the address moves there
   volume pull <app> [--host h] [--out dir]
   volume push <app> <dir> [--host h]
                           Copy an app's Docker volumes (Compose named volumes) from its host
@@ -187,6 +190,9 @@ Infrastructure:
                           jobs run <job> starts one now and follows its output
   backup [app]            Back an app (every app with a backup, without a name) up now and follow it.
   backup list <app>       The snapshots in its repository: id, time, size
+  restore <app> [--snapshot id] [--host h] [--overwrite]
+                          Stop the app, put its volumes back from its backup (the latest snapshot, or one),
+                          and start it. It works on any host that has the app deployed
   restart <app> [--host h] Restart an app on its VM host and wait until it is healthy; if it is not,
                           the last 50 log lines say why
   doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in and
@@ -2260,13 +2266,19 @@ token_reminders() {
 }
 
 # The script status runs on a host: one #host line (disk used %, disk GB, memory used MB, memory total MB,
-# load) and then app, service, state and health of every container.
+# load), a #backup line per backup (app, when the last one finished in epoch seconds, why the last one failed,
+# now) and then app, service, state and health of every container.
 # shellcheck disable=SC2016 # expanded by the remote shell
 REMOTE_STATUS='proc="${FREELUNCH_PROC:-/proc}"
 disk="$(df -P / 2>/dev/null | awk "NR == 2 { gsub(\"%\", \"\", \$5); printf \"%d|%d\", \$5, \$2 / 1048576 + 0.5 }")"
 mem="$(awk "/^MemTotal:/ { t = \$2 } /^MemAvailable:/ { a = \$2 } END { if (t > 0) printf \"%d|%d\", (t - a) / 1024, t / 1024 }" "$proc/meminfo" 2>/dev/null)"
 load="$(cut -d" " -f1 "$proc/loadavg" 2>/dev/null)"
 echo "#host|${disk:-|}|${mem:-|}|${load}"
+for f in /opt/freelunch/backup/*.env; do
+  [ -e "$f" ] || continue
+  b="$(basename "$f" .env)"
+  echo "#backup|$b|$(cat "/opt/freelunch/backup/$b.last" 2>/dev/null)|$(head -n 1 "/opt/freelunch/backup/$b.failed" 2>/dev/null | tr "|" " ")|$(date +%s)"
+done
 for d in /opt/freelunch/apps/*/; do
   [ -f "$d/compose.yaml" ] || continue
   app="$(basename "$d")"
@@ -2320,6 +2332,16 @@ host_numbers_text() {
   printf '%s' "$parts"
 }
 
+# backup_age_text <epoch of the last backup> <now>: "3 hours ago"
+backup_age_text() {
+  local s=$(($2 - $1))
+  [[ $s -ge 0 ]] || s=0
+  if [[ $s -ge 172800 ]]; then echo "$((s / 86400)) days ago"
+  elif [[ $s -ge 7200 ]]; then echo "$((s / 3600)) hours ago"
+  elif [[ $s -ge 120 ]]; then echo "$((s / 60)) minutes ago"
+  else echo "just now"; fi
+}
+
 status_apps() {
   local apps_file tunnel_state="" host address user out app service state health expected seen numbers line
   apps_file="$(state_root)/apps.tfvars"
@@ -2358,7 +2380,13 @@ status_apps() {
       echo "  $numbers"
       if [[ "$(cut -d'|' -f2 <<< "$line")" -ge 85 ]] 2>/dev/null; then echo "  nearly full: freelunch shell ${expected%%$'\n'*}, or docker system df on the host"; fi
     fi
-    while IFS='|' read -r app service state health; do
+    while IFS='|' read -r app service state health now; do
+      [[ "$app" != "#backup" ]] || {
+        if [[ -n "$health" ]]; then echo "  backup of $service: failed: $health"
+        elif [[ -n "$state" ]]; then echo "  backup of $service: last $(backup_age_text "$state" "$now")"
+        else echo "  backup of $service: not run yet"; fi
+        continue
+      }
       [[ -n "$app" && "$app" != "#host" ]] || continue
       seen="$seen $app "
       [[ "$service" != "$app" ]] || service=""
@@ -4455,11 +4483,60 @@ up_copy_data() {
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   for app in $(up_data_apps); do
     dir="$(state_root)/backups/$app/move-$stamp"
+    # an app with a backup is backed up first, from the old host, before anything is stopped
+    if jq -e --arg a "$app" '[.[].apps | select(has($a)) | .[$a].backup] | any(. != null)' "$TMP/targets.json" >/dev/null 2>&1; then
+      app_target up "$app" "$from_host"
+      ( unit_run up "backup-$app" ) || log "up: no backup of $app was taken first; the copy below is what is kept"
+    fi
     log "up: copying the data of $app from $from_host to $to_host (a copy stays in $(rel "$dir"))"
     VOL_STOP=1 vol_target "$app" "$from_host"
     VOL_STOP=1 vol_pull "$app" "$dir"
     vol_target "$app" "$to_host"
     vol_push "$app" "$dir"
+  done
+}
+
+# backup_fresh <app> <host>: whether the app's restic backup on the host finished within one interval of its
+# schedule, which is as safe as a copy pulled to this machine
+backup_fresh() {
+  local app="$1" host="$2" sched interval address user out last now
+  sched="$(jq -r --arg h "$host" --arg a "$app" '.[$h].apps[$a].backup.schedule // empty' "$TMP/targets.json")"
+  [[ -n "$sched" ]] || return 1
+  schedule_parse "$sched"
+  case "$SCHED_KIND" in hourly) interval=3600 ;; daily) interval=86400 ;; *) interval=604800 ;; esac
+  address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
+  user="$(jq -r --arg h "$host" '.[$h].user // empty' "$TMP/targets.json")"
+  [[ -n "$address" && -n "$user" ]] || return 1
+  ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1 || return 1
+  ssh_options yes
+  # the backup folder is root's
+  out="$("$SSH" "${SSH_OPTS[@]}" "$user@$address" "S=''; [ \"\$(id -u)\" -eq 0 ] || S='sudo -n'; echo last=\$(\$S cat /opt/freelunch/backup/$app.last 2>/dev/null); echo now=\$(date +%s)" 2>/dev/null)" || return 1
+  last="$(sed -n 's/^last=//p' <<< "$out")"; now="$(sed -n 's/^now=//p' <<< "$out")"
+  [[ "$last" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]] || return 1
+  [[ $((now - last)) -lt $interval ]]
+}
+
+# up_restore_data <host> <restore 0|1> <target>: after a deploy to a host whose volumes for an app with a backup
+# are empty (a new VM): with --restore put the latest snapshot in, before the routes move; without, say how
+up_restore_data() {
+  local host="$1" doit="$2" app p out rc time
+  local -a paths
+  is_platform "$3" && return 0
+  for app in $(backup_apps "$host"); do
+    app_target up "$app" "$host"
+    paths=()
+    while IFS= read -r p; do [[ -z "$p" ]] || paths+=("$p"); done < <(jq -r --arg a "$app" '[.[].apps | select(has($a)) | .[$a].backup.paths[]?] | .[]' "$TMP/targets.json")
+    rc=0; out="$(restore_script "$app" check "" 0 0 ${paths[@]+"${paths[@]}"} | restore_ssh)" || rc=$?
+    [[ $rc -eq 0 && "$out" != *nonempty* ]] || continue
+    time="$(host_ssh "\$S docker run --rm --env-file /opt/freelunch/backup/$app.env $(restic_image) snapshots --json --host $app" 2>/dev/null | jq -r '.[-1].time // empty' 2>/dev/null || true)"
+    [[ -n "$time" ]] || continue
+    if [[ "$doit" -eq 1 ]]; then
+      restore_script "$app" restore latest 0 "${FREELUNCH_DEPLOY_TIMEOUT:-180}" ${paths[@]+"${paths[@]}"} | restore_ssh \
+        || die "up: putting the backup of $app back failed (above). The routes were not moved; freelunch restore $app tries again"
+      log "up: restored $app from the backup of $time"
+    else
+      log "up: $app has a backup from $time, and its volumes on $host are empty. freelunch up --restore puts it back before the address moves here (or freelunch restore $app)"
+    fi
   done
 }
 
@@ -4480,7 +4557,7 @@ destroy_data_guard() {
     for app in $data_apps; do
       while IFS= read -r host; do
         [[ -n "$host" ]] || continue
-        compgen -G "$(state_root)/backups/$app/*/*.tar.gz" >/dev/null || risky="${risky:+$risky; }$app on $host"
+        compgen -G "$(state_root)/backups/$app/*/*.tar.gz" >/dev/null || backup_fresh "$app" "$host" || risky="${risky:+$risky; }$app on $host"
       done < <(jq -r --arg p "$p-" --arg a "$app" 'to_entries[] | select((.key | startswith($p)) and (.value.apps | has($a))) | .key' "$TMP/targets.json")
     done
   done
@@ -4627,12 +4704,13 @@ up_move_routes() {
 cmd_up() {
   need_tf
   command -v jq >/dev/null || die "jq is required for 'up'"
-  local dry_run=0 move=0 a t list chosen="" tried=() skipped=() rc reason out host others=() tunnel verb=runs old_tunnels="" moving=0 move_data_from=""
+  local dry_run=0 move=0 restore=0 a t list chosen="" tried=() skipped=() rc reason out host others=() tunnel verb=runs old_tunnels="" moving=0 move_data_from=""
   for a in "$@"; do
     case "$a" in
       --dry-run) dry_run=1 ;;
       --move)    move=1 ;;
-      *)         die "up: unknown argument $a (up takes --dry-run and --move)" ;;
+      --restore) restore=1 ;;
+      *)         die "up: unknown argument $a (up takes --dry-run, --move and --restore)" ;;
     esac
   done
   list="$(up_targets)" || exit 1
@@ -4746,6 +4824,8 @@ cmd_up() {
   cmd_deploy
   # --move takes the data along: after deploy made the volumes on the new host, before the routes go
   [[ -z "$move_data_from" || "$chosen" == "$move_data_from" ]] || up_copy_data "$move_data_from" "$chosen"
+  # an app with a backup and empty volumes on a new host gets its data back before the address moves here
+  up_restore_data "$host" "$restore" "$chosen"
   # cloudflared runs on the new host now: move the routes there and drop the old tunnel.
   if [[ $moving -eq 1 ]]; then up_wait_tunnel "$host"; up_move_routes "$old_tunnels"; rm -f "$(move_file)"; fi
   local urls=""
@@ -6796,6 +6876,105 @@ cmd_backup() {
       unit_run backup "backup-$a"
     fi
   done
+}
+
+# restore_script <app> <mode check|restore> <snapshot> <overwrite 0|1> <timeout> <paths...>: what freelunch
+# restore runs on the host. check prints "nonempty" when a volume of the app has files in it. restore stops the
+# app, empties the volumes when asked, restores the snapshot into the volumes and paths and starts the app.
+restore_script() {
+  local app="$1" mode="$2" snapshot="$3" overwrite="$4" timeout="$5" p mountlines=""
+  shift 5
+  for p in "$@"; do mountlines="$mountlines
+mounts+=(-v $(shq "$p:/paths$p")); mps+=($(shq "$p"))"; done
+  cat <<SCRIPT
+set -uo pipefail
+app=$(shq "$app")
+dir=/opt/freelunch/apps/\$app
+state=/opt/freelunch/backup
+image=$(restic_image)
+[ -f "\$state/\$app.env" ] || { echo "!! \$app has no backup settings on this host: run freelunch deploy for it here first" >&2; exit 4; }
+mounts=() mps=()
+for v in \$(docker volume ls -q --filter "label=com.docker.compose.project=\$app"); do
+  mp="\$(docker volume inspect --format '{{.Mountpoint}}' "\$v")" || exit 1
+  mounts+=(-v "\$mp:/data/\$v"); mps+=("\$mp")
+done$mountlines
+[ \${#mps[@]} -gt 0 ] || { echo "!! \$app has no volumes on this host yet: run freelunch deploy for it here first" >&2; exit 6; }
+SCRIPT
+  if [[ "$mode" == check ]]; then
+    cat <<'SCRIPT'
+for mp in "${mps[@]}"; do
+  if [ -n "$(ls -A "$mp" 2>/dev/null)" ]; then echo nonempty; exit 0; fi
+done
+exit 0
+SCRIPT
+    return 0
+  fi
+  cat <<SCRIPT
+restic() { docker run --rm --env-file "\$state/\$app.env" --hostname "\$app" "\${mounts[@]}" "\$image" "\$@"; }
+echo "--> \$app: stopping"
+docker compose --project-directory "\$dir" stop || true
+if [ $overwrite -eq 1 ]; then
+  for mp in "\${mps[@]}"; do find "\$mp" -mindepth 1 -delete; done
+fi
+echo "--> \$app: restoring $snapshot"
+restic restore $(shq "$snapshot") --target / --host "\$app" || { echo "!! \$app: the restore failed; the app is stopped (freelunch deploy starts it)" >&2; exit 1; }
+echo "--> \$app: starting"
+docker compose --project-directory "\$dir" up -d --wait --wait-timeout $timeout || { echo "!! \$app is not healthy after the restore" >&2; exit 5; }
+echo "--> \$app: restored"
+SCRIPT
+}
+
+# cmd_restore <app> [--snapshot id] [--host h] [--overwrite]: put an app's volumes back from its backup, on any host
+cmd_restore() {
+  local app="" snapshot="" want="" overwrite=0 apps_file tunnel_state="" paths=() p out rc=0 answer
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --snapshot) [[ -n "${2:-}" ]] || die "restore: --snapshot takes a snapshot id (freelunch backup list <app>)"; snapshot="$2"; shift ;;
+      --host) [[ -n "${2:-}" ]] || die "restore: --host takes a host"; want="$2"; shift ;;
+      --overwrite) overwrite=1 ;;
+      -*) die "restore: unknown option $1" ;;
+      *) [[ -z "$app" ]] || die "restore: unexpected argument $1"; app="$1" ;;
+    esac
+    shift
+  done
+  [[ -n "$app" ]] || die "usage: freelunch restore <app> [--snapshot id] [--host h] [--overwrite]"
+  [[ -z "$snapshot" || "$snapshot" =~ ^[A-Za-z0-9]+$ ]] || die "restore: '$snapshot' is not a snapshot id (freelunch backup list $app)"
+  apps_file="$(state_root)/apps.tfvars"
+  [[ -f "$apps_file" ]] || die "restore: no $(rel "$apps_file"): the apps come from there"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if ! { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1; then
+    die "restore: apps.tfvars doesn't resolve against the inventory yet (freelunch deploy --dry-run says why)"
+  fi
+  jq -e --arg a "$app" '[.[].apps | select(has($a)) | .[$a].backup] | any(. != null)' "$TMP/targets.json" >/dev/null \
+    || die "restore: $app has no backup in apps.tfvars"
+  app_target restore "$app" "$want"
+  while IFS= read -r p; do [[ -z "$p" ]] || paths+=("$p"); done < <(jq -r --arg a "$app" '[.[].apps | select(has($a)) | .[$a].backup.paths[]?] | .[]' "$TMP/targets.json")
+  # volumes with files in them are not replaced by accident
+  out="$(restore_script "$app" check "" 0 0 ${paths[@]+"${paths[@]}"} | restore_ssh)" || rc=$?
+  case "$rc" in
+    4) die "restore: $app has no backup settings on $APP_HOST: run freelunch deploy for it there first" ;;
+    6) die "restore: $app has no volumes on $APP_HOST yet: run freelunch deploy for it there first" ;;
+    0) ;;
+    *) die "restore: can't look at the volumes of $app on $APP_HOST" ;;
+  esac
+  if [[ "$out" == *nonempty* && -z "$snapshot" && $overwrite -eq 0 ]]; then
+    die "restore: the volumes of $app on $APP_HOST already have files in them. Name the snapshot to put over them (--snapshot <id>, from freelunch backup list $app), or --overwrite to replace them with the latest"
+  fi
+  if [[ "${FREELUNCH_AUTO_APPROVE:-0}" != 1 ]]; then
+    interactive || die "restore: this replaces the data of $app on $APP_HOST with ${snapshot:-the latest snapshot}. Run it at a terminal, or with FREELUNCH_AUTO_APPROVE=1"
+    answer="$(ask "Stop $app on $APP_HOST and restore ${snapshot:-the latest snapshot} over its volumes? (y/n)" n)"
+    case "$answer" in y|Y|yes) ;; *) die "restore: nothing was changed" ;; esac
+  fi
+  restore_script "$app" restore "${snapshot:-latest}" "$([[ "$out" == *nonempty* ]] && echo 1 || echo "$overwrite")" "${FREELUNCH_DEPLOY_TIMEOUT:-180}" ${paths[@]+"${paths[@]}"} | restore_ssh \
+    || die "restore: the restore of $app on $APP_HOST did not finish (see above)"
+  log "restore: $app is back on $APP_HOST from ${snapshot:+snapshot $snapshot}${snapshot:-the latest snapshot}"
+}
+
+# restore_ssh: run the script on stdin on APP_HOST as root
+restore_ssh() {
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  "$SSH" "${SSH_OPTS[@]}" "$APP_USER@$APP_ADDR" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi'
 }
 
 # unit_run <area> <name>: start freelunch-<name>.service on APP_HOST, follow its output until it is done (a
@@ -9120,7 +9299,7 @@ probe_record_nodes() {
 # probe_hosts_and_apps: hosts (over SSH), the apps on them, and the platforms, from the deploy plan
 # shellcheck disable=SC2016 # the remote script is expanded by the remote shell
 probe_hosts_and_apps() {
-  local apps_file tunnel_state="" host kind address user out app service state health seen reach why ok bad dp mu mt extra
+  local apps_file tunnel_state="" host kind address user out app service state health seen reach why ok bad dp mu mt extra more backup_reason sched blast bfailed bnow interval
   apps_file="$(state_root)/apps.tfvars"
   [[ -n "$TF" ]] || return 0
   if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
@@ -9163,9 +9342,25 @@ probe_hosts_and_apps() {
           [[ "$a" == "$app" ]] || continue
           if [[ "$state" == running && ( -z "$health" || "$health" == healthy ) ]]; then ok=$((ok + 1)); else bad=$((bad + 1)); fi
         done <<< "$out"
-        if [[ $((ok + bad)) -eq 0 ]]; then probe_row "$app" app false true false "not deployed on $host yet (freelunch deploy)"
-        elif [[ $bad -gt 0 ]]; then probe_row "$app" app true true false "$bad of its containers on $host aren't running and healthy"
-        else probe_row "$app" app true true true ""; fi
+        # the age of the last backup, and a backup that failed or is older than twice its interval
+        more="" backup_reason=""
+        sched="$(jq -r --arg h "$host" --arg a "$app" '.[$h].apps[$a].backup.schedule // empty' "$TMP/targets.json")"
+        if [[ -n "$sched" ]]; then
+          IFS='|' read -r _ _ blast bfailed bnow <<< "$(grep "^#backup|$app|" <<< "$out" | head -n1)"
+          schedule_parse "$sched"
+          case "$SCHED_KIND" in hourly) interval=1 ;; daily) interval=24 ;; *) interval=168 ;; esac
+          if [[ "$blast" =~ ^[0-9]+$ && "$bnow" =~ ^[0-9]+$ ]]; then
+            more="$(jq -nc --argjson s $((bnow - blast)) '{backup_age_hours: (($s / 360 | floor) / 10)}')"
+            [[ $((bnow - blast)) -le $((interval * 7200)) ]] || backup_reason="its last backup was $(backup_age_text "$blast" "$bnow"), and it runs ${sched}"
+          else
+            more='{"backup_age_hours": null}'
+          fi
+          [[ -z "$bfailed" ]] || backup_reason="its last backup failed: $bfailed"
+        fi
+        if [[ $((ok + bad)) -eq 0 ]]; then probe_row "$app" app false true false "not deployed on $host yet (freelunch deploy)" "$more"
+        elif [[ $bad -gt 0 ]]; then probe_row "$app" app true true false "$bad of its containers on $host aren't running and healthy" "$more"
+        elif [[ -n "$backup_reason" ]]; then probe_row "$app" app true true false "$backup_reason" "$more"
+        else probe_row "$app" app true true true "" "$more"; fi
       done
     else
       for app in $(jq -r --arg h "$host" '.[$h].apps | keys[]' "$TMP/targets.json"); do
@@ -11656,6 +11851,7 @@ main() {
     shell)                cmd_shell "$@" ;;
     jobs)                 cmd_jobs "$@" ;;
     backup)               cmd_backup "$@" ;;
+    restore)              cmd_restore "$@" ;;
     doctor)               cmd_doctor ;;
     journey)              resolve_state_refs; sync_start status; cmd_journey "$@" ;;
     check)                if [[ $# -gt 0 ]]; then resolve_state_refs; sync_start status; cmd_probe "$@"; else cmd_check; fi ;;

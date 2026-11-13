@@ -312,34 +312,43 @@ backup is a manual `volume pull` to the laptop.
 - [x] `freelunch backup [app]` runs the backup now and follows it; `freelunch backup list
   <app>` prints the snapshots (`restic snapshots`, id, time, size). Tests with a fake restic
   (the fake `docker` grows a `run ... restic` case)
-- [ ] `freelunch restore <app> [--snapshot <id>] [--host h]`: stop the app, restore the
+- [x] `freelunch restore <app> [--snapshot <id>] [--host h]`: stop the app, restore the
   snapshot (latest by default) into the volumes' mountpoints and `paths`, start the app,
   wait for healthy. Asks first unless `FREELUNCH_AUTO_APPROVE=1`; refuses when the volumes
   are not empty and neither `--snapshot` nor `--overwrite` was given. Restoring onto another
   host than the one that made the backup is the normal case, not an error. Tests: restore,
   the refusal, the stop/start order
-- [ ] Backups in `status` (per app: "last backup 3 hours ago", or the `.failed` reason) and
+- [x] Backups in `status` (per app: "last backup 3 hours ago", or the `.failed` reason) and
   as a property of the app node in `check --json` (`backup_age_hours`). The node is
   unhealthy when the last backup is older than twice its schedule's interval, or failed
-- [ ] `destroy` and `up --move` accept a fresh restic snapshot (younger than the schedule's
+- [x] `destroy` and `up --move` accept a fresh restic snapshot (younger than the schedule's
   interval) in place of a `volume pull` copy as proof that the data is safe; read
   `up_keeps_data` and the destroy guard first. `up --move` takes a backup just before it
   stops the old app
-- [ ] `freelunch up --restore`: when `up` makes or picks a target on which an app with
+- [x] `freelunch up --restore`: when `up` makes or picks a target on which an app with
   `backup` has empty volumes, restore its latest snapshot after the first deploy and before
   routes point at it. Print "up: restored <app> from the backup of <time>". Without the
   flag, `up` says the flag exists when it sees that case. This is the "Oracle removed my VM"
   path: test it as one journey (host gone from state, `up --restore` on the next target,
   data back, route moved)
-- [ ] 🔬 SQLite without a gap: Litestream as a sidecar streams a database file to the bucket
+- [x] 🔬 SQLite without a gap: Litestream as a sidecar streams a database file to the bucket
   as it changes. Find out: does it need the app's Compose file changed (a shared volume), can
   freelunch add the sidecar as an override file, what does a restore look like, what is the
   current version and config format (litestream.io). Write the answer here; build only if
   the app's own Compose file can stay untouched
-- [ ] Until then, document the safe way for SQLite: a `before` hook that makes a consistent
+  **Answer (2026-11-13):** Litestream runs as a sidecar container that shares the volume holding the database file, reads
+  a `litestream.yml` (default `/etc/litestream.yml`; S3 keys and a `replica` with a url or bucket) and runs `replicate`;
+  `litestream restore -if-db-not-exists -if-replica-exists <db>` fills an empty volume and refuses to overwrite a database
+  that exists without `-force`. The app's own Compose file could stay untouched: Compose merges a `compose.override.yaml`
+  in the same folder on its own, so freelunch could write the sidecar there, mounting the app's named volume, and run the
+  restore as a step before the app starts. What stops building it now: it needs the database's path and volume named in
+  `apps.tfvars`, a restore step ordered before the app, and a config format that differs between the stable and the tip
+  docs (`replica:` against `replicas:`); I could not confirm the current release from Litestream's own pages (a third-party
+  operator pins 0.5.14, which only suggests 0.5.x). Not built; the safe `before` copy below is what is documented.
+- [x] Until then, document the safe way for SQLite: a `before` hook that makes a consistent
   copy (`sqlite3 <db> ".backup <copy>"`) and `paths` or the volume including the copy, never
   the live WAL file
-- [ ] Docs: `docs/backups.md` (set up a bucket on R2 or B2, the passphrase, restore,
+- [x] Docs: `docs/backups.md` (set up a bucket on R2 or B2, the passphrase, restore,
   `up --restore`, the SQLite note, what a platform target does not get), linked from the
   README, and a runbook section "The VM is gone"
 - [ ] ⛔ Live: a backup to R2 from the Oracle VM, a restore onto a second host, the size of

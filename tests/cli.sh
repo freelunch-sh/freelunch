@@ -2378,6 +2378,82 @@ JSON
   contains "$out" "backup: api has no backup in apps.tfvars"
 }
 
+restore_in() { # restore_in <dir> [args]: freelunch restore with the fake ssh and docker
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" "$CLI" restore "$@")
+}
+
+# restore stops the app, puts the snapshot into its volumes and starts it; volumes with files in them need a
+# snapshot named or --overwrite, and it asks first.
+test_restore_puts_the_volumes_back() {
+  local p="$WORK/restore" out key
+  backup_project "$p"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw FAKE_HOST_KEY="$key" deploy_in "$p" >/dev/null 2>&1
+  mkdir -p "$p/host/volumes/api_data/_data"
+  # empty volumes, approved: stop, restore, start, in that order
+  : > "$p/fake.log"
+  out="$(FREELUNCH_AUTO_APPROVE=1 restore_in "$p" api 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "restore: api is back on oci-main from the latest snapshot"
+  equals "$(awk '/--project-directory .* stop @/ { print "stop" } / restore latest --target \/ --host api/ { print "restore" } /--project-directory .* up -d --wait/ { print "up" }' "$p/fake.log" | tr '\n' ' ')" "stop restore up "
+  grep -q -- '-v .*host/volumes/api_data/_data:/data/api_data ' "$p/fake.log"
+  # files in the volumes: refused until a snapshot is named or --overwrite is given
+  echo "precious" > "$p/host/volumes/api_data/_data/db.sqlite"
+  if out="$(FREELUNCH_AUTO_APPROVE=1 restore_in "$p" api 2>&1)"; then echo "restore should have refused"; return 1; fi
+  contains "$out" "restore: the volumes of api on oci-main already have files in them. Name the snapshot"
+  equals "$(cat "$p/host/volumes/api_data/_data/db.sqlite")" precious
+  : > "$p/fake.log"
+  FREELUNCH_AUTO_APPROVE=1 restore_in "$p" api --snapshot a1b2c3d4 >/dev/null 2>&1
+  grep -q ' restore a1b2c3d4 --target / --host api' "$p/fake.log"
+  # --overwrite empties them first
+  FREELUNCH_AUTO_APPROVE=1 restore_in "$p" api --overwrite >/dev/null 2>&1
+  absent "$p/host/volumes/api_data/_data/db.sqlite"
+  # without approval and without a terminal it stops
+  if out="$(restore_in "$p" api </dev/null 2>&1)"; then echo "restore should have stopped"; return 1; fi
+  contains "$out" "FREELUNCH_AUTO_APPROVE=1"
+  # at a terminal, no changes the volumes
+  echo "precious" > "$p/host/volumes/api_data/_data/db.sqlite"
+  if out="$(FREELUNCH_INTERACTIVE=1 restore_in "$p" api --overwrite <<< "n" 2>&1)"; then echo "restore should have stopped"; return 1; fi
+  contains "$out" "restore: nothing was changed"
+  exists "$p/host/volumes/api_data/_data/db.sqlite"
+  # an app with no volumes yet on the host
+  rm -r "$p/host/volumes"
+  if out="$(FREELUNCH_AUTO_APPROVE=1 restore_in "$p" api 2>&1)"; then echo "restore should have failed"; return 1; fi
+  contains "$out" "restore: api has no volumes on oci-main yet"
+}
+
+# status shows the last backup (or why it failed); check --json carries its age, and a backup that failed or is
+# older than twice its interval makes the app unhealthy.
+test_status_and_check_report_backups() {
+  local p="$WORK/backup-status" out key now
+  backup_project "$p"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw FAKE_HOST_KEY="$key" deploy_in "$p" >/dev/null 2>&1
+  now="$(date +%s)"
+  out="$(status_in "$p" 2>&1)"
+  contains "$out" "  backup of api: not run yet"
+  echo $((now - 3 * 3600)) > "$p/host/backup/api.last"
+  out="$(status_in "$p" 2>&1)"
+  contains "$out" "  backup of api: last 3 hours ago"
+  out="$(check_in "$p" --json)"
+  equals "$(jq -r '.[] | select(.node == "api") | "\(.backup_age_hours) \(.healthy)"' <<< "$out")" "3 true"
+  # older than twice its (daily) interval
+  echo $((now - 60 * 3600)) > "$p/host/backup/api.last"
+  if out="$(check_in "$p" --json)"; then echo "check should have failed"; return 1; fi
+  equals "$(jq -r '.[] | select(.node == "api") | "\(.healthy) \(.reason)"' <<< "$out")" "false its last backup was 2 days ago, and it runs daily 02:00"
+  # a failed one says why
+  echo $((now - 3600)) > "$p/host/backup/api.last"
+  printf '2026-11-13T02:00:00Z restic backup failed\nFatal: repository is locked\n' > "$p/host/backup/api.failed"
+  out="$(status_in "$p" 2>&1)"
+  contains "$out" "  backup of api: failed: 2026-11-13T02:00:00Z restic backup failed"
+  if out="$(check_in "$p" --json)"; then echo "check should have failed"; return 1; fi
+  contains "$(jq -r '.[] | select(.node == "api") | .reason' <<< "$out")" "its last backup failed: 2026-11-13T02:00:00Z restic backup failed"
+  # an app without a backup has no age
+  sed -i.bak 's|, backup = {[^}]*}||' "$p/.freelunch/apps.tfvars"
+  out="$(check_in "$p" --json)"
+  equals "$(jq -r '.[] | select(.node == "api") | has("backup_age_hours")' <<< "$out")" "false"
+}
+
 # Two deploys to one host queue on a lock; one that cannot get it in 15 minutes says another holds it.
 test_deploy_takes_the_host_lock() {
   local p="$WORK/lock" out
@@ -6500,12 +6576,63 @@ test_destroy_refuses_to_remove_data_without_a_backup() {
   UP_CMD=volume up_in "$p" pull api >/dev/null 2>&1
   out="$(UP_CMD=destroy up_in "$p" oci 2>&1)" || { echo "$out" >&2; return 1; }
   lacks "$out" "nothing has a backup"
-  # or --discard-data says the data may go
+  # a restic backup that finished within its interval is as good as a copy
   rm -rf "$p/.freelunch/backups"
+  out="$(UP_CMD=destroy up_in "$p" oci 2>&1)" && { echo "destroy should have refused"; return 1; }
+  mkdir -p "$p/host/backup" "$p-checkout/shared" "$p-checkout/providers/backblaze-b2/stack" "$p/.freelunch/backblaze-b2"
+  cp "$ROOT/providers/backblaze-b2/provider.yaml" "$p-checkout/providers/backblaze-b2/"
+  cp "$ROOT/providers/backblaze-b2/stack/"*.tf "$ROOT/providers/backblaze-b2/stack/"*.example "$p-checkout/providers/backblaze-b2/stack/"
+  cp "$ROOT/deploy/tests/fixtures/storage.tfstate" "$p/.freelunch/backblaze-b2/terraform.tfstate"
+  sed -i.bak 's|api = { compose = "../compose.yaml", env_file = "api.env" }|api = { compose = "../compose.yaml", env_file = "api.env", backup = { bucket = "backblaze-b2-results", schedule = "daily 02:00" } }|' "$p/.freelunch/apps.tfvars"
+  echo $(( $(date +%s) - 3600 )) > "$p/host/backup/api.last"
+  out="$(FREELUNCH_BACKUP_PASSPHRASE=pw UP_CMD=destroy up_in "$p" oci 2>&1)" || { echo "$out" >&2; return 1; }
+  lacks "$out" "nothing has a backup"
+  echo $(( $(date +%s) - 3 * 86400 )) > "$p/host/backup/api.last"
+  UP_CMD=destroy up_in "$p" oci >/dev/null 2>&1 && { echo "an old backup should not let destroy go ahead"; return 1; }
+  # or --discard-data says the data may go
   out="$(UP_CMD=destroy up_in "$p" oci --discard-data 2>&1)" || { echo "$out" >&2; return 1; }
   lacks "$out" "nothing has a backup"
   out="$(UP_CMD=destroy up_in "$p" --discard-data oci 2>&1)" || true
   fails grep -q "unknown option" <<< "$out"
+}
+
+# "Oracle removed my VM": the next target gets the app, and with --restore its volumes are filled from the latest
+# backup before the address moves there. Without the flag, up says it exists. A fresh restic snapshot also lets destroy
+# go ahead, and a move takes a backup first.
+test_up_restores_a_backup_onto_a_new_host() {
+  local p="$WORK/up-restore" out
+  up_project "$p" oci
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    ports: ["127.0.0.1:8080:8080"]\n    volumes: ["data:/var/lib/data"]\nvolumes:\n  data: {}\n' > "$p/compose.yaml"
+  mkdir -p "$p/.freelunch/backblaze-b2" "$p-checkout/providers/backblaze-b2/stack" "$p-checkout/shared"
+  cp "$ROOT/providers/backblaze-b2/provider.yaml" "$p-checkout/providers/backblaze-b2/"
+  cp "$ROOT/providers/backblaze-b2/stack/"*.tf "$ROOT/providers/backblaze-b2/stack/"*.example "$p-checkout/providers/backblaze-b2/stack/"
+  cp "$ROOT/shared/restic.env" "$p-checkout/shared/"
+  cp "$ROOT/deploy/tests/fixtures/storage.tfstate" "$p/.freelunch/backblaze-b2/terraform.tfstate"
+  sed -i.bak 's|api = { compose = "../compose.yaml", env_file = "api.env" }|api = { compose = "../compose.yaml", env_file = "api.env", backup = { bucket = "backblaze-b2-results", schedule = "daily 02:00" } }|' "$p/.freelunch/apps.tfvars"
+  export FREELUNCH_BACKUP_PASSPHRASE=pw
+  # a first run: nothing to restore yet, and the volume is empty
+  mkdir -p "$p/host/volumes/api_data/_data"
+  out="$(FAKE_UP="oci=ok" up_in "$p" 2>&1)" || { echo "the first up failed: $out"; unset FREELUNCH_BACKUP_PASSPHRASE; return 1; }
+  # the VM is gone: its state, and everything on it
+  rm -rf "$p/host" "$p/.freelunch/oci/terraform.tfstate"
+  mkdir -p "$p/host/volumes/api_data/_data"
+  cat > "$p/host/snapshots.json" <<'JSON'
+[{"short_id": "a1b2c3d4", "time": "2026-11-12T02:00:03Z", "summary": {"total_bytes_processed": 5242880}}]
+JSON
+  out="$(FAKE_UP="oci=ok" up_in "$p" 2>&1)" || { echo "$out" >&2; unset FREELUNCH_BACKUP_PASSPHRASE; return 1; }
+  contains "$out" "up: api has a backup from 2026-11-12T02:00:03Z, and its volumes on oci-main are empty. freelunch up --restore puts it back"
+  # again, with the flag, from a gone VM
+  rm -rf "$p/host" "$p/.freelunch/oci/terraform.tfstate"
+  mkdir -p "$p/host/volumes/api_data/_data"
+  cat > "$p/host/snapshots.json" <<'JSON'
+[{"short_id": "a1b2c3d4", "time": "2026-11-12T02:00:03Z", "summary": {"total_bytes_processed": 5242880}}]
+JSON
+  : > "$p/fake.log"
+  out="$(FAKE_UP="oci=ok" up_in "$p" --restore 2>&1)" || { echo "$out" >&2; unset FREELUNCH_BACKUP_PASSPHRASE; return 1; }
+  unset FREELUNCH_BACKUP_PASSPHRASE
+  contains "$out" "up: restored api from the backup of 2026-11-12T02:00:03Z"
+  grep -q ' restore latest --target / --host api' "$p/fake.log"
+  equals "$(grep -n 'up: restored api\|up: live on\|up: oci has no\|up: making oci' <<< "$out" | sed 's/^[0-9]*://' | cut -c1-24 | tr '\n' '|')" "==> up: making oci|==> up: restored api fro|==> up: live on oci-main|"
 }
 
 # A VM that has restarted no longer has its host keys on the console: trust says so, and up
