@@ -2528,6 +2528,26 @@ TFVARS
   lacks "$out" "and reboot"
 }
 
+# hosts with shared = true in apps.tfvars are the shared hosts, and only those.
+test_shared_hosts_are_read_from_apps_tfvars() {
+  local p="$WORK/shared-hosts" out
+  mkdir -p "$p/.freelunch"
+  cat > "$p/.freelunch/apps.tfvars" <<'TFVARS'
+project = "shop"
+hosts = {
+  oci-big = { address = "203.0.113.50", shared = true, arch = "arm64" }
+  oci-main = { address = "203.0.113.10" } # shared = true in a comment
+  "gcp-small" = {
+    address = "203.0.113.60"
+    shared  = true
+  }
+}
+TFVARS
+  sed -n "$(grep -n '^shared_hosts() {' "$CLI" | cut -d: -f1),/^}/p" "$CLI" > "$p/fn.sh"
+  out="$(cd "$p" && bash -c 'state_root() { echo "$PWD/.freelunch"; }; . ./fn.sh; shared_hosts')"
+  equals "$out" "$(printf 'oci-big\ngcp-small')"
+}
+
 # freelunch jobs lists each job with its last run, its result and its next run, and jobs run starts one.
 test_jobs_lists_and_runs_jobs() {
   local p="$WORK/jobs-cmd" out key

@@ -229,6 +229,90 @@ run "hooks_are_an_error_on_a_platform" {
   expect_failures = [output.platforms]
 }
 
+# Shared hosts ----------------------------------------------------------------------------
+
+run "a_shared_host_carries_its_project_and_arch" {
+  command = plan
+
+  variables {
+    project = "shop"
+    hosts   = { oci-big = { address = "203.0.113.50", shared = true, arch = "arm64" } }
+    apps    = { api = { host = "oci-big", compose = "compose-limited.yaml" } }
+  }
+
+  assert {
+    condition = (
+      output.targets["oci-big"].shared &&
+      output.targets["oci-big"].project == "shop" &&
+      output.targets["oci-big"].arch == "arm64" &&
+      output.targets["oci-big"].address == "203.0.113.50"
+    )
+    error_message = "A shared host has the project's name, and the arch the override gives when the inventory has none."
+  }
+
+  assert {
+    condition     = !output.targets["oci-main"].shared && output.targets["oci-main"].project == null
+    error_message = "A host of this project's own is not shared."
+  }
+}
+
+run "apps_on_a_shared_host_reserve_their_memory_limits" {
+  command = plan
+
+  variables {
+    project = "shop"
+    hosts   = { oci-big = { address = "203.0.113.50", shared = true, arch = "arm64" } }
+    apps    = { api = { host = "oci-big", compose = "compose-limited.yaml" } }
+  }
+
+  assert {
+    condition     = output.targets["oci-big"].apps.api.memory_mb == 1536
+    error_message = "An app reserves the sum of its services' limits: 512M in deploy.resources.limits.memory and 1g in mem_limit are 1536 MB."
+  }
+}
+
+run "apps_on_a_shared_host_need_memory_limits" {
+  command = plan
+
+  variables {
+    project = "shop"
+    hosts   = { oci-big = { address = "203.0.113.50", shared = true, arch = "arm64" } }
+    apps    = { api = { host = "oci-big", compose = "compose.yaml" } }
+  }
+
+  expect_failures = [output.targets]
+}
+
+run "apps_on_a_host_of_their_own_need_no_limit" {
+  command = plan
+
+  assert {
+    condition     = output.targets["oci-main"].apps.api.memory_mb == null
+    error_message = "Only a shared host asks for limits."
+  }
+}
+
+run "a_shared_host_needs_an_address_an_arch_and_a_project" {
+  command = plan
+
+  variables {
+    hosts = { oci-big = { shared = true } }
+    apps  = { api = { host = "oci-big", compose = "compose.yaml" } }
+  }
+
+  expect_failures = [output.targets]
+}
+
+run "a_project_name_has_no_double_hyphen" {
+  command = plan
+
+  variables {
+    project = "my--shop"
+  }
+
+  expect_failures = [var.project]
+}
+
 # Backups ---------------------------------------------------------------------------------
 
 run "a_backup_reaches_the_target_with_its_buckets_settings" {

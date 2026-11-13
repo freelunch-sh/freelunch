@@ -3,6 +3,12 @@ variable "zone" {
   type        = string
 }
 
+variable "shared_hosts" {
+  description = "Hosts another project made, which this project's apps run on (hosts with shared = true in apps.tfvars). Routes may point at them though the inventory doesn't list them; freelunch fills this in."
+  type        = list(string)
+  default     = []
+}
+
 variable "account_id" {
   description = "Account that owns the tunnels. null uses the zone's account."
   type        = string

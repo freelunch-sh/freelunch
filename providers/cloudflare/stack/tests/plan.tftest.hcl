@@ -58,6 +58,20 @@ run "apply_exposes_a_token_per_host" {
   }
 }
 
+run "a_shared_host_is_a_known_host" {
+  command = plan
+
+  variables {
+    shared_hosts = ["oci-big"]
+    routes       = { "api.example.com" = { host = "oci-big", port = 8080 } }
+  }
+
+  assert {
+    condition     = keys(output.tunnels) == ["oci-big"]
+    error_message = "A route to a shared host gets a tunnel of its own, though the inventory doesn't list the host."
+  }
+}
+
 run "unknown_host_fails_the_plan" {
   command = plan
 

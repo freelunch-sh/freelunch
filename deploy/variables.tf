@@ -147,8 +147,17 @@ variable "hosts" {
   type = map(object({
     address = optional(string)
     user    = optional(string)
+    # A host another project made, which this project moves onto (docs/shared-host.md): shared = true
+    # needs address, arch and a project in apps.tfvars. arch is for a host outside the inventory.
+    shared = optional(bool, false)
+    arch   = optional(string)
   }))
   default = {}
+
+  validation {
+    condition     = alltrue([for h in values(var.hosts) : h.arch == null ? true : contains(["amd64", "arm64"], h.arch)])
+    error_message = "arch is amd64 or arm64."
+  }
 }
 
 variable "mesh" {

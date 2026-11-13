@@ -538,7 +538,28 @@ project_args() { # project_args <provider>
       local default; default="$(default_host)"
       [[ -z "$default" ]] || echo "-var=default_host=$default"
     fi
+    # Hosts another project made are known to routes too (hosts with shared = true).
+    if grep -qs 'variable "shared_hosts"' "$(stack_dir "$1")"/*.tf; then
+      local shared; shared="$(shared_hosts | jq -Rsc 'split("\n") | map(select(. != ""))')"
+      [[ "$shared" == "[]" ]] || echo "-var=shared_hosts=$shared"
+    fi
   fi
+}
+
+# shared_hosts: the hosts of apps.tfvars that say shared = true, one a line
+shared_hosts() {
+  awk '
+    { sub(/#.*/, "") }
+    !inside { if ($0 ~ /^[ \t]*hosts[ \t]*=[ \t]*[{]/) { inside = 1; depth = 0 } else next }
+    {
+      line = $0
+      if (depth == 1 && match(line, /^[ \t]*"?[A-Za-z0-9_.-]+"?[ \t]*=[ \t]*[{]/)) {
+        key = substr(line, RSTART, RLENGTH); sub(/^[ \t]*"?/, "", key); sub(/"?[ \t]*=.*$/, "", key)
+      }
+      if (line ~ /shared[ \t]*=[ \t]*true/ && key != "") print key
+      depth += gsub(/[{]/, "{", line) - gsub(/[}]/, "}", line)
+      if (depth <= 0) exit
+    }' "$(state_root)/apps.tfvars" 2>/dev/null || true
 }
 
 # --- tofu/terraform -------------------------------------------------------------------

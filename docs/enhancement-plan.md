@@ -379,14 +379,14 @@ for capacity the account no longer has.
 - A tenant keeps its own Cloudflare tunnel, so removing one project cannot break another's
   address.
 
-- [ ] `deploy/variables.tf`: top-level `project` (string, the app-name pattern, no `--`),
+- [x] `deploy/variables.tf`: top-level `project` (string, the app-name pattern, no `--`),
   and in `hosts`: `shared = optional(bool, false)` and `arch = optional(string)`. A host
   with `shared = true` needs `address`, `arch` and a `project`. `targets` gets `shared` and
   `project` per host, and takes `arch` from the override when the inventory has none. Tests
-- [ ] `providers/cloudflare/stack`: a route's host may be a shared host. Add
+- [x] `providers/cloudflare/stack`: a route's host may be a shared host. Add
   `shared_hosts` (list of names) to the stack's variables, have the CLI pass the names from
   `apps.tfvars`, and count them as known in `unknown_hosts`. Tests in the stack's suite
-- [ ] On a shared host every app must have a memory limit in its Compose file
+- [x] On a shared host every app must have a memory limit in its Compose file
   (`deploy.resources.limits.memory` or `mem_limit`; `deploy/` already reads these for
   Northflank plans, reuse that local). Missing: an error naming the app and both spellings.
   `targets` carries each app's limit in MB

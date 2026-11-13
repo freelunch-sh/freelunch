@@ -96,6 +96,35 @@ locals {
   backup_without_data = sort([
     for name, a in var.apps : name if a.backup != null && length(a.backup.paths) == 0 && !try(length(yamldecode(file(local.apps[name].compose)).volumes) > 0, false)
   ])
+  # On a host shared with other projects every service of an app has a memory limit in its Compose file
+  # (deploy.resources.limits.memory or mem_limit), which is what the app reserves of the host.
+  shared_apps    = { for name, a in local.apps : name => a if try(var.hosts[a.host].shared, false) }
+  shared_compose = { for name, a in local.shared_apps : name => try(yamldecode(file(a.compose)), { services = {} }) if fileexists(a.compose) }
+  shared_service_mb = {
+    for name, c in local.shared_compose : name => {
+      for sname, s in try(c.services, {}) : sname => (
+        length(regexall("^([0-9.]+)\\s*([kKmMgG]?)[bB]?$", trimspace(tostring(try(s.deploy.resources.limits.memory, try(s.mem_limit, "")))))) == 0 ? null :
+        ceil(tonumber(regexall("^([0-9.]+)\\s*([kKmMgG]?)[bB]?$", trimspace(tostring(try(s.deploy.resources.limits.memory, try(s.mem_limit, "")))))[0][0]) * {
+          "" = 1 / 1048576, "k" = 1 / 1024, "m" = 1, "g" = 1024
+        }[lower(regexall("^([0-9.]+)\\s*([kKmMgG]?)[bB]?$", trimspace(tostring(try(s.deploy.resources.limits.memory, try(s.mem_limit, "")))))[0][1])])
+      )
+    }
+  }
+  shared_memory_mb = {
+    for name, m in local.shared_service_mb : name => length(m) == 0 || anytrue([for v in values(m) : v == null]) ? null : sum(values(m))
+  }
+  shared_memory_problems = sort([
+    for name, m in local.shared_service_mb : "${name}: on ${local.apps[name].host}, which other projects share, every service needs a memory limit in its Compose file, as deploy.resources.limits.memory or mem_limit (for example 512m). Without one: ${join(", ", [for s, v in m : s if v == null])}"
+    if length(m) > 0 && anytrue([for v in values(m) : v == null])
+  ])
+
+  shared_host_problems = sort(flatten([
+    for h, o in var.hosts : [
+      o.shared && o.address == null ? "${h}: a shared host needs its address" : "",
+      o.shared && o.arch == null ? "${h}: a shared host needs its arch (amd64 or arm64), since the inventory doesn't list it" : "",
+      o.shared && var.project == null ? "${h}: a shared host needs project in apps.tfvars, the name this project is filed under there" : "",
+    ] if o.shared
+  ]))
   unknown_job_apps = sort([for jn, j in var.jobs : "${jn} (app ${j.app})" if !contains(keys(var.apps), j.app)])
 
   unknown_needs = sort(flatten([
@@ -187,8 +216,10 @@ locals {
       provider = try(local.inventory[h].provider, local.platforms[h].provider, null)
       address  = contains(keys(local.platforms), h) ? null : try(coalesce(try(var.hosts[h].address, null), try(var.mesh[h].ssh ? var.mesh[h].address : null, null), try(local.inventory[h].public_ip, null), try(local.inventory[h].private_ip, null)), null)
       user     = contains(keys(local.platforms), h) ? null : try(coalesce(try(var.hosts[h].user, null), try(local.inventory[h].ssh_user, null)), "ubuntu")
-      arch     = try(local.inventory[h].arch, local.platforms[h].arch, null)
-      apps     = { for name, a in local.apps : name => { compose = a.compose, env_file = a.env_file, bucket = a.bucket, database = a.database, pre_deploy = a.pre_deploy, post_deploy = a.post_deploy, service = a.service, backup = a.backup } if a.host == h }
+      arch     = try(local.inventory[h].arch, local.platforms[h].arch, var.hosts[h].arch, null)
+      shared   = try(var.hosts[h].shared, false)
+      project  = try(var.hosts[h].shared, false) ? var.project : null
+      apps     = { for name, a in local.apps : name => { compose = a.compose, env_file = a.env_file, bucket = a.bucket, database = a.database, pre_deploy = a.pre_deploy, post_deploy = a.post_deploy, service = a.service, backup = a.backup, memory_mb = try(local.shared_memory_mb[name], null) } if a.host == h }
       jobs     = { for name, j in var.jobs : name => j if try(local.apps[j.app].host, null) == h }
       tunnel   = contains(keys(local.tunnels), h)
       urls     = sort([for hostname, r in local.routes : "https://${hostname}" if r.host == h])

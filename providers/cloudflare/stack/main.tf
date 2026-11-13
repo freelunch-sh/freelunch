@@ -21,7 +21,7 @@ locals {
   # On a container platform (Northflank), cloudflared is a service of its own and reaches
   # each app by its service name, which is the app's name in apps.tfvars.
   platforms     = { for p in try(data.terraform_remote_state.inventory[0].outputs.platforms, []) : "${p.provider}-${p.name}" => p }
-  unknown_hosts = sort(tolist(setsubtract(values(local.route_host), concat(local.inventory_hosts, keys(local.platforms)))))
+  unknown_hosts = sort(tolist(setsubtract(values(local.route_host), concat(local.inventory_hosts, keys(local.platforms), var.shared_hosts))))
   outside_zone  = [for h in keys(var.routes) : h if h != var.zone && !endswith(h, ".${var.zone}")]
   no_app        = sort([for h, r in var.routes : h if contains(keys(local.platforms), local.route_host[h]) && r.app == null])
   no_tunnel     = sort([for h, r in var.routes : "${h} (${local.route_host[h]})" if !try(local.platforms[local.route_host[h]].tunnel, true)])

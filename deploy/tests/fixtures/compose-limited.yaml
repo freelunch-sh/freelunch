@@ -1,0 +1,10 @@
+services:
+  api:
+    image: traefik/whoami
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+  worker:
+    image: traefik/whoami
+    mem_limit: 1g

@@ -8,6 +8,16 @@ output "targets" {
   }
 
   precondition {
+    condition     = length(compact(local.shared_host_problems)) == 0
+    error_message = "Shared hosts need more:\n- ${join("\n- ", compact(local.shared_host_problems))}"
+  }
+
+  precondition {
+    condition     = length(local.shared_memory_problems) == 0
+    error_message = "Apps on a shared host need memory limits:\n- ${join("\n- ", local.shared_memory_problems)}"
+  }
+
+  precondition {
     condition     = length(local.unknown_backup_buckets) == 0
     error_message = "Backups go to buckets that no storage stack has made: ${join(", ", local.unknown_backup_buckets)}. Known buckets: ${length(local.buckets) > 0 ? join(", ", sort(keys(local.buckets))) : "none"}. Add the bucket to that stack's buckets and apply it (freelunch apply cloudflare)."
   }
