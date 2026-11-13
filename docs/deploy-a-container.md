@@ -503,6 +503,14 @@ pulls by digest and refuses any other content. freelunch pins `cloudflared` the 
 `freelunch deploy oci-main` deploys one host and `freelunch deploy oci` all OCI hosts. To
 deploy from CI after each new image, see [Run freelunch from CI](ci.md#5-deploy-from-github-actions).
 
+## Hooks, jobs and a lock
+
+An app can run a command before it is replaced (`pre_deploy`, in the new image: a migration) and
+after it is healthy (`post_deploy`), and a scheduled command on its host (`jobs`, `daily 03:30` style
+schedules in UTC, written as systemd timers). See [deploy/README.md](../deploy/README.md#hooks-and-jobs-vm-hosts).
+`freelunch jobs` shows when each last ran and will next run. Two deploys to one host queue instead of
+running together.
+
 ## Day two: logs, restart, shell and the host's numbers
 
 Once the app runs, these work on a VM host (SSH with the pinned key, nothing to install):

@@ -12,6 +12,9 @@ release can change commands and the project layout.
 
 ### Added
 
+- **`freelunch jobs`** shows each job's schedule, last run, last result and next run, and `jobs run <job>` starts
+  one and follows its output. `deploy --dry-run`, `check` and `doctor` warn when heavy jobs (or the host's
+  reboot) start close together, with a time that clears them.
 - **Scheduled `jobs` on a VM host.** `jobs` in `apps.tfvars` (`app`, `command`, `schedule`, `service`,
   `heavy`, `timeout_minutes`) become a systemd timer and service per job on the host. Schedules are
   `hourly :MM`, `daily HH:MM` or `weekly <mon..sun> HH:MM`, in UTC. Heavy jobs run one at a time per host.

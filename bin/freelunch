@@ -183,6 +183,8 @@ Infrastructure:
   shell <app> [--service s] [--host h] [-- command...]
                           Run a command in an app's container on its VM host, or open a shell in
                           it. Returns the command's exit code
+  jobs [run <job>]        The scheduled jobs of every VM host: schedule, last run and result, next run.
+                          jobs run <job> starts one now and follows its output
   restart <app> [--host h] Restart an app on its VM host and wait until it is healthy; if it is not,
                           the last 50 log lines say why
   doctor                  Check what plan, apply and deploy need: tools, the OCI sign-in and
@@ -3590,7 +3592,7 @@ override_images() {
 cmd_deploy() {
   need_tf
   command -v jq >/dev/null || die "jq is required for 'deploy'"
-  local dry_run=0 filters=() a overrides=() next=""
+  local dry_run=0 filters=() a overrides=() next="" line
   for a in "$@"; do
     if [[ -n "$next" ]]; then overrides+=("$a"); next=""; continue; fi
     case "$a" in
@@ -3634,6 +3636,9 @@ cmd_deploy() {
   if [[ "${FREELUNCH_SSH_STRICT:-0}" == "1" ]]; then ssh_options yes; else ssh_options accept-new; fi
   token_reminders
   [[ "$dry_run" == "1" ]] || graph_gate "${hosts[@]}"
+  if [[ "$dry_run" == "1" ]]; then
+    while IFS= read -r line; do log "$line"; done < <(job_overlap_lines)
+  fi
   for h in "${hosts[@]}"; do
     if [[ "$(jq -r --arg h "$h" '.[$h].kind' "$TMP/targets.json")" == "platform" ]]; then engine_deploy "$h" "$dry_run"; else deploy_host "$h" "$dry_run"; fi
   done
@@ -6569,6 +6574,158 @@ cmd_shell() {
   exit "$rc"
 }
 
+# job_state <job>: "<last run>|<result>|<next run>" of a job on APP_HOST, from systemd
+job_state() {
+  local out last next result status
+  out="$(host_ssh "\$S systemctl show freelunch-$1.timer freelunch-$1.service -p NextElapseUSecRealtime -p LastTriggerUSec -p Result -p ExecMainStatus" 2>/dev/null)" || { echo "|can't ask the host|"; return 0; }
+  last="$(sed -n 's/^LastTriggerUSec=//p' <<< "$out" | head -n1)"
+  next="$(sed -n 's/^NextElapseUSecRealtime=//p' <<< "$out" | head -n1)"
+  result="$(sed -n 's/^Result=//p' <<< "$out" | head -n1)"
+  status="$(sed -n 's/^ExecMainStatus=//p' <<< "$out" | head -n1)"
+  case "$last" in ""|n/a|0) last="never run"; result="" ;; esac
+  case "$result" in
+    success) result="ok" ;;
+    "")      ;;
+    exit-code) result="failed (exit ${status:-?})" ;;
+    *)       result="failed ($result)" ;;
+  esac
+  echo "$last|$result|${next:-none}"
+}
+
+# cmd_jobs [run <job>]: the jobs of every VM host with their schedule, last run, last result and next
+# run; "run <job>" starts one now and follows its output
+cmd_jobs() {
+  local sub="" job="" host app address apps_file tunnel_state="" name schedule heavy state last result next rc=0
+  if [[ "${1:-}" == run ]]; then
+    sub=run; shift
+    [[ $# -eq 1 ]] || die "usage: freelunch jobs run <job>"
+    job="$1"
+  elif [[ $# -gt 0 ]]; then
+    die "usage: freelunch jobs [run <job>]"
+  fi
+  apps_file="$(state_root)/apps.tfvars"
+  [[ -f "$apps_file" ]] || die "jobs: no $(rel "$apps_file"): the jobs come from there"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if ! { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1; then
+    die "jobs: apps.tfvars doesn't resolve against the inventory yet (freelunch deploy --dry-run says why)"
+  fi
+  if [[ -z "$(jq -r '[.[].jobs // {} | keys[]] | .[]' "$TMP/targets.json")" ]]; then
+    die "jobs: there are no jobs in $(rel "$apps_file"). Add jobs = { name = { app = \"api\", command = \"...\", schedule = \"daily 03:30\" } }"
+  fi
+  if [[ "$sub" == run ]]; then
+    host="$(jq -r --arg j "$job" 'to_entries[] | select(.value.jobs // {} | has($j)) | .key' "$TMP/targets.json" | head -n1)"
+    [[ -n "$host" ]] || die "jobs: no job named $job (jobs: $(jq -r '[.[].jobs // {} | keys[]] | join(", ")' "$TMP/targets.json"))"
+    app="$(jq -r --arg h "$host" --arg j "$job" '.[$h].jobs[$j].app' "$TMP/targets.json")"
+    app_target jobs "$app" "$host"
+    log "jobs: starting $job on $APP_HOST"
+    host_ssh "\$S systemctl start --no-block freelunch-$job.service" || die "jobs: can't start $job on $APP_HOST (has freelunch deploy been run since the job was added?)"
+    # follow the output until the service is done; a heavy job may wait for the host's lock first
+    host_ssh "u=freelunch-$job.service; \$S journalctl -u \$u -f -n 0 --no-pager --output=cat & jp=\$!; while case \"\$(\$S systemctl is-active \$u)\" in active|activating) true ;; *) false ;; esac; do sleep 1; done; sleep 1; kill \$jp 2>/dev/null; true" || true
+    state="$(job_state "$job")"
+    IFS='|' read -r last result next <<< "$state"
+    if [[ "$result" == ok ]]; then log "jobs: $job finished: ok"; return 0; fi
+    die "jobs: $job finished: ${result:-no result}"
+  fi
+  for host in $(jq -r 'to_entries[] | select(.value.jobs // {} | length > 0) | .key' "$TMP/targets.json"); do
+    echo "Jobs on $host"
+    address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
+    if ! ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1; then
+      echo "  not asked: its host key isn't pinned yet (freelunch trust $host, or the first freelunch deploy)"
+      continue
+    fi
+    app_target jobs "$(jq -r --arg h "$host" '.[$h].jobs | to_entries[0].value.app' "$TMP/targets.json")" "$host"
+    while IFS=$'\t' read -r name app schedule heavy; do
+      [[ -n "$name" ]] || continue
+      state="$(job_state "$name")"
+      IFS='|' read -r last result next <<< "$state"
+      printf '  %-16s %-18s last: %s%s, next: %s%s\n' "$name" "$schedule" "$last" "${result:+ ($result)}" "$next" "$([[ "$heavy" == true ]] && echo ', heavy')"
+    done < <(jq -r --arg h "$host" '.[$h].jobs | to_entries[] | [.key, .value.app, .value.schedule, (.value.heavy | tostring)] | @tsv' "$TMP/targets.json")
+  done
+}
+
+# job_overlap_lines: one line for every pair of heavy jobs on a host (the host's own reboot window counts as
+# one) whose start times are closer than the longer one's timeout, from $TMP/targets.json. Heavy jobs queue
+# on the host's lock, so this is a warning, with a time in the widest free gap for the later one.
+job_overlap_lines() {
+  local host provider reboot rows="" name schedule minutes mins a sa b sb sug_job sug_sched
+  for host in $(jq -r 'to_entries[] | select(.value.jobs // {} | length > 0) | .key' "$TMP/targets.json"); do
+    rows=""
+    while IFS=$'\t' read -r name schedule minutes; do
+      [[ -n "$name" ]] || continue
+      mins="$(schedule_minutes "$schedule")"
+      rows="$rows$name|$schedule|$minutes|$mins|$(awk -v s="$schedule" 'BEGIN { split(s, p, " "); print p[1] }')"$'\n'
+    done < <(jq -r --arg h "$host" '.[$h].jobs | to_entries[] | select(.value.heavy) | [.key, .value.schedule, .value.timeout_minutes] | @tsv' "$TMP/targets.json")
+    # the host's own reboot for security updates, at reboot_time (04:00 unless the stack says otherwise)
+    provider="$(jq -r --arg h "$host" '.[$h].provider // empty' "$TMP/targets.json")"
+    reboot="04:00"
+    if [[ -n "$provider" && -f "$(config_dir "$provider")/terraform.tfvars" ]]; then
+      reboot="$(grep -E '^[[:space:]]*reboot_time[[:space:]]*=' "$(config_dir "$provider")/terraform.tfvars" | head -n1 | sed -e 's/^[^=]*=[[:space:]]*//' -e 's/[[:space:]]*#.*$//' -e 's/"//g' || true)"
+      [[ -n "$reboot" ]] || reboot="04:00"
+    fi
+    if [[ "$reboot" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+      rows="${rows}reboot|daily $reboot|30|$(schedule_minutes "daily $reboot")|daily"$'\n'
+    fi
+    [[ "$(grep -c . <<< "$rows")" -ge 2 ]] || continue
+    while IFS='|' read -r a sa b sb sug_job sug_sched; do
+      [[ -n "$a" ]] || continue
+      echo "jobs: $a and $b on $host can overlap ($a: $sa, $b: $sb); they will queue, not run together.${sug_sched:+ To spread them: move $sug_job to \"$sug_sched\"}"
+    done < <(awk -F'|' '
+      function dist(x, y,   d) { d = ((x - y) % W + W) % W; return d < W - d ? d : W - d }
+      function fmt(kind, t,   days) {
+        split("mon tue wed thu fri sat sun", days, " ")
+        if (kind == "hourly") return sprintf("hourly :%02d", t % 60)
+        if (kind == "daily") return sprintf("daily %02d:%02d", int((t % 1440) / 60), t % 60)
+        return sprintf("weekly %s %02d:%02d", days[int(t / 1440) + 1], int((t % 1440) / 60), t % 60)
+      }
+      BEGIN { W = 10080 }
+      {
+        name[NR] = $1; sched[NR] = $2; to[NR] = $3 + 0; kind[NR] = $5
+        n[NR] = split($4, m, " ")
+        for (k = 1; k <= n[NR]; k++) fire[NR, k] = m[k] + 0
+      }
+      END {
+        for (i = 1; i <= NR; i++) for (j = i + 1; j <= NR; j++) {
+          lim = to[i] > to[j] ? to[i] : to[j]; hit = 0
+          for (x = 1; x <= n[i] && !hit; x++) for (y = 1; y <= n[j] && !hit; y++) if (dist(fire[i, x], fire[j, y]) < lim) hit = 1
+          if (!hit) continue
+          mv = (name[j] == "reboot") ? i : j
+          best = -1; bs = ""
+          step = kind[mv] == "hourly" ? 5 : (kind[mv] == "daily" ? 5 : 15)
+          span = kind[mv] == "hourly" ? 60 : (kind[mv] == "daily" ? 1440 : W)
+          for (c = 0; c < span; c += step) {
+            score = 1e9; ok = 1
+            cn = kind[mv] == "hourly" ? 168 : (kind[mv] == "daily" ? 7 : 1)
+            for (q = 0; q < cn && ok; q++) {
+              f = kind[mv] == "hourly" ? q * 60 + c : (kind[mv] == "daily" ? q * 1440 + c : c)
+              for (o = 1; o <= NR && ok; o++) {
+                if (o == mv) continue
+                need = to[mv] > to[o] ? to[mv] : to[o]
+                for (z = 1; z <= n[o]; z++) { d = dist(f, fire[o, z]) - need; if (d < 0) { ok = 0; break } if (d < score) score = d }
+              }
+            }
+            if (ok && score > best) { best = score; bs = fmt(kind[mv], kind[mv] == "daily" ? c : (kind[mv] == "hourly" ? c : c)) }
+          }
+          printf "%s|%s|%s|%s|%s|%s\n", name[i], sched[i], name[j], sched[j], name[mv], bs
+        }
+      }' <<< "$rows")
+  done
+}
+
+# doctor_job_overlaps: job_overlap_lines as warnings, for doctor and check
+doctor_job_overlaps() {
+  local apps_file tunnel_state="" line lines
+  apps_file="$(state_root)/apps.tfvars"
+  [[ -f "$apps_file" && -n "$TF" ]] || return 0
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1 || return 0
+  lines="$(job_overlap_lines)"
+  [[ -n "$lines" ]] || return 0
+  echo "Jobs"
+  while IFS= read -r line; do check warn "$line"; done <<< "$lines"
+}
+
 # northflank_status <target>: each service in the target's project, and whether it runs
 northflank_status() {
   local host="$1" project expected code s status running seen=""
@@ -8432,6 +8589,7 @@ cmd_check() {
   workflow_lint
   [[ -f "$PROJECT/apps.tfvars" ]] || check fail "$(rel "$PROJECT")/apps.tfvars is missing: it says which apps run and where"
   ( up_targets ) >/dev/null 2>"$TMP/check.err" || check fail "$(sed -e "s/^freelunch: //" "$TMP/check.err" | head -1)"
+  doctor_job_overlaps
   echo
   if [[ $FAILS -eq 0 ]]; then echo "The config is complete."; else echo "$FAILS problem(s)."; return 1; fi
 }
@@ -8995,6 +9153,7 @@ cmd_doctor() {
   doctor_images
   doctor_cloudflare
   doctor_money
+  doctor_job_overlaps
   local warns=""
   [[ $WARNS -eq 0 ]] || warns=", $WARNS warning(s)"
   echo
@@ -11277,6 +11436,7 @@ main() {
     logs)                 cmd_logs "$@" ;;
     restart)              cmd_restart "$@" ;;
     shell)                cmd_shell "$@" ;;
+    jobs)                 cmd_jobs "$@" ;;
     doctor)               cmd_doctor ;;
     journey)              resolve_state_refs; sync_start status; cmd_journey "$@" ;;
     check)                if [[ $# -gt 0 ]]; then resolve_state_refs; sync_start status; cmd_probe "$@"; else cmd_check; fi ;;

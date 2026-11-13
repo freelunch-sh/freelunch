@@ -56,6 +56,43 @@ an app can have both. The URL holds the password, so it is kept out of the dry r
 api or cli provider) is read from the outputs of that provider's record in the state store
 ([architecture](../docs/architecture.md#database-contract)).
 
+## Hooks and jobs (VM hosts)
+
+```hcl
+apps = {
+  api = {
+    host        = "oci-main"
+    compose     = "../compose.yaml"
+    service     = "web"                 # optional: the Compose service the commands below run in
+    pre_deploy  = "bin/migrate"         # optional: runs in the new image before anything is replaced
+    post_deploy = "bin/warm-cache"      # optional: runs in the running container once it is healthy
+  }
+}
+
+jobs = {
+  report = {
+    app             = "api"
+    command         = "bin/report --all"
+    schedule        = "daily 03:30"     # hourly :MM | daily HH:MM | weekly <mon..sun> HH:MM, all UTC
+    service         = "web"             # optional, like the app's
+    heavy           = true              # optional: one heavy job at a time on the host (default false)
+    timeout_minutes = 30                # optional, default 60: systemd stops the job after that
+  }
+}
+```
+
+A hook is one command on one line, run with `sh -c` in the app's service (`service`, else the service
+named like the app, else the only one). A failing `pre_deploy` stops the deploy of that app before
+anything is replaced and says so. A failing `post_deploy` fails the deploy and says the new version
+is running. Both are errors on a container platform.
+
+A job becomes a systemd timer and service (`freelunch-<job>`) on the app's host, written by `deploy`;
+a job removed from `apps.tfvars` loses its units at the next deploy. `freelunch jobs` shows each job's
+last run, result and next run, and `freelunch jobs run <job>` starts one. Heavy jobs share a lock on
+the host, so they run one after another; `deploy --dry-run`, `check` and `doctor` warn when two start
+close together (or close to the host's reboot at 04:00) and suggest a free time. Two deploys to one
+host also queue on a lock.
+
 ## Outputs
 
 | Output | Description |

@@ -254,16 +254,16 @@ into the minutes of the week it fires at. Anything else is refused with the thre
   and removed (list `freelunch-*.timer`, compare). Jobs on a platform target are an error
   for now. Fake `systemctl`. Tests: units written, a removed job's timer removed, the lock
   only on heavy jobs
-- [ ] `freelunch jobs`: per host, each job's schedule, last run, last result and next run
+- [x] `freelunch jobs`: per host, each job's schedule, last run, last result and next run
   (`systemctl show` for the timer and service). `freelunch jobs run <job>` starts one now
   and follows its output. Test both against the fake
-- [ ] Overlap warning in `deploy --dry-run`, `check` and `doctor`: two `heavy` jobs on one
+- [x] Overlap warning in `deploy --dry-run`, `check` and `doctor`: two `heavy` jobs on one
   host whose start times are within the longer one's `timeout_minutes` (using
   `schedule_minutes`) give "jobs: <a> and <b> on <host> can overlap (<times>); they will
   queue, not run together. To spread them: <a suggested time in the widest free gap>". The
   host's own 04:00 reboot window (`reboot_time` in docker-bootstrap; read the project's
   value) counts as a heavy job. Test: overlap found, suggestion is free of overlaps
-- [ ] Docs: `deploy/README.md` (hooks, jobs, the schedule format), a paragraph in
+- [x] Docs: `deploy/README.md` (hooks, jobs, the schedule format), a paragraph in
   `docs/deploy-a-container.md`
 
 ## 5. Backups that live somewhere else, and a way back from nothing

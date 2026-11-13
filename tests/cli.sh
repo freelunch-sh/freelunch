@@ -50,6 +50,22 @@ EOF
 cat > "$WORK/bin/systemctl" <<'EOF'
 #!/bin/sh
 echo "systemctl $*" >> "$FAKE_LOG"
+# show <units> -p <property>...: the state of a unit from $FAKE_ROOT/jobstate/<unit> when there is one
+# (lines of Property=value), else a timer that never ran and a service that succeeded
+if [ "$1" = show ]; then
+  for u in "$@"; do
+    case "$u" in *.timer|*.service) ;; *) continue ;; esac
+    if [ -f "$FAKE_ROOT/jobstate/$u" ]; then cat "$FAKE_ROOT/jobstate/$u"
+    else
+      case "$u" in
+        *.timer) printf 'NextElapseUSecRealtime=Fri 2026-11-13 03:30:00 UTC\nLastTriggerUSec=n/a\n' ;;
+        *)       printf 'Result=success\nExecMainStatus=0\n' ;;
+      esac
+    fi
+  done
+fi
+[ "$1" != is-active ] || echo inactive
+exit 0
 EOF
 chmod +x "$WORK/bin/systemctl"
 # flock <options> <fd>: logs what it is asked, and says the lock is held when FAKE_FLOCK_BUSY is set
@@ -2294,6 +2310,81 @@ test_schedules_become_calendar_values_and_minutes() {
     schedule_oncalendar "weekly funday 03:00"
   ' _ "$CLI" 2>&1)" || true
   equals "$out" "$(printf '%s\n' '*-*-* *:05:00 UTC' '*-*-* 03:30:00 UTC' 'Sun *-*-* 23:59:00 UTC' 0 10079 90 1530 8730 168 5 65 10025 'die: schedule: '"'"'weekly funday 03:00'"'"' is not a schedule. Use "hourly :MM", "daily HH:MM" or "weekly <mon..sun> HH:MM" (UTC; for example "daily 03:30")')"
+}
+
+jobs_in() { # jobs_in <dir> [args]: freelunch jobs with the fake ssh and docker
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" "$CLI" jobs "$@")
+}
+
+# Two heavy jobs that start close together, or close to the host's 04:00 reboot, are warned about with a
+# time that clears them; light jobs are not heavy, so they do not count.
+test_heavy_jobs_that_overlap_are_warned_about() {
+  local p="$WORK/overlap" out sug
+  new_project "$p"
+  cat >> "$p/.freelunch/apps.tfvars" <<'TFVARS'
+jobs = {
+  report = { app = "api", command = "bin/report", schedule = "daily 03:30", heavy = true, timeout_minutes = 30 }
+  rollup = { app = "api", command = "bin/rollup", schedule = "daily 03:45", heavy = true, timeout_minutes = 30 }
+  ping   = { app = "api", command = "bin/ping", schedule = "daily 03:40" }
+}
+TFVARS
+  out="$(GHCR_TOKEN=x deploy_in "$p" --dry-run 2>&1)"
+  contains "$out" "jobs: report and rollup on oci-main can overlap (report: daily 03:30, rollup: daily 03:45); they will queue, not run together. To spread them: move rollup to \""
+  contains "$out" "jobs: rollup and reboot on oci-main can overlap"
+  lacks "$out" "ping and"
+  lacks "$out" "and ping"
+  # the suggestion clears both
+  sug="$(sed -n 's/.*report and rollup .*move rollup to "\(.*\)".*/\1/p' <<< "$out")"
+  [[ -n "$sug" ]] || { echo "no suggestion in: $out" >&2; return 1; }
+  sed -i.bak "s|daily 03:45|$sug|; s|daily 03:30|daily 06:00|" "$p/.freelunch/apps.tfvars"
+  out="$(GHCR_TOKEN=x deploy_in "$p" --dry-run 2>&1)"
+  lacks "$out" "can overlap"
+  # check says so too
+  sed -i.bak "s|$sug|daily 03:45|; s|daily 06:00|daily 03:30|" "$p/.freelunch/apps.tfvars"
+  out="$(check_in "$p" 2>&1 || true)"
+  contains "$out" "warn  jobs: report and rollup on oci-main can overlap"
+  # the stack's reboot_time moves the window, and null removes it
+  printf 'reboot_time = null\n' >> "$p/.freelunch/oci/terraform.tfvars"
+  out="$(GHCR_TOKEN=x deploy_in "$p" --dry-run 2>&1)"
+  lacks "$out" "and reboot"
+}
+
+# freelunch jobs lists each job with its last run, its result and its next run, and jobs run starts one.
+test_jobs_lists_and_runs_jobs() {
+  local p="$WORK/jobs-cmd" out key
+  new_project "$p"
+  cat >> "$p/.freelunch/apps.tfvars" <<'TFVARS'
+jobs = {
+  report = { app = "api", command = "bin/report", schedule = "daily 03:30", heavy = true }
+  ping   = { app = "api", command = "bin/ping", schedule = "weekly sun 04:15" }
+}
+TFVARS
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$p" >/dev/null 2>&1
+  mkdir -p "$p/host/jobstate"
+  printf 'NextElapseUSecRealtime=Fri 2026-11-13 03:30:00 UTC\nLastTriggerUSec=Thu 2026-11-12 03:30:01 UTC\n' > "$p/host/jobstate/freelunch-report.timer"
+  printf 'Result=exit-code\nExecMainStatus=3\n' > "$p/host/jobstate/freelunch-report.service"
+  out="$(jobs_in "$p" 2>&1)"
+  contains "$out" "Jobs on oci-main"
+  contains "$out" "report           daily 03:30        last: Thu 2026-11-12 03:30:01 UTC (failed (exit 3)), next: Fri 2026-11-13 03:30:00 UTC, heavy"
+  contains "$out" "ping             weekly sun 04:15   last: never run, next: Fri 2026-11-13 03:30:00 UTC"
+  # run starts the service and follows it, and says how it ended
+  : > "$p/fake.log"
+  printf 'Result=success\nExecMainStatus=0\n' > "$p/host/jobstate/freelunch-ping.service"
+  printf 'NextElapseUSecRealtime=x\nLastTriggerUSec=Fri 2026-11-13 01:00:00 UTC\n' > "$p/host/jobstate/freelunch-ping.timer"
+  out="$(jobs_in "$p" run ping 2>&1)"
+  contains "$out" "jobs: starting ping on oci-main"
+  contains "$out" "jobs: ping finished: ok"
+  grep -q 'systemctl start --no-block freelunch-ping.service' "$p/fake.log"
+  if out="$(jobs_in "$p" run report 2>&1)"; then echo "a failed job should fail"; return 1; fi
+  contains "$out" "jobs: report finished: failed (exit 3)"
+  if out="$(jobs_in "$p" run nothing 2>&1)"; then echo "jobs run should have failed"; return 1; fi
+  contains "$out" "jobs: no job named nothing (jobs: "
+  # no jobs at all
+  sed -i.bak '/^jobs = {/,/^}/d' "$p/.freelunch/apps.tfvars"
+  if out="$(jobs_in "$p" 2>&1)"; then echo "jobs should have failed"; return 1; fi
+  contains "$out" "jobs: there are no jobs in"
 }
 
 # jobs: a timer and a service per job on the host, a script that runs the command in the app's service,
