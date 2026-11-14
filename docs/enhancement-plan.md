@@ -636,6 +636,8 @@ Kept here so they are not lost. Do not build them without being asked.
   whether they are still wanted before any work
 - Host-key pinning from the serial console for GCP, AWS and Azure
 - ZeroTier, ngrok, and the providers the engines plan lists as unchecked
+- Streaming a SQLite database as it changes (Litestream): researched in section 5, not built; it needs the database's
+  path and volume named in `apps.tfvars`, a `compose.override.yaml` sidecar and a restore step before the app starts
 
 ## 12. Live runs ⛔
 
@@ -650,65 +652,61 @@ section (date, commit, what ran, what failed) and only then set or keep `verifie
   `freelunch ci init`
 - [ ] ⛔ A free domain through `domain add` and `domain status`, serving the app
 - [ ] ⛔ Sections 2 to 9: each section's own ⛔ box
+- [ ] ⛔ What sections 3 to 6 wrote from documentation, on the real VM: a job and a backup on a timer
+  (`systemctl show`, the `flock -w` and `timeout` wrapper), restic's `init`/`backup`/`forget`/`restore` and its
+  `snapshots --json`, a restore onto a second host, the size of the pinned restic image on arm64, a lost `LaunchInstance`
+  answer with the real `oci compute instance list` (empty output), `oci search` of the tenancy's instances,
+  `list-vnics` and the CPU query for the week
 - [ ] ⛔ Release `v0.1.0` once the four boxes above are ticked
 
 ## 13. Known gaps to come back to
 
-Found while building sections 1 to 6. None blocks the boxes above; each is a decision or a missing test.
-Tick one when it is fixed, and say how.
+Found while building sections 1 to 6. `[x]` means closed, with how; `[ ]` is open and says why it can't be closed here.
 
 **Missing tests**
 
-- [ ] `up --move` takes a backup of an app with a `backup` before it stops the old app (`up_copy_data`), and says
-  which projects stay on the old host. Neither is tested: the suite has no VM-to-VM move (only platform to VM).
-  Needs a fixture with two VM hosts.
-- [ ] `restore` onto a different host than the one that made the backup, as one journey (the plan calls it the normal
-  case). The tests restore on the same fake host.
-- [ ] The wait's lost-answer lookup is tested with a fake `oci`; the real CLI prints nothing for an empty instance list,
-  which the fake copies, but it has never run against Oracle.
-- [ ] `doctor` (not `check`) printing the backup passphrase line and the job overlap warnings: only `check` is tested.
+- [x] `up --move` takes a backup first and says which projects stay: `test_a_move_backs_the_app_up_first_and_leaves_the_tenants`
+  runs `up_copy_data` with the calls it makes replaced by ones that say what they were asked (the suite has no second VM host).
+- [x] A restore on a different host than the first: `test_restore_runs_on_the_host_it_is_asked_for` moves the app to the
+  inventory's other host and checks the restore went over SSH to that host's address.
+- [ ] ⛔ The wait's lost-answer lookup against the real OCI CLI (it prints nothing for an empty instance list, which the fake
+  copies). Moved to section 12.
+- [x] `doctor` printing the backup passphrase line and the overlap warnings: `test_doctor_reports_backups_and_overlapping_jobs`.
 
-**Behaviour to decide**
+**Behaviour to decide** (decided, and built)
 
-- [ ] `destroy` of an owner's host stops when the host's key is pinned but the host doesn't answer (a dead VM, say) and
-  needs `--evict-tenants`. The plan says "when it can't be asked, say so and stop"; for a VM Oracle removed this makes the
-  common case harder. Loosen it, e.g. a dead host that also fails a ping/port check goes ahead after a warning.
-- [ ] The room check runs only on hosts marked `shared = true`. The owner's own deploy is not checked against the memory
-  its tenants reserved. Add the same check when the owner's host has tenants (needs the SSH call on every owner deploy).
-- [ ] Backups are filed under `freelunch/<project>/<app>`, and `<project>` is the project folder's name unless
-  `project = "..."` is set. In CI the checkout folder can differ, which would start a new repository. Make `ci init`
-  write `project` into `apps.tfvars`, or fail a CI backup when it is unset.
-- [ ] A job's `timeout_minutes` is `TimeoutStartSec`, which also counts the time a heavy job waits for the host's lock.
-  A job queued behind a long one can time out before it starts. Put the limit around the command, not the unit.
-- [ ] `status` prints a project's backup lines before its app lines; the plan says "per app".
-- [ ] The tenant registry records an owner app's memory limit only when its Compose file has one, otherwise `?`, so
-  tenants cannot count it. Warn the owner at deploy when a host has tenants and an app has no limit.
+- [x] A dead host no longer blocks the owner's `destroy`: when SSH fails and nothing listens on port 22, it counts as gone
+  (logged). A host whose port is open and whose SSH fails still stops it (`--evict-tenants` overrides).
+- [x] The room check runs on the owner's deploy too, once another project is registered on its host (one more SSH read per
+  deploy); it names the owner's apps with no memory limit, since tenants can't count them.
+- [x] A CI deploy with an app that has a backup and no `project` is refused, and `ci init` writes `project` into
+  `apps.tfvars` (once).
+- [x] A job's `timeout_minutes` limits the command (`timeout`), not the unit (`TimeoutStartSec=infinity`); a heavy job waits for
+  the host's lock for up to 6 hours without it counting.
+- [x] `status` prints a host's backup lines after its apps.
+- [x] The owner's registry still writes `?` for an app with no limit, and the owner is told which apps those are when
+  tenants are on the host (the line above).
 
-**Not verified against the real thing**
+**Not verified against the real thing** (can't be closed without a live run: section 12 lists them)
 
-- [ ] Every unit file, the `flock` wrapper and `systemctl show` parsing were written from systemd's documentation and
-  tested against fakes. First live run: a job and a backup on the Oracle VM (the plan's section 12).
-- [ ] `restic` arguments (`cat config`, `init`, `backup`, `forget --prune --host`, `restore latest --target /`) and the
-  JSON of `restic snapshots` (`summary.total_bytes_processed` needs restic 0.17 or newer; the pinned image is 0.19.1)
-  were written from restic's documentation.
-- [ ] The restic image's size on arm64 (16.8 MB compressed from the registry's manifest) is the registry's number, not
-  a pull on the VM.
-- [ ] Litestream (SQLite streaming) was researched but not built; its current version could not be confirmed from its own
-  pages. See the answer under section 5.
+- [ ] ⛔ The unit files, the `flock`/`timeout` wrapper, `systemctl show` parsing, restic's arguments and `restic snapshots`
+  JSON, the OCI Search and monitoring queries (and the week's CPU as the 95th percentile of hourly 95th percentiles).
+- [ ] ⛔ The restic image's size on arm64 (16.8 MB compressed is the registry's manifest, not a pull on the VM).
+- [x] Litestream: decided not to build it (see the answer under section 5); it is listed under "Later" in section 11.
 
-- [ ] `setup` does not offer a machine the tenancy already runs; only `up` does (the plan asks for both).
-- [ ] The week's CPU is the 95th percentile of hourly 95th percentiles, an approximation of Oracle's 7-day p95 rule, and the
-  query follows Oracle's MQL reference without having run against Oracle. Same for the OCI Search item fields
-  (`shapeConfig`, `compartment-id`) that `oci_find_instances` reads.
-- [ ] `up` stops after joining a host (project, hosts and the apps' host are written); it doesn't go on to `trust` and
-  `deploy` by itself, and the apps' `host` edit is a regex on `apps.tfvars` that only handles the usual one-app-per-line form.
+**Smaller things from section 6**
+
+- [x] `setup` mentions the machine the tenancy already runs (it doesn't move the project: `up` does, after asking).
+- [x] `up` writing the join stops there on purpose (project, host and the apps' host are written; the next steps are
+  printed), as the plan says; the edit of `apps.tfvars` is tested in several shapes.
 
 **Housekeeping**
 
-- [ ] `private/ROADMAP.md`: the v0.1 Phase 2 line "Private GHCR image with env secrets, then updated with `deploy`" and
-  the `state init oci` plus CI deploy line were left unticked because the plan's field-run list does not say whether they
-  ran. Tick them (or not) from your own memory of the run.
-- [ ] `private/browser-only-checklist.md` 5.1: `ci init --set-secrets` writes the secret to a temporary file before
-  `gh secret set` reads it. Either pipe it on stdin, or leave the box open and say why.
-- [ ] The CLI test that counts shellcheck findings is a convention (23 findings at the start), not a check. Add a
-  baseline file and a test, or fix the 23.
+- [ ] ⛔ `private/ROADMAP.md`: two v0.1 Phase 2 lines ("Private GHCR image with env secrets, then updated with `deploy`";
+  "`state init oci` on the real tenancy; a deploy from CI after an image build") are unticked because the plan's list of
+  what the field run did doesn't say. Needs your memory of the run.
+- [x] `private/browser-only-checklist.md` 5.1: `ci init --set-secrets` now keeps a value in memory and pipes it to `gh` on
+  stdin, with no file of its own (a key's final newline kept); ticked there.
+- [x] The shellcheck count is a check now: `tests/shellcheck.baseline` (23) and `test_shellcheck_findings_do_not_grow`.
+  The 23 remaining findings are notes and warnings that were there at the start; lowering the baseline is how to record
+  fixing them.

@@ -12,6 +12,9 @@ release can change commands and the project layout.
 
 ### Added
 
+- **Gaps closed from the plan.** A host that answers nothing no longer blocks `destroy`; the owner's deploy is checked against
+  the projects sharing its host; CI backups need `project` (`ci init` writes it); a job's time limit is around its command;
+  `ci init --set-secrets` pipes a value to `gh` without a file; `tests/shellcheck.baseline` keeps the findings from growing.
 - **One VM, several projects.** A project can move onto a host another project made (`hosts` with `shared = true`, a
   `project` name): its apps, units, backups and network are prefixed `<project>--`, the host keeps a registry of who is
   on it, `deploy` refuses what doesn't fit (memory limits required, headroom kept free), `up` offers the machine the

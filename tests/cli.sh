@@ -37,6 +37,8 @@ for a; do
   last="$a"
 done
 echo "ssh $*" >> "$FAKE_LOG"
+# FAKE_SSH_FAIL: the host doesn't answer
+[[ -z "${FAKE_SSH_FAIL:-}" ]] || exit 255
 if [[ -n "${FAKE_HOST_KEY:-}" ]] && ! ssh-keygen -F "${dest#*@}" -f "$known" >/dev/null 2>&1; then
   echo "${dest#*@} $FAKE_HOST_KEY" >> "$known"
 fi
@@ -2365,7 +2367,7 @@ test_deploy_sets_up_a_backup() {
   contains "$(cat "$p/host/backup/api.env")" "AWS_SECRET_ACCESS_KEY=mock-key"
   contains "$(cat "$p/host/backup/api.env")" "RESTIC_REPOSITORY=s3:https://s3.us-west-004.backblazeb2.com/freelunch-results/freelunch/"
   contains "$(cat "$p/host/systemd/freelunch-backup-api.timer")" "OnCalendar=*-*-* 02:00:00 UTC"
-  contains "$(cat "$p/host/systemd/freelunch-backup-api.service")" "ExecStart=/usr/bin/flock /opt/freelunch/locks/heavy.lock /bin/bash /opt/freelunch/jobs/backup-api.sh"
+  contains "$(cat "$p/host/systemd/freelunch-backup-api.service")" "ExecStart=/usr/bin/flock -w 21600 /opt/freelunch/locks/heavy.lock /usr/bin/timeout 180m /bin/bash /opt/freelunch/jobs/backup-api.sh"
   grep -q '^systemctl enable freelunch-backup-api.timer' "$p/fake.log"
   contains "$(cat "$p/host/bin/backup-api")" "--keep-daily 5 --keep-weekly 4"
   contains "$(cat "$p/host/bin/backup-api")" "image=restic/restic:0.19.1@sha256:"
@@ -2387,6 +2389,90 @@ test_deploy_sets_up_a_backup() {
   FAKE_EXEC_RC=1 FAKE_ROOT="$p/host" FAKE_LOG="$p/fake.log" PATH="$WORK/bin:$PATH" bash "$p/backup-api.sh" >/dev/null 2>&1 && { echo "the script should have failed"; return 1; }
   contains "$(cat "$p/host/backup/api.failed")" "before failed, so no backup was made"
   fails grep -q ' backup /data' "$p/fake.log"
+}
+
+# Backups are filed under the project's name, which CI can't guess: CI refuses without one, and ci init writes it.
+test_backups_need_a_project_name_in_ci() {
+  local p="$WORK/backup-ci" out
+  backup_project "$p"
+  if out="$(CI=true GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw deploy_in "$p" --dry-run 2>&1)"; then echo "a CI deploy should have refused"; return 1; fi
+  contains "$out" 'backup: set project = "<name>" in .freelunch/apps.tfvars (freelunch ci init writes it)'
+  out="$(GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw deploy_in "$p" --dry-run 2>&1)" || { echo "$out" >&2; return 1; }
+  # ci init writes it, once
+  (cd "$p" && PATH="$WORK/bin:$PATH" FREELUNCH_TF="$WORK/bin/fake-tf" "$CLI" ci init --print-secrets --no-first-run --no-journey >/dev/null 2>&1) || true
+  equals "$(grep -c '^project = ' "$p/.freelunch/apps.tfvars")" 1
+  out="$(CI=true GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw deploy_in "$p" --dry-run 2>&1)" || { echo "$out" >&2; return 1; }
+  (cd "$p" && PATH="$WORK/bin:$PATH" FREELUNCH_TF="$WORK/bin/fake-tf" "$CLI" ci init --print-secrets --no-first-run --no-journey >/dev/null 2>&1) || true
+  equals "$(grep -c '^project = ' "$p/.freelunch/apps.tfvars")" 1
+}
+
+# A move takes an app with a backup out of the old host with a backup first, and says which projects stay behind. up_copy_data
+# is run here with the pieces it calls replaced by ones that say what they were asked, since the suite has no second VM host.
+test_a_move_backs_the_app_up_first_and_leaves_the_tenants() {
+  local p="$WORK/move-backup" out
+  mkdir -p "$p"
+  sed -n "$(grep -n '^up_copy_data() {' "$CLI" | cut -d: -f1),/^}/p" "$CLI" > "$p/fn.sh"
+  echo '{"gcp-main": {"apps": {"api": {"backup": {"schedule": "daily 02:00"}}, "web": {}}}}' > "$p/targets.json"
+  out="$(cd "$p" && bash -c '
+    TMP="$PWD"; PROJECT="$PWD/.freelunch"
+    log() { echo "log: $*"; }
+    rel() { echo "$1"; }
+    state_root() { echo "$PWD/.freelunch"; }
+    is_platform() { return 1; }
+    target_host() { echo "$1-main"; }
+    host_tenants() { printf "shopb\nother\n"; }
+    up_data_apps() { printf "api\nweb\n"; }
+    app_target() { echo "app_target $2 on $3"; APP_FOLDER="$2"; }
+    unit_run() { echo "unit_run $2"; }
+    vol_target() { echo "vol_target $1 $2"; }
+    vol_pull() { echo "vol_pull $1"; }
+    vol_push() { echo "vol_push $1"; }
+    . ./fn.sh
+    up_copy_data gcp oci
+  ' 2>&1)"
+  contains "$out" "log: up: shopb, other also run on gcp-main, and stay there: only this project's apps move"
+  # api has a backup: taken before its volumes are pulled; web has none
+  equals "$(grep -E '^(app_target|unit_run|vol_pull)' <<< "$out" | tr '\n' '|')" "app_target api on gcp-main|unit_run backup-api|vol_pull api|vol_pull web|"
+  # a backup that fails does not stop the move: the copy is still pulled
+  out="$(cd "$p" && bash -c '
+    TMP="$PWD"; PROJECT="$PWD/.freelunch"
+    log() { echo "log: $*"; }; rel() { echo "$1"; }; state_root() { echo "$PWD/.freelunch"; }
+    is_platform() { return 1; }; target_host() { echo "$1-main"; }; host_tenants() { :; }
+    up_data_apps() { echo api; }; app_target() { APP_FOLDER="$2"; }
+    unit_run() { echo "unit_run failed" >&2; exit 1; }
+    vol_target() { :; }; vol_pull() { echo "vol_pull $1"; }; vol_push() { echo "vol_push $1"; }
+    . ./fn.sh
+    up_copy_data gcp oci
+  ' 2>&1)"
+  contains "$out" "log: up: no backup of api was taken first; the copy below is what is kept"
+  contains "$out" "vol_pull api"
+  contains "$out" "vol_push api"
+}
+
+# doctor says the same about backups and overlapping heavy jobs as check does.
+test_doctor_reports_backups_and_overlapping_jobs() {
+  local p="$WORK/backup-doctor" out
+  backup_project "$p"
+  cat >> "$p/.freelunch/apps.tfvars" <<'TFVARS'
+jobs = {
+  report = { app = "api", command = "bin/report", schedule = "daily 02:10", heavy = true, timeout_minutes = 30 }
+}
+TFVARS
+  out="$(cd "$p" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$p/fake.log" FAKE_ROOT="$p/host" "$CLI" doctor 2>&1 || true)"
+  contains "$out" "Backups"
+  contains "$out" "fail  FREELUNCH_BACKUP_PASSPHRASE is not set"
+  contains "$out" "warn  jobs: report and backup-api on oci-main can overlap (report: daily 02:10, backup-api: daily 02:00)"
+  out="$(cd "$p" && PATH="$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$p/fake.log" FAKE_ROOT="$p/host" FREELUNCH_BACKUP_PASSPHRASE=pw "$CLI" doctor 2>&1 || true)"
+  contains "$out" "ok    FREELUNCH_BACKUP_PASSPHRASE is set"
+}
+
+# The CLI's shellcheck findings may be fewer than tests/shellcheck.baseline, never more. Lower the number when some are fixed.
+test_shellcheck_findings_do_not_grow() {
+  local now baseline
+  command -v shellcheck >/dev/null || { echo "(shellcheck isn't installed: skipped)" >&2; return 0; }
+  baseline="$(cat "$ROOT/tests/shellcheck.baseline")"
+  now="$( (shellcheck -f gcc "$CLI" 2>&1 || true) | wc -l | tr -d ' ')"
+  [[ "$now" -le "$baseline" ]] || { echo "shellcheck finds $now things in bin/freelunch, $baseline at the baseline (tests/shellcheck.baseline): fix the new ones" >&2; return 1; }
 }
 
 # freelunch backup runs the backup unit now and follows it; backup list prints the snapshots.
@@ -2498,6 +2584,26 @@ test_status_and_check_report_backups() {
   sed -i.bak 's|, backup = {[^}]*}||' "$p/.freelunch/apps.tfvars"
   out="$(check_in "$p" --json)"
   equals "$(jq -r '.[] | select(.node == "api") | has("backup_age_hours")' <<< "$out")" "false"
+}
+
+# The normal case of a restore is another host than the one that made the backup: the app is deployed there, and the
+# restore runs there (over SSH to that host's address), not on the old one.
+test_restore_runs_on_the_host_it_is_asked_for() {
+  local p="$WORK/restore-other" out key
+  backup_project "$p"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw FAKE_HOST_KEY="$key" deploy_in "$p" >/dev/null 2>&1
+  # the app moves to the other host of the inventory, and is deployed there
+  sed -i.bak 's|api = { host = "oci-main"|api = { host = "oci-edge-1"|' "$p/.freelunch/apps.tfvars"
+  # (only that host: the two fake hosts share one folder, which the real ones don't)
+  GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw FAKE_HOST_KEY="$key" deploy_in "$p" oci-edge-1 >/dev/null 2>&1 || { echo "the deploy to the other host failed"; return 1; }
+  mkdir -p "$p/host/volumes/api_data/_data"
+  : > "$p/fake.log"
+  out="$(FREELUNCH_AUTO_APPROVE=1 restore_in "$p" api 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "restore: api is back on oci-edge-1 from the latest snapshot"
+  grep -q '^ssh .* ubuntu@203.0.113.11 ' "$p/fake.log"
+  fails grep -q '^ssh .* ubuntu@203.0.113.10 ' "$p/fake.log"
+  grep -q ' restore latest --target / --host api' "$p/fake.log"
 }
 
 # Two deploys to one host queue on a lock; one that cannot get it in 15 minutes says another holds it.
@@ -2816,6 +2922,18 @@ TFVARS
   sed -i.bak '/^shared_headroom_mb/d' "$tenant/.freelunch/apps.tfvars"
   out="$(FAKE_DF_PERCENT=91 shared_in "$tenant" "$root" deploy 2>&1)" && { echo "deploy should have been refused"; return 1; }
   contains "$out" "the disk of oci-main is 91% full"
+  # the owner's own deploy is checked once another project is on its host, and says what it can't count
+  printf 'shopb--api 2048\n' > "$root/tenants/shopb/apps"
+  out="$(shared_in "$owner" "$root" deploy 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "oci-main: other projects run here, and api has no memory limit"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    mem_limit: 11g\n' > "$owner/compose.yaml"
+  out="$(shared_in "$owner" "$root" deploy 2>&1)" && { echo "the owner's deploy should have been refused"; return 1; }
+  contains "$out" "deploy: oci-main has 12.0 GB; other projects reserve 2.0 GB and this one asks for 11.0 GB"
+  # alone on its host, the owner is not asked anything
+  rm -rf "$root/tenants/shopb"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n' > "$owner/compose.yaml"
+  out="$(shared_in "$owner" "$root" deploy 2>&1)" || { echo "$out" >&2; return 1; }
+  lacks "$out" "other projects run here"
 }
 
 # freelunch jobs lists each job with its last run, its result and its next run, and jobs run starts one.
@@ -2872,9 +2990,9 @@ TFVARS
   GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
   contains "$(cat "$p/host/systemd/freelunch-report.timer")" "OnCalendar=*-*-* 03:30:00 UTC"
   contains "$(cat "$p/host/systemd/freelunch-ping.timer")" "OnCalendar=Sun *-*-* 04:15:00 UTC"
-  contains "$(cat "$p/host/systemd/freelunch-report.service")" "ExecStart=/usr/bin/flock /opt/freelunch/locks/heavy.lock /bin/bash /opt/freelunch/jobs/report.sh"
-  contains "$(cat "$p/host/systemd/freelunch-report.service")" "TimeoutStartSec=30m"
-  contains "$(cat "$p/host/systemd/freelunch-ping.service")" "ExecStart=/bin/bash /opt/freelunch/jobs/ping.sh"
+  contains "$(cat "$p/host/systemd/freelunch-report.service")" "ExecStart=/usr/bin/flock -w 21600 /opt/freelunch/locks/heavy.lock /usr/bin/timeout 30m /bin/bash /opt/freelunch/jobs/report.sh"
+  contains "$(cat "$p/host/systemd/freelunch-report.service")" "TimeoutStartSec=infinity"
+  contains "$(cat "$p/host/systemd/freelunch-ping.service")" "ExecStart=/usr/bin/timeout 60m /bin/bash /opt/freelunch/jobs/ping.sh"
   lacks "$(cat "$p/host/systemd/freelunch-ping.service")" "flock"
   contains "$(cat "$p/host/jobs/report.sh")" "sh -c 'bin/report --all'"
   contains "$(cat "$p/host/jobs/ping.sh")" "svc='web'"
@@ -6938,6 +7056,13 @@ test_destroy_keeps_the_projects_that_share_a_host() {
   fails grep -q 'providers/oci/stack destroy' "$p/fake.log"
   out="$(UP_CMD=destroy up_in "$p" oci --evict-tenants 2>&1)" || { echo "$out" >&2; return 1; }
   grep -q 'providers/oci/stack destroy' "$p/fake.log"
+  # a host that answers nothing at all is gone, and goes; one that has a listening SSH port that fails stops it
+  out="$(FAKE_SSH_FAIL=1 UP_CMD=destroy up_in "$p" oci 2>&1)" && { echo "a host with its SSH port open that fails should stop destroy"; return 1; }
+  contains "$out" "destroy: stopped, since destroying oci-main could take other projects' apps with it"
+  up_project "$p-g" oci
+  FAKE_UP="oci=ok" up_in "$p-g" >/dev/null 2>&1
+  out="$(FAKE_SSH_FAIL=1 FAKE_TCP_DOWN="203.0.113.10 203.0.113.11" UP_CMD=destroy up_in "$p-g" oci 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "destroy: oci-main doesn't answer at all (nothing listens on port 22 at 203.0.113.10), so it counts as gone"
   # a host nobody else is on goes as before
   rm -rf "$p/host/tenants/shopb"
   up_project "$p-b" oci
@@ -6975,6 +7100,39 @@ test_up_offers_the_machine_the_tenancy_already_runs() {
   up_project "$p-s" oci
   out="$(FAKE_SHARED_INSTANCES='[{"display-name": "small", "identifier": "ocid1.instance.oc1..s", "additional-details": {"shape": "VM.Standard.A1.Flex", "shapeConfig": {"ocpus": 1, "memoryInGBs": 6}}}]' FAKE_UP="oci=ok" up_in "$p-s" </dev/null 2>&1)" || { echo "$out" >&2; return 1; }
   contains "$out" "up: making oci"
+}
+
+# Joining a host edits apps.tfvars: the project, the host, and the host on every app that has none, whatever shape the
+# apps are written in.
+test_joining_a_host_edits_apps_tfvars_in_any_shape() {
+  local p="$WORK/join-shapes"
+  mkdir -p "$p/.freelunch"
+  cat > "$p/.freelunch/apps.tfvars" <<'TFVARS'
+apps = {
+  api = {
+    compose  = "../compose.yaml"
+    env_file = "api.env"
+  }
+  web = { compose = "../web.yaml" }
+  old = { host = "oci-edge-1", compose = "../old.yaml" }
+  "worker" = { compose = "../worker.yaml", needs = ["api"] }
+}
+hosts = {
+  oci-edge-1 = { address = "203.0.113.11" }
+}
+TFVARS
+  sed -n "$(grep -n '^shared_write_config() {' "$CLI" | cut -d: -f1),/^}/p" "$CLI" > "$p/fn.sh"
+  (cd "$p" && PROJECT="$p/.freelunch" bash -c 'state_root() { echo "$PROJECT"; }; tfvar() { sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -1; }; project_name() { echo shop; }; . ./fn.sh; shared_write_config oci-big 203.0.113.50 arm64')
+  local f="$p/.freelunch/apps.tfvars"
+  contains "$(cat "$f")" 'project = "shop"'
+  contains "$(cat "$f")" 'oci-big = { address = "203.0.113.50", shared = true, arch = "arm64" }'
+  contains "$(cat "$f")" 'oci-edge-1 = { address = "203.0.113.11" }'
+  equals "$(grep -c 'host = "oci-big"' "$f")" 3
+  contains "$(cat "$f")" 'old = { host = "oci-edge-1", compose'
+  fails grep -q 'old = { host = "oci-big"' "$f"
+  equals "$(grep -c '^hosts = {' "$f")" 1
+  # and the file still reads: the deploy plan resolves it
+  contains "$(grep -A3 '^  api = {' "$f")" 'host = "oci-big",'
 }
 
 # A VM that has restarted no longer has its host keys on the console: trust says so, and up
@@ -7183,6 +7341,18 @@ setup_in() {
     [[ -f "$dir/home/.ssh/id_ed25519.pub" ]] || ssh-keygen -q -t ed25519 -N '' -C me@laptop -f "$dir/home/.ssh/id_ed25519"
   fi
   (cd "$dir" && env -u CLOUDFLARE_API_TOKEN -u NORTHFLANK_API_TOKEN -u SCW_SECRET_KEY -u RENDER_API_KEY HOME="$dir/home" PATH="$WORK/bin:$PATH" "$CLI" setup "$@")
+}
+
+# setup says when the tenancy already runs freelunch's machine, using the whole free Arm allowance.
+test_setup_mentions_the_machine_the_tenancy_runs() {
+  local p="$WORK/setup-shared" out
+  mkdir -p "$p" && touch "$p/compose.yaml"
+  out="$(PATH="$WORK/up-bin:$PATH" FAKE_LOG="$p/fake.log" FAKE_SHARED_INSTANCES='[{"display-name": "main", "identifier": "ocid1.instance.oc1..m", "compartment-id": "ocid1.compartment.oc1..c", "additional-details": {"shape": "VM.Standard.A1.Flex", "shapeConfig": {"ocpus": 2, "memoryInGBs": 12}}}]' \
+    setup_in "$p" --targets oci --no-doctor 2>&1)"
+  contains "$out" "setup: this tenancy already runs main (freelunch's), which uses the whole free Arm allowance"
+  p="$WORK/setup-alone"; mkdir -p "$p" && touch "$p/compose.yaml"
+  out="$(PATH="$WORK/up-bin:$PATH" FAKE_LOG="$p/fake.log" setup_in "$p" --targets oci --no-doctor 2>&1)"
+  lacks "$out" "already runs"
 }
 
 # setup finds what the clouds' own config has and writes the project; what it can't find is

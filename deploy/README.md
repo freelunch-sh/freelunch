@@ -76,7 +76,7 @@ jobs = {
     schedule        = "daily 03:30"     # hourly :MM | daily HH:MM | weekly <mon..sun> HH:MM, all UTC
     service         = "web"             # optional, like the app's
     heavy           = true              # optional: one heavy job at a time on the host (default false)
-    timeout_minutes = 30                # optional, default 60: systemd stops the job after that
+    timeout_minutes = 30                # optional, default 60: the command is stopped after that (a heavy job's wait for the lock doesn't count)
   }
 }
 ```

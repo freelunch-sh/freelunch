@@ -41,7 +41,8 @@ Every service of an app on a shared host needs a memory limit in its Compose fil
 `mem_limit`), which is what it reserves. Before anything is copied, `deploy` reads the host's memory and what every project
 reserved and refuses when the total plus this project's would leave less than `shared_headroom_mb` free (default 1024,
 set it in `apps.tfvars`), or when the disk is more than 85% full. `deploy --dry-run` prints who reserves what. An owner
-app with no limit counts as unknown and is named.
+app with no limit counts as unknown and is named. The owner's own deploy is checked the same way once another project is
+registered on its host, and says which of its apps have no limit.
 
 ## Jobs and locks
 
@@ -59,7 +60,9 @@ freelunch destroy oci-main    # in a tenant project: takes this project off the 
 
 `destroy <shared host>` removes the project's folders, volumes, units, network and registry folder, asks first, and
 refuses an app with data and no backup unless `--discard-data`. The owner's `destroy` of the host stack refuses while
-other projects are on it (`--evict-tenants` goes ahead); `up --move` of the owner's apps leaves them on the old host.
+other projects are on it (`--evict-tenants` goes ahead); a host that answers nothing at all (SSH fails and nothing listens
+on port 22: Oracle removed it) counts as gone and doesn't stop it. `up --move` of the owner's apps leaves the other
+projects on the old host and says so.
 
 ## Not live-tested
 

@@ -2393,7 +2393,7 @@ backup_age_text() {
 }
 
 status_apps() {
-  local apps_file tunnel_state="" host address user out app service state health expected seen numbers line
+  local apps_file tunnel_state="" host address user out app service state health expected seen numbers line backup_lines
   apps_file="$(state_root)/apps.tfvars"
   [[ -n "$TF" ]] || return 0
   if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
@@ -2423,7 +2423,7 @@ status_apps() {
       echo "  can't reach $user@$address over SSH"
       continue
     fi
-    seen=""
+    seen="" backup_lines=""
     line="$(grep '^#host|' <<< "$out" | head -n1)"
     numbers="$(host_numbers_text "$line")"
     if [[ -n "$numbers" ]]; then
@@ -2432,9 +2432,10 @@ status_apps() {
     fi
     while IFS='|' read -r app service state health now; do
       [[ "$app" != "#backup" ]] || {
-        if [[ -n "$health" ]]; then echo "  backup of $service: failed: $health"
-        elif [[ -n "$state" ]]; then echo "  backup of $service: last $(backup_age_text "$state" "$now")"
-        else echo "  backup of $service: not run yet"; fi
+        # printed after the apps, with the rest of what the host says about them
+        if [[ -n "$health" ]]; then backup_lines="${backup_lines}  backup of $service: failed: $health"$'\n'
+        elif [[ -n "$state" ]]; then backup_lines="${backup_lines}  backup of $service: last $(backup_age_text "$state" "$now")"$'\n'
+        else backup_lines="${backup_lines}  backup of $service: not run yet"$'\n'; fi
         continue
       }
       [[ -n "$app" && "$app" != "#host" ]] || continue
@@ -2445,6 +2446,7 @@ status_apps() {
     for app in $expected; do
       [[ "$seen" == *" $app "* ]] || printf '  %-20s %s\n' "$app" "not deployed yet (freelunch deploy)"
     done
+    [[ -z "$backup_lines" ]] || printf '%s' "$backup_lines"
   done
 }
 
@@ -3349,7 +3351,8 @@ SCRIPT
 # than 85% full. The table of who reserves what is printed for a dry run. Owner apps without a limit count as
 # unknown, and are named.
 shared_room_check() {
-  local host="$1" dry="$2" address user out total disk headroom mine me others=0 unknown="" t folder mb
+  local host="$1" dry="$2" address user out total disk headroom mine me others=0 unknown="" t folder mb shared tenants=0 nolimit
+  shared="$(jq -r --arg h "$host" '.[$h].shared // false' "$TMP/targets.json")"
   address="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
   user="$(jq -r --arg h "$host" '.[$h].user // empty' "$TMP/targets.json")"
   HOST_NS="$(host_ns "$host")"
@@ -3358,14 +3361,14 @@ shared_room_check() {
   refuse() { if [[ "$dry" == 1 ]]; then log "would be refused: ${1#deploy: }"; else die "$1"; fi; }
   mine="$(jq -r --arg h "$host" '[.[$h].apps[].memory_mb // 0] | add // 0' "$TMP/targets.json")"
   if ! ssh-keygen -F "$address" -f "$(state_root)/known_hosts" >/dev/null 2>&1; then
-    [[ "$dry" == 1 ]] || return 0
+    [[ "$dry" == 1 && "$shared" == true ]] || return 0
     log "$host: shared with other projects; its key isn't pinned yet, so what they reserve isn't read (freelunch trust $host)"
     return 0
   fi
   ssh_options yes
   # shellcheck disable=SC2016 # expanded by the remote shell
   out="$(shared_room_script | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi' 2>/dev/null)" || {
-    [[ "$dry" == 1 ]] && return 0
+    [[ "$dry" == 1 || "$shared" != true ]] && return 0
     die "deploy: $host is shared with other projects, and what they reserve can't be read over SSH, so there is no telling whether this one fits"
   }
   total="$(sed -n 's/^#mem|//p' <<< "$out" | head -n1)"
@@ -3374,8 +3377,15 @@ shared_room_check() {
   while IFS='|' read -r _ t folder mb; do
     [[ -n "$t" ]] || continue
     [[ "$t" == "$me" ]] && continue
+    tenants=$((tenants + 1))
     if [[ "$mb" =~ ^[0-9]+$ ]]; then others=$((others + mb)); else unknown="${unknown:+$unknown, }$folder"; fi
   done < <(grep '^#tenant|' <<< "$out")
+  # the owner's own deploy is only checked when other projects are on its host, and says which of its apps they can't count
+  if [[ "$shared" != true ]]; then
+    [[ $tenants -gt 0 ]] || return 0
+    nolimit="$(jq -r --arg h "$host" '[.[$h].apps | to_entries[] | select(.value.memory_mb == null) | .key] | join(", ")' "$TMP/targets.json")"
+    [[ -z "$nolimit" ]] || log "$host: other projects run here, and $nolimit has no memory limit (mem_limit or deploy.resources.limits.memory in its Compose file), so they can't count what it reserves"
+  fi
   if [[ "$dry" == 1 ]]; then
     {
       echo "$host: memory reserved on the host (${total:-?} MB in all, $headroom MB kept free)"
@@ -3601,8 +3611,12 @@ backup_project() {
 
 # backup_passphrase_check: stop when a backup has nothing to encrypt it with
 backup_passphrase_check() {
-  [[ -n "${FREELUNCH_BACKUP_PASSPHRASE:-}" ]] && return 0
   [[ -n "$(jq -r '[.[].apps[] | select(.backup != null)] | length | select(. > 0)' "$TMP/targets.json")" ]] || return 0
+  # in CI the checkout's folder name isn't the project's: backups need a name that stays put
+  if [[ ( "${CI:-}" == true || "${GITHUB_ACTIONS:-}" == true ) && -z "$(tfvar "$(state_root)/apps.tfvars" project)" ]]; then
+    die "backup: set project = \"<name>\" in $(rel "$(state_root)")/apps.tfvars (freelunch ci init writes it). The backups are filed in the bucket under it, and this CI checkout's folder has another name than yours, which would start a new repository"
+  fi
+  [[ -n "${FREELUNCH_BACKUP_PASSPHRASE:-}" ]] && return 0
   die "backup: FREELUNCH_BACKUP_PASSPHRASE is not set. It encrypts the backups, and without it nobody can read them (you included), so keep a copy somewhere safe too. Put it in $(rel "$(state_root)")/.env"
 }
 
@@ -3677,8 +3691,8 @@ Description=freelunch backup of $HOST_NS$app
 
 [Service]
 Type=oneshot
-TimeoutStartSec=180m
-ExecStart=/usr/bin/flock /opt/freelunch/locks/heavy.lock /bin/bash /opt/freelunch/jobs/backup-$HOST_NS$app.sh
+TimeoutStartSec=infinity
+ExecStart=/usr/bin/flock -w 21600 /opt/freelunch/locks/heavy.lock /usr/bin/timeout 180m /bin/bash /opt/freelunch/jobs/backup-$HOST_NS$app.sh
 UNIT
   echo "%%%%"
   cat <<UNIT
@@ -3790,8 +3804,10 @@ schedule_minutes() {
 # three files of a job, separated by lines of "%%%%": the script that runs it, the service and the timer
 job_unit_files() {
   local job="$1" app="$2" command="$3" schedule="$4" service="$5" heavy="$6" minutes="$7" exec_start
-  exec_start="/bin/bash /opt/freelunch/jobs/$job.sh"
-  [[ "$heavy" != 1 ]] || exec_start="/usr/bin/flock /opt/freelunch/locks/heavy.lock $exec_start"
+  # the limit is around the command, not the unit: a heavy job that waits for the host's lock (up to 6 hours) has
+  # not started, so the wait doesn't count against its timeout_minutes
+  exec_start="/usr/bin/timeout ${minutes}m /bin/bash /opt/freelunch/jobs/$job.sh"
+  [[ "$heavy" != 1 ]] || exec_start="/usr/bin/flock -w 21600 /opt/freelunch/locks/heavy.lock $exec_start"
   cat <<SCRIPT
 #!/bin/bash
 # freelunch job $job: $schedule, in $app
@@ -3813,7 +3829,7 @@ Description=freelunch job $job ($app)
 
 [Service]
 Type=oneshot
-TimeoutStartSec=${minutes}m
+TimeoutStartSec=infinity
 ExecStart=$exec_start
 UNIT
   echo "%%%%"
@@ -4078,7 +4094,7 @@ deploy_host() { # deploy_host <host> <dry run 0|1>
 
   if [[ "$dry_run" == 1 ]]; then
     log "$host: would run this on $user@$address (dry run)"
-    [[ "$(jq -r --arg h "$host" '.[$h].shared // false' "$TMP/targets.json")" != true ]] || shared_room_check "$host" 1
+    shared_room_check "$host" 1
     remote_script "$host" 1
     return 0
   fi
@@ -4096,7 +4112,7 @@ deploy_host() { # deploy_host <host> <dry run 0|1>
     while IFS= read -r line; do echo "      $line" >&2; done <<< "$fp"
   fi
   # a host other projects share: is there room for this one (the key is pinned by now)
-  [[ "$(jq -r --arg h "$host" '.[$h].shared // false' "$TMP/targets.json")" != true ]] || shared_room_check "$host" 0
+  shared_room_check "$host" 0
   # Run as root: apps live in /opt/freelunch/apps, which cloud-init created as root.
   # shellcheck disable=SC2016 # expanded by the remote shell
   if ! remote_script "$host" 0 | "$SSH" "${SSH_OPTS[@]}" "$user@$address" 'if [ "$(id -u)" -eq 0 ]; then exec bash -s; else exec sudo -n bash -s; fi'; then
@@ -4394,6 +4410,8 @@ cmd_setup() {
     [[ ${#todo[@]} -eq 0 ]] || die "setup: fill in what is listed above, then run freelunch setup --ci again to set up CI"
     setup_ci "${targets[0]}"
   fi
+  # a machine freelunch already runs in the tenancy, when OCI is a target: a second one may not fit the free allowance
+  if [[ " ${targets[*]} " == *" oci "* ]]; then setup_note_shared; fi
   echo >&2
   echo "Next: freelunch up    (or push, once CI is set up: freelunch setup --ci)" >&2
 }
@@ -4638,6 +4656,22 @@ shared_write_config() {
       if (inapps) { depth += gsub(/[{]/, "{", line) - gsub(/[}]/, "}", line); if (depth <= 0) inapps = 0 }
       print
     }' "$file" > "$file.new" && mv "$file.new" "$file"
+}
+
+# setup_note_shared: setup doesn't move a project anywhere, but says when the tenancy already runs a machine of freelunch's
+# that uses the whole free Arm allowance, so a second one would not be made: up offers to put the project on it
+setup_note_shared() {
+  local rows name id addr ocpus mem arch comp max used=0
+  has_hosts && return 0
+  rows="$(oci_find_instances 2>/dev/null)" || return 0
+  [[ -n "$rows" ]] || return 0
+  max="$(awk '/a1_flex:/ { f = 1 } f && /max_ocpus:/ { print $2; exit }' "$PROVIDERS_DIR/oci/provider.yaml")"
+  while IFS=$'\t' read -r name id addr ocpus mem arch comp; do
+    [[ "$arch" == arm64 ]] && used=$((used + ${ocpus%.*}))
+  done <<< "$rows"
+  [[ $used -ge ${max:-2} ]] || return 0
+  echo >&2
+  log "setup: this tenancy already runs $(awk -F'\t' 'NR == 1 { print $1 }' <<< "$rows") (freelunch's), which uses the whole free Arm allowance, so OCI could not make a second machine. freelunch up offers to put this project on it (docs/shared-host.md)"
 }
 
 # up_offer_shared: before OCI is asked for a machine of its own, look for one freelunch already runs in the tenancy. When
@@ -4971,7 +5005,7 @@ host_tenants() {
 
 # destroy_tenant_guard <host stack...>: a host that other projects run on is not destroyed under them
 destroy_tenant_guard() {
-  local p host tenants state rc
+  local p host tenants state rc address
   for p in "$@"; do
     state="$(config_dir "$p")/terraform.tfstate"
     [[ -f "$state" ]] || continue
@@ -4979,6 +5013,12 @@ destroy_tenant_guard() {
       rc=0; tenants="$(host_tenants "$host")" || rc=$?
       if [[ $rc -eq 2 ]]; then continue; fi
       if [[ $rc -ne 0 ]]; then
+        # a machine that is gone (Oracle removed it) answers nothing at all: no project can be running on it
+        address="$(host_address_user "$host" | cut -f1)"
+        if [[ -n "$address" ]] && ! tcp_open "$address" 22; then
+          log "destroy: $host doesn't answer at all (nothing listens on port 22 at $address), so it counts as gone: nobody is running on it"
+          continue
+        fi
         log "destroy: $host couldn't be asked whether other projects run on it (it doesn't answer over SSH)"
         [[ "${FREELUNCH_EVICT_TENANTS:-0}" == 1 ]] && continue
         die "destroy: stopped, since destroying $host could take other projects' apps with it. Run it again when $host answers, or add --evict-tenants to destroy it anyway"
@@ -11329,6 +11369,19 @@ ci_offer_journey() {
   log "started freelunch journey in $repo; watch it with: gh run watch --repo $repo, or on the Actions tab"
 }
 
+# ci_pin_project_name: backups are filed in the bucket under the project's name, which is the project folder's name
+# unless apps.tfvars says. A CI checkout's folder is not that name, so an app with a backup gets it written down first.
+ci_pin_project_name() {
+  local file name
+  file="$(state_root)/apps.tfvars"
+  [[ -f "$file" ]] || return 0
+  grep -qE '^[^#]*backup[[:space:]]*=[[:space:]]*\{' "$file" || return 0
+  [[ -z "$(tfvar "$file" project)" ]] || return 0
+  name="$(project_name "$(basename "$(dirname "$PROJECT")")")"
+  printf 'project = "%s"\n' "$name" >> "$file"
+  log "ci init: wrote project = \"$name\" in $(rel "$file"): the backups are filed under it, and a CI checkout's folder has another name"
+}
+
 ci_init() {
   local where="github" base a given=0 pipeline=0 secrets=ask jobs="provision,ci,cd" state_kind="" first_run=ask journey=ask
   for a in "$@"; do
@@ -11352,6 +11405,7 @@ ci_init() {
   [[ -n "$PROJECT" ]] || die "ci init: run it in a project, where its .freelunch/ folder is (freelunch init makes one)"
   need_tf
   base="$(dirname "$PROJECT")"
+  ci_pin_project_name
   ci_offer_state_store "$state_kind"
   case "$where" in
     github) if [[ $pipeline -eq 1 ]]; then [[ $CI_BUNDLE_MODE -eq 0 ]] || die "ci init: --pipeline hands secrets over one by one, not as a bundle"; pipeline_workflow "$base"; else [[ ",$jobs," != *,cd,* ]] || github_workflows "$base"; job_workflows "$base" "$jobs"; fi ;;
@@ -11728,23 +11782,22 @@ ci_oidc_azure() {
   log "azure: $repo signs in as $app_name ($app_id) from now on: the workflows get id-token: write and a sign-in step. Run freelunch ci init again to rewrite them"
 }
 
-# ci_secret_value <name> <file>: what the secret holds, into the file. The secrets that carry a
-# file (the OCI profile and key, the SSH key deploy signs in with) hold its text; any other is
-# the variable of that name, from the shell or .freelunch/.env. Fails, and says why, when
-# there is nothing to put in it.
-ci_secret_value() {
-  local name="$1" file="$2" key
-  : > "$file"
+# ci_secret_emit <name>: what the secret holds, on stdout. The secrets that carry a file (the OCI profile and key, the
+# SSH key deploy signs in with) hold its text; any other is the variable of that name, from the shell or
+# .freelunch/.env. Prints nothing when there is nothing to put in it. A value is never written to a file of its own:
+# it goes from here to gh's standard input.
+ci_secret_emit() {
+  local name="$1"
   case "$name" in
-    FREELUNCH_OCI_CONFIG) oci_ci_files && cp "$TMP/oci.config" "$file" ;;
-    FREELUNCH_OCI_KEY)    oci_ci_files && cp "$OCI_CI_KEY" "$file" ;;
+    FREELUNCH_OCI_CONFIG) oci_ci_files && cat "$TMP/oci.config" ;;
+    FREELUNCH_OCI_KEY)    oci_ci_files && cat "$OCI_CI_KEY" ;;
     FREELUNCH_SSH_PRIVATE_KEY)
       [[ -f "$TMP/bundle" ]] || echo "freelunch-bundle 1" > "$TMP/bundle"
       bundle_ssh_key
-      [[ -n "$SSH_KEY_BUNDLED" ]] && cp "$SSH_KEY_BUNDLED" "$file" ;;
-    *) [[ -n "${!name:-}" ]] && printf '%s' "${!name}" > "$file" ;;
+      [[ -n "$SSH_KEY_BUNDLED" ]] && cat "$SSH_KEY_BUNDLED" ;;
+    *) [[ -z "${!name:-}" ]] || printf '%s' "${!name}" ;;
   esac
-  [[ -s "$file" ]]
+  return 0
 }
 
 # ci_hand_over_secrets <how: ask|set|print>: get the secrets the workflows pass on into the
@@ -11752,7 +11805,7 @@ ci_secret_value() {
 # command line; print only says what to run. ask lets whoever is there choose, and prints
 # when nobody can answer: putting secrets in a repository is not something to do unasked.
 ci_hand_over_secrets() {
-  local how="$1" base repo name what n=0 v=0 answer set=0 left_over="" cmd
+  local how="$1" base repo name what n=0 v=0 answer set=0 left_over="" cmd value
   base="$(dirname "$PROJECT")"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   while IFS=$'\t' read -r name what; do [[ -z "$name" ]] || n=$((n + 1)); done < <(ci_secret_names)
@@ -11773,8 +11826,10 @@ ci_hand_over_secrets() {
     resolve_env_refs
     while IFS=$'\t' read -r name what; do
       [[ -n "$name" ]] || continue
-      if ci_secret_value "$name" "$TMP/secret.value"; then
-        (cd "$base" && gh secret set "$name" --repo "$repo" < "$TMP/secret.value") >/dev/null \
+      # kept in memory with a sentinel, so a key's last newline survives, and sent on stdin
+      value="$(ci_secret_emit "$name"; echo x)"; value="${value%x}"
+      if [[ -n "$value" ]]; then
+        printf '%s' "$value" | (cd "$base" && gh secret set "$name" --repo "$repo") >/dev/null \
           || die "ci init: gh couldn't set the secret $name in $repo (see above)"
         log "set the secret $name in $repo ($what)"
         set=$((set + 1))
@@ -11782,7 +11837,7 @@ ci_hand_over_secrets() {
         left_over="$left_over $name"
         log "$name: nothing to put in it here ($what). Get it from: $(ci_token_help "$name"). Then put it in the shell or $(rel "$PROJECT")/.env and run ci init again, or gh secret set $name"
       fi
-      rm -f "$TMP/secret.value"
+      value=""
     done < <(ci_secret_names)
     while IFS=$'\t' read -r name what; do
       [[ -n "$name" ]] || continue

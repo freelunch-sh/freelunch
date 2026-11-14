@@ -37,7 +37,8 @@ Backblaze B2 both work.
 
    An app needs a named volume or `paths` to have anything to save. Set `project = "shop"`
    in `apps.tfvars` so that the repositories keep their name in CI too (without it freelunch
-   uses the project folder's name). The repository of an app is
+   uses the project folder's name, which a CI checkout doesn't have: a CI deploy refuses without it, and `freelunch ci init`
+   writes it). The repository of an app is
    `freelunch/<project>/<app>` in the bucket.
 
 4. `freelunch deploy`. It writes the backup script, its settings (mode 0600) and a timer on
