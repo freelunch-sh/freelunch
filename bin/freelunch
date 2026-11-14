@@ -29,11 +29,15 @@ TMP=""          # scratch folder removed on exit (deploy keeps tunnel tokens the
 SSH_OPTS=()
 WAIT=""         # state file of a capacity wait in progress (see wait_state)
 DIED=""         # what die said last, for that state file
+NOTIFY_CMD=""   # deploy or up while a run of it should tell whoever listens when it fails (see notify_deploy_failed)
+NOTIFY_TARGET="" # what that run deploys to
 STATE_ON=0      # 1 when the project keeps its state in a store too (see state_config)
 STATE_DIRTY=" " # stacks this run applied or destroyed, which go to the store when it ends
 trap 'on_exit $?' EXIT
 
 on_exit() {
+  # a deploy or up that failed says so, once (a wait that paused, 75, goes on in the next run)
+  if [[ -n "$NOTIFY_CMD" && "$1" -ne 0 && "$1" -ne 75 ]]; then notify_deploy_failed; fi
   [[ -z "$WAIT" ]] || end_wait stopped "${DIED:-the CLI stopped (exit status $1)}"
   # What this run applied or destroyed goes to the state store, also when it failed halfway.
   [[ "$STATE_DIRTY" == " " ]] || push_dirty
@@ -41,7 +45,7 @@ on_exit() {
   [[ -z "$TMP" ]] || rm -rf "$TMP"
 }
 
-die() { DIED="$*"; echo "freelunch: $*" >&2; exit 1; }
+die() { DIED="$*"; echo "freelunch: $*" >&2; [[ -z "$TMP" || ! -d "$TMP" ]] || printf '%s\n' "$*" > "$TMP/last-die"; exit 1; }
 # no_room: die for a target that has no room for the project. The status tells freelunch up to
 # try the next target; any other failure stops it.
 no_room() { DIED="$*"; echo "freelunch: $*" >&2; exit "$NO_ROOM"; }
@@ -1492,7 +1496,7 @@ end_wait() {
   wait_state "$1" "$2"
   WAIT=""
   if [[ $WAIT_INTERRUPTED -eq 0 && "${3:-}" != "quiet" ]] && [[ -n "${FREELUNCH_WAIT_LOG:-}" || $WAIT_ATTEMPT -gt 1 ]]; then
-    notify "$WAIT_PROVIDER: ${2#"$WAIT_PROVIDER: "}"
+    notify_event wait "$WAIT_PROVIDER: ${2#"$WAIT_PROVIDER: "}"
   fi
 }
 
@@ -1523,6 +1527,50 @@ notify() {
   esac
   curl -fsS --max-time 15 -H "Content-Type: $type" -H "Title: freelunch" --data-binary "$body" "$url" >/dev/null 2>&1 \
     || log "couldn't send the notification to FREELUNCH_NOTIFY"
+}
+
+# notify_event <event> <message>: notify, when the event is one FREELUNCH_NOTIFY_EVENTS lists (a comma list; the default
+# is all of wait,deploy,move,backup,watch,expiry)
+notify_event() {
+  case ",${FREELUNCH_NOTIFY_EVENTS:-wait,deploy,move,backup,watch,expiry}," in
+    *",$1,"*) notify "$2" ;;
+  esac
+}
+
+# scrub_secrets <text>: the text without the value of any secret in the environment (the variables whose names say
+# token, key, password, secret or passphrase), so a message never carries one
+scrub_secrets() {
+  local text="$1" name value
+  for name in $(compgen -e | grep -E 'TOKEN|KEY|PASSWORD|SECRET|PASSPHRASE|BUNDLE'); do
+    value="${!name:-}"
+    [[ ${#value} -ge 8 ]] || continue
+    text="${text//"$value"/***}"
+  done
+  printf '%s' "$text"
+}
+
+# deploy_notify_on: deploys and ups tell whoever listens when they run in CI, or where FREELUNCH_NOTIFY_DEPLOYS=1
+deploy_notify_on() { [[ "${FREELUNCH_NOTIFY_DEPLOYS:-0}" == 1 || "${CI:-}" == true || "${GITHUB_ACTIONS:-}" == true ]]; }
+
+# notify_project: the name the notifications start with
+notify_project() { project_name "$(basename "$(dirname "${PROJECT:-$PWD/x}")")"; }
+
+# notify_target <deploy|up> [args]: what a run deploys to, for its messages
+notify_target() {
+  local cmd="$1" a words=""
+  shift
+  if [[ "$cmd" == up ]]; then echo "the first target with room"; return 0; fi
+  for a in "$@"; do [[ "$a" == -* ]] || words="${words:+$words }$a"; done
+  echo "${words:-all its hosts}"
+}
+
+# notify_deploy_failed: "<project>: deploy to <target> failed: <the first line of the reason>", never the log or a value
+notify_deploy_failed() {
+  local reason="${DIED:-}"
+  [[ -n "$reason" || -z "$TMP" || ! -f "$TMP/last-die" ]] || reason="$(cat "$TMP/last-die")"
+  reason="$(scrub_secrets "$(head -n1 <<< "${reason:-it stopped without saying why}")")"
+  notify_event deploy "$(notify_project): deploy to ${NOTIFY_TARGET:-the project} failed: $reason"
+  NOTIFY_CMD=""
 }
 
 # is_approval <file>: whether it is an approval (freelunch ci wait) rather than a saved plan
@@ -3642,9 +3690,23 @@ state=/opt/freelunch/backup
 image=$(restic_image)
 log="\$(mktemp)"
 trap 'rm -f "\$log"' EXIT
+# notify_failure <message>: post it to the URL deploy left in notify.url, as text, or as JSON for Discord and Slack
+notify_failure() {
+  [ -f "\$state/notify.url" ] || return 0
+  nurl="\$(cat "\$state/notify.url")"
+  nmsg="backup of \$app on \$(hostname) failed: \$1"
+  njson="\$(printf '%s' "\$nmsg" | sed -e 's/\\\\/\\\\\\\\/g' -e 's/"/\\\\"/g' | tr '\\n' ' ')"
+  case "\$nurl" in
+    https://discord.com/api/webhooks/*|https://discordapp.com/api/webhooks/*) ntype=application/json; nbody="{\\"content\\": \\"\$njson\\"}" ;;
+    https://hooks.slack.com/*) ntype=application/json; nbody="{\\"text\\": \\"\$njson\\"}" ;;
+    *) ntype=text/plain; nbody="\$nmsg" ;;
+  esac
+  curl -fsS --max-time 15 -H "Content-Type: \$ntype" -H "Title: freelunch" --data-binary "\$nbody" "\$nurl" >/dev/null 2>&1 || true
+}
 fail() {
   echo "!! \$app: \$1" >&2
   { echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) \$1"; tail -n 20 "\$log"; } > "\$state/\$folder.failed"
+  notify_failure "\$1"
   exit 1
 }
 exec > >(tee -a "\$log") 2>&1
@@ -3729,6 +3791,15 @@ remote_backups() {
     echo "putf /opt/freelunch/bin/backup-$HOST_NS$app 0700 <<'FREELUNCH_EOF'"
     backup_script "$app" "$svc" "$before" "$daily" "$weekly" ${paths[@]+"${paths[@]}"} | b64
     echo "FREELUNCH_EOF"
+    # where a failed backup says so: the URL of FREELUNCH_NOTIFY (0600, it is a secret of its own), when backup is among the
+    # events; without one a URL left by an earlier deploy goes
+    if [[ ( "${FREELUNCH_NOTIFY:-}" == http://* || "${FREELUNCH_NOTIFY:-}" == https://* ) && ",${FREELUNCH_NOTIFY_EVENTS:-wait,deploy,move,backup,watch,expiry}," == *,backup,* ]]; then
+      echo "putf /opt/freelunch/backup/notify.url 0600 <<'FREELUNCH_EOF'"
+      if [[ "$redact" == 1 ]]; then echo "<FREELUNCH_NOTIFY, redacted>"; else printf '%s\n' "$FREELUNCH_NOTIFY" | b64; fi
+      echo "FREELUNCH_EOF"
+    else
+      echo "rm -f /opt/freelunch/backup/notify.url"
+    fi
     echo "putf /opt/freelunch/backup/$HOST_NS$app.env 0600 <<'FREELUNCH_EOF'"
     if [[ "$redact" == 1 ]]; then
       echo "<restic repository, password and the bucket's keys, redacted>"
@@ -4505,32 +4576,84 @@ paid_fallback_gate() {
   return 0
 }
 
+# expiry_lines [days]: what expires within that many days (30 by default), as one sentence a line: service tokens, the
+# free-trial credits and free domains of billing.tfvars, and an OCI session that a wait runs on. status and doctor show
+# the same things one by one; the watch job sends this.
+expiry_lines() {
+  local window="${1:-30}" name exp days date state kind
+  while IFS=$'\t' read -r name exp days; do
+    [[ -n "$name" && $days -le $window ]] || continue
+    if [[ $days -lt 0 ]]; then echo "the service token $name expired on $(fmt_time "$exp"): its clients get 401s. Renew it: $(renew_token "$name")"
+    else echo "the service token $name expires in $days days, on $(fmt_time "$exp"). Renew it: $(renew_token "$name")"; fi
+  done < <(service_token_expiries)
+  while read -r name date days state kind; do
+    [[ -n "$name" ]] || continue
+    case "$kind:$state" in
+      credit:bad|domain:bad) echo "$name: $date is not a date (YYYY-MM-DD), so nothing says when it expires" ;;
+      credit:ended)          echo "$name: the free-trial credit ended on $date, so the account bills now" ;;
+      credit:soon)           [[ $days -gt $window ]] || echo "$name: the free-trial credit ends on $date, in $days days: move off it or expect a bill" ;;
+      domain:ended)          echo "$name: the free domain expired on $date: renew it, or the name goes" ;;
+      domain:soon)           [[ $days -gt $window ]] || echo "$name: the free domain expires on $date, in $days days: renew it" ;;
+      credit:ok|domain:ok)   if [[ $days -le $window ]]; then echo "$name: $([[ "$kind" == domain ]] && echo "the free domain expires" || echo "the free-trial credit ends") on $date, in $days days"; fi ;;
+    esac
+  done < <(money_credits)
+  # an OCI session that a running or approved wait signs in with ends the wait with it
+  local tfvars session end
+  tfvars="$(config_dir oci)/terraform.tfvars"
+  if [[ -f "$tfvars" ]]; then
+    session="$(oci_session_profile "$tfvars")"
+    if [[ -n "$session" ]] && { wait_pid oci >/dev/null || [[ -f "$(config_dir oci)/approved.json" ]]; }; then
+      end="$(session_end "$session")"
+      [[ -z "$end" ]] || echo "the OCI session of profile $session ends at $(fmt_time "$end"), and the wait for capacity that signs in with it ends then"
+    fi
+  fi
+}
+
 # money_credits <line printer>: the free-trial credits of billing.tfvars as "provider date days
 # state" lines, state being ended, soon, ok or bad (not a date)
 money_credits() {
-  local file key date exp now
+  local file key date exp now name
   file="$(billing_file)"
   [[ -f "$file" ]] || return 0
   now="$(date +%s)"
   while IFS= read -r key; do
     date="$(billing_var "$key")"
     exp="$(date -j -f %Y-%m-%d "$date" +%s 2>/dev/null || date -d "$date" +%s 2>/dev/null || true)"
-    if [[ -z "$exp" ]]; then echo "${key#credit_expires_} $date 0 bad"
-    elif [[ $now -ge $exp ]]; then echo "${key#credit_expires_} $date 0 ended"
-    elif [[ $(((exp - now) / 86400)) -le $TOKEN_WARN_DAYS ]]; then echo "${key#credit_expires_} $date $(((exp - now) / 86400)) soon"
-    else echo "${key#credit_expires_} $date $(((exp - now) / 86400)) ok"; fi
+    if [[ -z "$exp" ]]; then echo "${key#credit_expires_} $date 0 bad credit"
+    elif [[ $now -ge $exp ]]; then echo "${key#credit_expires_} $date 0 ended credit"
+    elif [[ $(((exp - now) / 86400)) -le $TOKEN_WARN_DAYS ]]; then echo "${key#credit_expires_} $date $(((exp - now) / 86400)) soon credit"
+    else echo "${key#credit_expires_} $date $(((exp - now) / 86400)) ok credit"; fi
   done < <(sed -n 's/^[[:space:]]*\(credit_expires_[a-z0-9_]*\)[[:space:]]*=.*/\1/p' "$file")
+  # a free domain expires too: domain_expires_<name, dots as underscores> = "YYYY-MM-DD"
+  while IFS= read -r key; do
+    date="$(billing_var "$key")"
+    name="$(tr '_' '.' <<< "${key#domain_expires_}")"
+    exp="$(date -j -f %Y-%m-%d "$date" +%s 2>/dev/null || date -d "$date" +%s 2>/dev/null || true)"
+    if [[ -z "$exp" ]]; then echo "$name $date 0 bad domain"
+    elif [[ $now -ge $exp ]]; then echo "$name $date 0 ended domain"
+    elif [[ $(((exp - now) / 86400)) -le $TOKEN_WARN_DAYS ]]; then echo "$name $date $(((exp - now) / 86400)) soon domain"
+    else echo "$name $date $(((exp - now) / 86400)) ok domain"; fi
+  done < <(sed -n 's/^[[:space:]]*\(domain_expires_[a-z0-9_-]*\)[[:space:]]*=.*/\1/p' "$file")
 }
 
 # status_money: the spend cap, the paid fallback, and when each free-trial credit ends
 status_money() {
-  local cap fb name date days state lines=""
+  local cap fb name date days state kind lines=""
   [[ -f "$(billing_file)" ]] || return 0
   cap="$(billing_var spend_cap_usd)"
   fb="$(billing_var paid_fallback)"
   [[ -z "$cap" ]] || lines="$lines$(printf '  %-14s spend cap $%s a month across every target (billed so far on OCI: $%s)' cap "$cap" "$(billed_so_far)")"$'\n'
   [[ -z "$fb" ]] || lines="$lines$(printf '  %-14s paid fallback %s after %s day(s) without room, about $%s a month' fallback "$fb" "$(billing_var paid_fallback_after_days)" "$(billing_var paid_fallback_monthly_usd)")"$'\n'
-  while read -r name date days state; do
+  while read -r name date days state kind; do
+    if [[ "$kind" == domain ]]; then
+      case "$state" in
+        bad)   lines="$lines$(printf '  %-14s %s is not a date (YYYY-MM-DD)' "$name" "$date")"$'\n' ;;
+        ended) lines="$lines$(printf '  %-14s free domain expired on %s: renew it, or the name goes' "$name" "$date")"$'\n' ;;
+        soon)  lines="$lines$(printf '  %-14s free domain expires on %s, in %s days: renew it' "$name" "$date" "$days")"$'\n' ;;
+        ok)    lines="$lines$(printf '  %-14s free domain expires on %s, in %s days' "$name" "$date" "$days")"$'\n' ;;
+      esac
+      continue
+    fi
     case "$state" in
       bad)   lines="$lines$(printf '  %-14s %s is not a date (YYYY-MM-DD)' "$name" "$date")"$'\n' ;;
       ended) lines="$lines$(printf '  %-14s free-trial credit ended on %s: the account bills now' "$name" "$date")"$'\n' ;;
@@ -4546,7 +4669,7 @@ status_money() {
 # doctor_money: billing.tfvars makes sense: a fallback that can be made, a cap it fits under,
 # credits that haven't ended
 doctor_money() {
-  local fb cost cap name date days state
+  local fb cost cap name date days state kind
   [[ -f "$(billing_file)" ]] || return 0
   echo "Money ($(rel "$(billing_file)"))"
   fb="$(billing_var paid_fallback)"; cost="$(billing_var paid_fallback_monthly_usd)"; cap="$(billing_var spend_cap_usd)"
@@ -4564,7 +4687,16 @@ doctor_money() {
     fi
   fi
   [[ -z "$cap" ]] || check ok "spend cap \$$cap a month across every target"
-  while read -r name date days state; do
+  while read -r name date days state kind; do
+    if [[ "$kind" == domain ]]; then
+      case "$state" in
+        bad)   check warn "$name: $date is not a date (YYYY-MM-DD)" ;;
+        ended) check warn "$name: the free domain expired on $date: renew it, or the name goes" ;;
+        soon)  check warn "$name: the free domain expires on $date, in $days days: renew it" ;;
+        ok)    check ok "$name: free domain until $date" ;;
+      esac
+      continue
+    fi
     case "$state" in
       bad)   check warn "$name: $date is not a date (YYYY-MM-DD)" ;;
       ended) check warn "$name: the free-trial credit ended on $date, so the account bills now" ;;
@@ -5193,7 +5325,7 @@ up_move_routes() {
 cmd_up() {
   need_tf
   command -v jq >/dev/null || die "jq is required for 'up'"
-  local dry_run=0 move=0 restore=0 a t list chosen="" tried=() skipped=() rc reason out host others=() tunnel verb=runs old_tunnels="" moving=0 move_data_from=""
+  local dry_run=0 move=0 restore=0 made_target=0 a t list chosen="" tried=() skipped=() rc reason out host others=() tunnel verb=runs old_tunnels="" moving=0 move_data_from=""
   for a in "$@"; do
     case "$a" in
       --dry-run) dry_run=1 ;;
@@ -5258,7 +5390,7 @@ cmd_up() {
     # The status and the output of the attempt, which a subshell keeps from the shell itself.
     { rc=0; ( up_apply "$t" ) || rc=$?; echo "$rc" > "$TMP/up.$t.rc"; } 2>&1 | keep "$out"
     rc="$(cat "$TMP/up.$t.rc")"
-    if [[ "$rc" -eq 0 ]]; then chosen="$t"; break; fi
+    if [[ "$rc" -eq 0 ]]; then chosen="$t"; made_target=1; break; fi
     [[ "$rc" -eq "$NO_ROOM" ]] || exit "$rc"
     reason="$(sed -n 's/^freelunch: //p' "$out" | tail -1)"
     # The reasons already start with the stack's name.
@@ -5323,6 +5455,8 @@ cmd_up() {
   if [[ -n "$urls" ]]; then
     log "up: live on $host: $urls"
     up_report "$urls"
+    # a run that put the app somewhere new says where it is now
+    if deploy_notify_on && [[ $moving -eq 1 || $made_target -eq 1 ]]; then notify_event move "$(notify_project): now at $urls (on $host)"; fi
     if [[ "${FREELUNCH_VERIFY:-1}" != 0 ]]; then
       # shellcheck disable=SC2086 # the addresses are words
       verify_urls "${FREELUNCH_VERIFY_PATH:-}" "${FREELUNCH_VERIFY_TIMEOUT:-180}" $urls || die "up: deployed to $host, but the app doesn't answer. Its logs say why; the run fails so a broken app isn't taken for a live one"
@@ -12414,6 +12548,9 @@ cmd_fmt() { need_tf; "$TF" fmt -recursive "$@" "$ROOT/shared" "$ROOT/providers" 
 
 main() {
   local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    deploy|up) if deploy_notify_on; then NOTIFY_CMD="$cmd"; NOTIFY_TARGET="$(notify_target "$cmd" "$@")"; fi ;;
+  esac
   find_project
   if [[ -n "${FREELUNCH_PROJECT:-}" && -z "$PROJECT" && "$cmd" != "init" && "$cmd" != "setup" ]]; then
     die "FREELUNCH_PROJECT=$FREELUNCH_PROJECT has no .freelunch folder (run freelunch init there)"

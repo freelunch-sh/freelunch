@@ -537,6 +537,9 @@ mkdir -p "$WORK/doh-bin"
 #   back has no mounts, as Northflank's reference doesn't list them.
 cat > "$WORK/bin/curl" <<'EOF'
 #!/usr/bin/env bash
+# a notification POST is the wait-bin curl's business, which logs what it was asked to post
+for last; do :; done
+case "$last" in https://ntfy.sh/*|https://discord.com/api/webhooks/*|https://hooks.slack.com/*) exec "$(dirname "$0")/../wait-bin/curl" "$@" ;; esac
 method=GET data="" headers="" out="" write="" auth="" basic="" url="" query=() dtoken=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -2473,6 +2476,79 @@ test_shellcheck_findings_do_not_grow() {
   baseline="$(cat "$ROOT/tests/shellcheck.baseline")"
   now="$( (shellcheck -f gcc "$CLI" 2>&1 || true) | wc -l | tr -d ' ')"
   [[ "$now" -le "$baseline" ]] || { echo "shellcheck finds $now things in bin/freelunch, $baseline at the baseline (tests/shellcheck.baseline): fix the new ones" >&2; return 1; }
+}
+
+# FREELUNCH_NOTIFY_EVENTS picks which kinds of event are sent; the waits still send theirs when it lists wait.
+test_notify_events_filter_what_is_sent() {
+  local p="$WORK/notify-events"
+  capacity_project "$p"
+  FREELUNCH_NOTIFY=https://ntfy.sh/topic FREELUNCH_NOTIFY_EVENTS=deploy,backup FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity
+  fails grep -q '^post ' "$p/fake.log"
+  rm "$p/fake.log"*
+  FREELUNCH_NOTIFY=https://ntfy.sh/topic FREELUNCH_NOTIFY_EVENTS=deploy,wait FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity
+  grep -q '^post https://ntfy.sh/topic ' "$p/fake.log"
+}
+
+# A deploy that fails tells whoever listens (in CI, or with FREELUNCH_NOTIFY_DEPLOYS=1): the project, the target and the first
+# line of the reason, never a secret; FREELUNCH_NOTIFY_EVENTS picks which kinds of event are sent.
+test_failed_deploys_and_new_homes_are_notified() {
+  local p="$WORK/notify-deploy" out
+  new_project "$p"
+  : > "$p/fake.log"
+  PATH="$WORK/wait-bin:$PATH" FREELUNCH_NOTIFY=https://ntfy.sh/topic GHCR_TOKEN=ghp_secretvalue123 FAKE_UNHEALTHY=api deploy_in "$p" >/dev/null 2>&1 && { echo "deploy should have failed"; return 1; }
+  fails grep -q '^post ' "$p/fake.log"
+  PATH="$WORK/wait-bin:$PATH" FREELUNCH_NOTIFY=https://ntfy.sh/topic FREELUNCH_NOTIFY_DEPLOYS=1 GHCR_TOKEN=ghp_secretvalue123 FAKE_UNHEALTHY=api deploy_in "$p" >/dev/null 2>&1 && { echo "deploy should have failed"; return 1; }
+  grep -qxF "post https://ntfy.sh/topic [text/plain] notify-deploy: deploy to all its hosts failed: oci-main: deploy failed (see the output above)" "$p/fake.log"
+  lacks "$(grep '^post ' "$p/fake.log")" "ghp_secretvalue123"
+  # CI sends it too, naming the host asked for; the event filter can leave deploys out
+  : > "$p/fake.log"
+  CI=true PATH="$WORK/wait-bin:$PATH" FREELUNCH_NOTIFY=https://ntfy.sh/topic FREELUNCH_NOTIFY_EVENTS=wait,move GHCR_TOKEN=x FAKE_UNHEALTHY=api deploy_in "$p" oci-main >/dev/null 2>&1 && { echo "deploy should have failed"; return 1; }
+  fails grep -q '^post ' "$p/fake.log"
+  CI=true PATH="$WORK/wait-bin:$PATH" FREELUNCH_NOTIFY=https://ntfy.sh/topic GHCR_TOKEN=x FAKE_UNHEALTHY=api deploy_in "$p" oci-main >/dev/null 2>&1 && { echo "deploy should have failed"; return 1; }
+  grep -q 'notify-deploy: deploy to oci-main failed: ' "$p/fake.log"
+  # a deploy that works says nothing
+  : > "$p/fake.log"
+  CI=true PATH="$WORK/wait-bin:$PATH" FREELUNCH_NOTIFY=https://ntfy.sh/topic GHCR_TOKEN=x deploy_in "$p" >/dev/null 2>&1
+  fails grep -q '^post ' "$p/fake.log"
+  # an up that put the app somewhere new says where it is
+  p="$WORK/notify-up"
+  up_project "$p" oci
+  PATH="$WORK/wait-bin:$PATH" FREELUNCH_NOTIFY=https://ntfy.sh/topic FREELUNCH_NOTIFY_DEPLOYS=1 FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1 || { echo "up failed"; return 1; }
+  grep -q '^post https://ntfy.sh/topic \[text/plain\] notify-up: now at ' "$p/fake.log"
+  : > "$p/fake.log"
+  PATH="$WORK/wait-bin:$PATH" FREELUNCH_NOTIFY=https://ntfy.sh/topic FREELUNCH_NOTIFY_DEPLOYS=1 FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1
+  fails grep -q '^post ' "$p/fake.log"
+}
+
+# A backup that fails says so to the URL of FREELUNCH_NOTIFY, from the host: text for ntfy, JSON for Discord and Slack.
+test_a_failed_backup_notifies_from_the_host() {
+  local p="$WORK/backup-notify" out run
+  backup_project "$p"
+  out="$(GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw FREELUNCH_NOTIFY=https://ntfy.sh/secret-topic deploy_in "$p" --dry-run 2>&1)"
+  lacks "$out" "secret-topic"
+  contains "$out" "<FREELUNCH_NOTIFY, redacted>"
+  GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw FREELUNCH_NOTIFY=https://ntfy.sh/secret-topic deploy_in "$p" >/dev/null 2>&1
+  equals "$(ls -l "$p/host/backup/notify.url" | cut -c1-10)" "-rw-------"
+  equals "$(cat "$p/host/backup/notify.url")" "https://ntfy.sh/secret-topic"
+  mkdir -p "$p/host/volumes/api_data/_data"
+  sed "s#/opt/freelunch/#$p/host/#g" "$p/host/bin/backup-api" > "$p/backup-api.sh"
+  run() { FAKE_ROOT="$p/host" FAKE_LOG="$p/fake.log" PATH="$WORK/wait-bin:$WORK/bin:$PATH" FAKE_RESTIC_FAIL=backup bash "$p/backup-api.sh" >/dev/null 2>&1 || true; }
+  : > "$p/fake.log"; run
+  grep -q "^post https://ntfy.sh/secret-topic \[text/plain\] backup of api on .* failed: restic backup failed" "$p/fake.log"
+  printf 'https://discord.com/api/webhooks/1/abc\n' > "$p/host/backup/notify.url"
+  : > "$p/fake.log"; run
+  grep -q '^post https://discord.com/api/webhooks/1/abc \[application/json\] {"content": "backup of api on .* failed: restic backup failed"}$' "$p/fake.log"
+  printf 'https://hooks.slack.com/services/T0/B0/x\n' > "$p/host/backup/notify.url"
+  : > "$p/fake.log"; run
+  grep -q '^post https://hooks.slack.com/services/T0/B0/x \[application/json\] {"text": "backup of api on .* failed: restic backup failed"}$' "$p/fake.log"
+  # no URL, no post; and a deploy without FREELUNCH_NOTIFY (or without backup among the events) removes the URL
+  rm "$p/host/backup/notify.url"
+  : > "$p/fake.log"; run
+  fails grep -q '^post ' "$p/fake.log"
+  GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw FREELUNCH_NOTIFY=https://ntfy.sh/secret-topic deploy_in "$p" >/dev/null 2>&1
+  exists "$p/host/backup/notify.url"
+  GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw FREELUNCH_NOTIFY=https://ntfy.sh/secret-topic FREELUNCH_NOTIFY_EVENTS=wait deploy_in "$p" >/dev/null 2>&1
+  absent "$p/host/backup/notify.url"
 }
 
 # freelunch backup runs the backup unit now and follows it; backup list prints the snapshots.
@@ -6727,6 +6803,36 @@ test_status_and_doctor_show_credit_expiry() {
   contains "$out" "  warn  gcp: the free-trial credit ends on $soon"
   contains "$out" "  ok    aws: free-trial credit until $later"
   contains "$out" "  warn  azure: the free-trial credit ended on 2020-01-01"
+  # A free domain: status and doctor say when it expires, like a credit
+  printf 'domain_expires_myapp_dpdns_org = "%s"\ndomain_expires_old_eu_org = "2020-01-01"\ndomain_expires_my-site_pp_ua = "%s"\n' "$soon" "$later" > "$p/.freelunch/billing.tfvars"
+  out="$(PATH="$WORK/doctor-bin:$PATH" status_in "$p")"
+  contains "$out" "myapp.dpdns.org free domain expires on $soon, in "
+  contains "$out" "old.eu.org     free domain expired on 2020-01-01: renew it, or the name goes"
+  contains "$out" "my-site.pp.ua  free domain expires on $later, in "
+  out="$(FAKE_A1_USED=0 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  warn  myapp.dpdns.org: the free domain expires on $soon"
+  contains "$out" "  warn  old.eu.org: the free domain expired on 2020-01-01: renew it, or the name goes"
+  contains "$out" "  ok    my-site.pp.ua: free domain until $later"
+  # expiry_lines puts what is near in sentences: the credit, the domains, and a bad date; nothing for what is far off
+  printf 'credit_expires_gcp = "%s"\ncredit_expires_aws = "%s"\ndomain_expires_myapp_dpdns_org = "%s"\ncredit_expires_oci = "someday"\n' "$soon" "$later" "$soon" > "$p/.freelunch/billing.tfvars"
+  sed -n "$(grep -n '^expiry_lines() {' "$CLI" | cut -d: -f1),/^}/p" "$CLI" > "$p/fn.sh"
+  sed -n "$(grep -n '^money_credits() {' "$CLI" | cut -d: -f1),/^}/p" "$CLI" >> "$p/fn.sh"
+  out="$(cd "$p" && bash -c '
+    TOKEN_WARN_DAYS=14
+    billing_file() { echo "$PWD/.freelunch/billing.tfvars"; }
+    billing_var() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\(.*\)\"/\1/p" "$(billing_file)"; }
+    service_token_expiries() { printf "cron\t%s\t5\nold\t%s\t-3\n" "$(date +%s)" "$(date +%s)"; }
+    fmt_time() { echo "then"; }; renew_token() { echo "renew $1"; }
+    config_dir() { echo "$PWD/.freelunch/$1"; }
+    . ./fn.sh
+    expiry_lines
+  ' 2>&1)"
+  contains "$out" "the service token cron expires in 5 days, on then. Renew it: renew cron"
+  contains "$out" "the service token old expired on then: its clients get 401s. Renew it: renew old"
+  contains "$out" "gcp: the free-trial credit ends on $soon, in "
+  contains "$out" "myapp.dpdns.org: the free domain expires on $soon, in "
+  contains "$out" "oci: someday is not a date (YYYY-MM-DD), so nothing says when it expires"
+  lacks "$out" "aws:"
   # A fallback with no stack to make is a problem.
   printf 'paid_fallback = "hetzner"\n' > "$p/.freelunch/billing.tfvars"
   out="$(FAKE_A1_USED=0 doctor_in "$p" 2>&1 || true)"

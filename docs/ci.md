@@ -387,6 +387,26 @@ doesn't default to something broad. The variables are not secrets (none of them 
 again: the workflows get `id-token: write` and the cloud's sign-in step, and the AWS key
 secrets disappear from the list. The CI check workflow never signs in.
 
+## Notifications
+
+`FREELUNCH_NOTIFY` in `.freelunch/.env` (or the CI's secrets) is where freelunch says things when nobody is watching: an
+[ntfy](https://ntfy.sh) topic URL, a Discord webhook or a Slack webhook (JSON is sent to the last two, text to the first),
+and a desktop notification on a Mac or Linux machine. `FREELUNCH_NOTIFY=off` sends nothing, and
+`FREELUNCH_NOTIFY_EVENTS` (a comma list, all of them by default) picks which kinds of event are sent:
+
+| Event | When | The text |
+|---|---|---|
+| `wait` | a wait for capacity that had to retry ends, or was cancelled or killed | `oci: got the host on attempt 7 in UK-LONDON-1-AD-2 (1 OCPU, 6 GB): oci-main at 203.0.113.10` or `oci: stopped waiting for capacity: got SIGTERM ... after 24 attempts` |
+| `deploy` | a `deploy` or `up` failed, in CI or with `FREELUNCH_NOTIFY_DEPLOYS=1` | `<project>: deploy to <target> failed: <the first line of the reason>`. Never the log, and any secret in the line is replaced by `***` |
+| `move` | an `up` put the app somewhere new (a new target, or a move to another host), same conditions | `<project>: now at https://api.example.com (on oci-main)` |
+| `backup` | a backup of an app failed on the host, which posts to the URL itself | `backup of api on <host> failed: restic backup failed` |
+| `watch`, `expiry` | what the watch job and the expiry check send | reserved for them |
+
+A backup's failure is posted by the host, so deploy leaves the URL in `/opt/freelunch/backup/notify.url` (mode 0600) when
+`FREELUNCH_NOTIFY` is a URL and `backup` is among the events, and removes it otherwise. What expires soon (service tokens, the
+free-trial credits and free domains of `.freelunch/billing.tfvars`, as `credit_expires_<provider>` and
+`domain_expires_<name with dots as underscores> = "YYYY-MM-DD"`) is in `freelunch status` and `freelunch doctor`.
+
 ## Troubleshooting
 
 | Symptom | Look at |

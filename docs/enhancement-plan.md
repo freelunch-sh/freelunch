@@ -446,18 +446,18 @@ for capacity the account no longer has.
 
 `notify` reaches the desktop, ntfy, Discord and Slack, but only a wait calls it.
 
-- [ ] `notify_event <event> <message>`: sends through `notify` when the event is in
+- [x] `notify_event <event> <message>`: sends through `notify` when the event is in
   `FREELUNCH_NOTIFY_EVENTS` (a comma list; default `wait,deploy,move,backup,watch,expiry`).
   Waits go through it too, with no change in what they send. Test the filter
-- [ ] Deploys: in CI (or with `FREELUNCH_NOTIFY_DEPLOYS=1` elsewhere), a failed `deploy` or
+- [x] Deploys: in CI (or with `FREELUNCH_NOTIFY_DEPLOYS=1` elsewhere), a failed `deploy` or
   `up` sends "<project>: deploy to <target> failed: <the first line of the reason>" and a
   successful `up` that changed the target sends where the app is now. Never the log, never
   an env value. Tests
-- [ ] Backups: the host script of section 5 posts to a URL in
+- [x] Backups: the host script of section 5 posts to a URL in
   `/opt/freelunch/backup/notify.url` (0600, written by deploy when `FREELUNCH_NOTIFY` is a
   URL) when a backup fails, with the same three body formats as `notify` (text, Discord
   JSON, Slack JSON) written in POSIX shell. Test the script with a fake `curl`
-- [ ] Expiry: one function, `expiry_lines`, collects what `status` already warns about one
+- [x] Expiry: one function, `expiry_lines`, collects what `status` already warns about one
   by one (service tokens, `credit_expires_*`, the OCI session) and adds free domains:
   `domain_expires_<name with dots as underscores> = "YYYY-MM-DD"` in `billing.tfvars`, shown
   like the credits. `status` and `doctor` print from it unchanged; section 8 sends it
@@ -467,7 +467,7 @@ for capacity the account no longer has.
   one of them is configured, each Cloudflare route gets an HTTP monitor named
   `<project>-<hostname>` unless the route sets `monitor = false`; removed routes lose
   theirs. `status` shows the monitor per URL. Fixtures and tests like the provider's own
-- [ ] Docs: a "Notifications" section in `docs/ci.md` listing every event and its text
+- [x] Docs: a "Notifications" section in `docs/ci.md` listing every event and its text
 
 ## 8. A watch job, and catalogue facts it can use
 
@@ -699,6 +699,16 @@ Found while building sections 1 to 6. `[x]` means closed, with how; `[ ]` is ope
 - [x] `setup` mentions the machine the tenancy already runs (it doesn't move the project: `up` does, after asking).
 - [x] `up` writing the join stops there on purpose (project, host and the apps' host are written; the next steps are
   printed), as the plan says; the edit of `apps.tfvars` is tested in several shapes.
+
+**Section 7**
+
+- [ ] Monitors for every public address (the one unticked box of section 7) are not built. The UptimeRobot, StatusCake and
+  Healthchecks.io providers make heartbeat monitors (the app pings out), not HTTP monitors that fetch a URL. It needs an HTTP
+  `monitor:` request in each provider's `api.yaml` (UptimeRobot v3's `type: HTTP` with a url; StatusCake's uptime test, a form
+  body), a `monitor = false` option on Cloudflare routes, a sync of routes against the provider's list (names
+  `<project>-<hostname>`, removal of the ones whose route is gone) and a line per URL in `status`. Each request has to be read
+  from the provider's own schema, and none can be run here.
+- [ ] The expiry sentence list (`expiry_lines`) is tested with stubs, and the watch job (section 8) is what sends it.
 
 **Housekeeping**
 

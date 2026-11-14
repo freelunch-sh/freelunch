@@ -12,6 +12,10 @@ release can change commands and the project layout.
 
 ### Added
 
+- **Notifications for more than a wait.** `FREELUNCH_NOTIFY_EVENTS` picks the events sent (`wait`, `deploy`, `move`, `backup`, `watch`,
+  `expiry`). A failed `deploy` or `up` in CI (or with `FREELUNCH_NOTIFY_DEPLOYS=1`) says so with the first line of the reason,
+  an `up` that put the app somewhere new says where, and a backup that fails on the host posts to the same URL. Free domains
+  join the credits in `billing.tfvars` (`domain_expires_<name>`), shown by `status` and `doctor`.
 - **Gaps closed from the plan.** A host that answers nothing no longer blocks `destroy`; the owner's deploy is checked against
   the projects sharing its host; CI backups need `project` (`ci init` writes it); a job's time limit is around its command;
   `ci init --set-secrets` pipes a value to `gh` without a file; `tests/shellcheck.baseline` keeps the findings from growing.
