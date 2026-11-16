@@ -2574,6 +2574,32 @@ test_readme_demo_dry_run_prints_the_deploy() {
   contains "$out" "up api"
 }
 
+# docs/security.md says apply asks first and FREELUNCH_AUTO_APPROVE=1 is the only way to skip the question:
+# the stack's tofu/terraform run gets -auto-approve with it and never without it.
+test_apply_asks_unless_auto_approve_is_set() {
+  local p="$WORK/approval"
+  up_project "$p" oci
+  : > "$p/fake.log"
+  FREELUNCH_AUTO_APPROVE=0 UP_CMD=apply up_in "$p" oci >/dev/null 2>&1 || true
+  grep -q 'providers/oci/stack apply' "$p/fake.log"
+  fails grep -q -e '-auto-approve' "$p/fake.log"
+  : > "$p/fake.log"
+  FREELUNCH_AUTO_APPROVE=1 UP_CMD=apply up_in "$p" oci >/dev/null 2>&1 || true
+  grep -q -e 'providers/oci/stack apply.*-auto-approve' "$p/fake.log"
+}
+
+# docs/security.md lists where freelunch sends requests. A host in the CLI, the installer, the action or the shared
+# modules that is not in this list is a new place data can go: add it here and to docs/security.md on purpose.
+test_cli_names_only_the_hosts_the_docs_list() {
+  local allowed=" api.cloudflare.com api.example.com api.northflank.com api.render.com api.scaleway.com artifactregistry.googleapis.com cli.github.com cloudflare-dns.com data.iana.org discord.com discordapp.com docs.oracle.com github.com gitlab.com hooks.slack.com hub.docker.com pkgs.netbird.io pkgs.tailscale.com raw.githubusercontent.com run.googleapis.com s3.us-west-004.backblazeb2.com serviceusage.googleapis.com token.actions.githubusercontent.com " h new=""
+  while IFS= read -r h; do
+    case "$allowed" in *" $h "*) ;; *) new="$new $h" ;; esac
+  done < <(cd "$ROOT" && git ls-files bin install.sh action.yml shared | xargs grep -h -o -I -E 'https?://[A-Za-z0-9._-]+' | sed -E 's#https?://##' | sort -u)
+  [[ -z "$new" ]] || { echo "hosts not in the list (add them here and to docs/security.md, or remove them):$new"; return 1; }
+  # and no analytics or telemetry service by name
+  fails grep -q -i -E 'segment\.io|mixpanel|amplitude\.com|posthog|google-analytics|plausible\.io' "$ROOT/bin/freelunch"
+}
+
 # A version the README or docs tell people to pin (the Action's tag, the image's tag) is a released heading of CHANGELOG.md,
 # until the first release, when the page says it is "from the first release".
 test_pinned_versions_in_docs_are_released() {
