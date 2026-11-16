@@ -30,6 +30,10 @@ jobs:
         env:
           FREELUNCH_BUNDLE: ${{ secrets.FREELUNCH_BUNDLE }}
       - name: freelunch
-        run: /opt/freelunch/bin/freelunch ${{ inputs.run }}
+        # the input goes through the environment, never into the script text
+        run: |
+          read -ra args <<< "$FREELUNCH_RUN"
+          /opt/freelunch/bin/freelunch "${args[@]}"
         env:
           FREELUNCH_BUNDLE: ${{ secrets.FREELUNCH_BUNDLE }}
+          FREELUNCH_RUN: ${{ inputs.run }}
