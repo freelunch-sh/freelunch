@@ -1,0 +1,16 @@
+name: vols
+display_name: "Vols"
+category: vps
+status: planned
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "something"
+card_required: "no"
+url: "https://vols.example"
+last_verified: "2026-11-16"
+notes: null
+sources: []
+inspire: []
+volumes: "maybe"

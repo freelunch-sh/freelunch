@@ -10,6 +10,8 @@ iac: partner                      # official | partner | community | stale | non
 engine: tofu                      # optional: tofu | api | cli | guided. Default: tofu, or guided when iac is stale or none
 # always_on: "yes"                # optional: "yes" (never sleeps) or "no" (sleeps when unused). Shown as "always on" or "sleeps after N min"
 # sleeps_after_minutes: 15        # optional, only with always_on: "no": minutes without requests before it sleeps
+# free_memory_mb: 1024            # optional: the most memory a free workload gets there, in MB (freelunch fit compares an app's limits with it)
+# volumes: "no"                   # optional: "no" when freelunch makes no Docker volumes there (a platform without them); default yes
 # jobs: [provision, ci, cd]       # optional: what the provider supports in a workflow
 # verified: fake-api              # optional, once implemented: fake-api (a test double) | live (a real account has run it)
 free_tier_type: always-free       # always-free | monthly-credit | trial | startup-credits | none

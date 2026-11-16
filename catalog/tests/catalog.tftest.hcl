@@ -187,3 +187,25 @@ run "an_idle_rule_has_a_percent_and_days" {
   variables { providers_dir = "tests/fixtures/bad-idle" }
   expect_failures = [output.checklist, output.stub_readmes]
 }
+
+run "free_memory_and_volumes_are_accepted" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/free-facts" }
+
+  assert {
+    condition     = output.summary.total == 1
+    error_message = "A number of MB and yes or no are valid."
+  }
+}
+
+run "free_memory_is_a_number" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/bad-free-memory" }
+  expect_failures = [output.checklist, output.stub_readmes]
+}
+
+run "volumes_is_yes_or_no" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/bad-volumes" }
+  expect_failures = [output.checklist, output.stub_readmes]
+}

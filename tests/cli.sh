@@ -2654,6 +2654,166 @@ test_quick_gives_up_on_a_slow_command() {
   equals "$(bash -c '. '"$p"'/fn.sh; quick 5 false; echo "[rc $?]"')" "[rc 0]"
 }
 
+next_in() { # next_in <dir> [args]: freelunch next with the fake ssh and docker
+  local dir="$1"; shift
+  (cd "$dir" && HOME="$dir/home" PATH="$WORK/wait-bin:$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" "$CLI" next "$@" 2>&1)
+}
+
+# next says the one command to run now, and why, in the order the plan lists them.
+test_next_says_what_to_run_now() {
+  local p="$WORK/next-cmd" out key
+  # no project
+  mkdir -p "$p/plain" && out="$(next_in "$p/plain")"
+  contains "$out" "freelunch setup"
+  contains "$out" "there is no .freelunch/ here yet"
+  # a stack with no tfvars
+  mkdir -p "$p/fresh" && (cd "$p/fresh" && "$CLI" init oci >/dev/null 2>&1)
+  out="$(next_in "$p/fresh")"
+  contains "$out" "cp .freelunch/oci/terraform.tfvars.example .freelunch/oci/terraform.tfvars"
+  contains "$out" "oci has no terraform.tfvars"
+  # nothing deployed, and no wait
+  cp "$ROOT/providers/oci/stack/project.tfvars.example" "$p/fresh/.freelunch/oci/terraform.tfvars"
+  out="$(next_in "$p/fresh")"
+  contains "$out" "freelunch up"
+  contains "$out" "nothing is deployed yet"
+  # a wait that runs
+  mkdir -p "$p/fresh/.freelunch/oci"
+  printf 'state=waiting\npid=%s\nattempt=7\n' "$$" > "$p/fresh/.freelunch/oci/wait.state"
+  out="$(next_in "$p/fresh")"
+  contains "$out" "freelunch status"
+  contains "$out" "a wait for capacity on oci is running (attempt 7)"
+  # a host whose key isn't pinned
+  new_project "$p/deployed"
+  cp "$ROOT/providers/oci/stack/project.tfvars.example" "$p/deployed/.freelunch/oci/terraform.tfvars"
+  cp "$p/deployed/.freelunch/cloudflare/terraform.tfvars.example" "$p/deployed/.freelunch/cloudflare/terraform.tfvars"
+  out="$(next_in "$p/deployed")"
+  contains "$out" "freelunch trust oci-main"
+  # pinned, and the app isn't there: deploy
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  printf '203.0.113.10 %s\n' "$key" > "$p/deployed/.freelunch/known_hosts"
+  out="$(next_in "$p/deployed")"
+  contains "$out" "freelunch deploy"
+  contains "$out" "api aren't deployed or aren't running"
+  # deployed and healthy: nothing, unless a move did not finish
+  GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$p/deployed" >/dev/null 2>&1
+  out="$(next_in "$p/deployed")"
+  contains "$out" "nothing to do: freelunch status shows the project"
+  printf 'from=oci-edge-1\nto=oci-main\n' > "$p/deployed/.freelunch/up-move.state"
+  out="$(next_in "$p/deployed")"
+  contains "$out" "freelunch rollback"
+  contains "$out" "a move of the app between hosts did not finish"
+  # a stopped app is a deploy too
+  rm "$p/deployed/.freelunch/up-move.state"
+  out="$(FAKE_STOPPED=api next_in "$p/deployed")"
+  contains "$out" "freelunch deploy"
+  # --run asks first, and runs the command it named
+  out="$(FAKE_STOPPED=api next_in "$p/deployed" --run </dev/null)" && { echo "next --run should have asked"; return 1; }
+  contains "$out" "--run asks first"
+  out="$(cd "$p/plain" && HOME="$p/plain/home" FREELUNCH_AUTO_APPROVE=1 PATH="$WORK/bin:$PATH" "$CLI" next --run 2>&1 </dev/null)" || true
+  contains "$out" "freelunch setup"
+}
+
+# fit says where an app can run for free, from its Compose file and what each provider records; what a provider doesn't
+# record is unknown.
+test_fit_says_where_an_app_can_run_for_free() {
+  local p="$WORK/fit" out
+  mkdir -p "$p/small" "$p/big" "$p/free"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    mem_limit: 256m\n  web:\n    image: ghcr.io/me/web:1.0.0\n    deploy:\n      resources:\n        limits:\n          memory: 128M\n        reservations:\n          memory: 64M\n' > "$p/small/compose.yaml"
+  printf 'services:\n  db:\n    image: postgres:16\n    mem_limit: 2g\n    volumes: ["data:/var/lib/postgresql/data"]\nvolumes:\n  data: {}\n' > "$p/big/compose.yaml"
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n' > "$p/free/compose.yaml"
+  out="$(FREELUNCH_CHECK_IMAGES=0 "$CLI" fit "$p/small" 2>&1)"
+  contains "$out" "memory 384 MB, volumes no, images not asked or unknown"
+  # 384 MB: fits Oracle (12 GB), Northflank (512 MB) and the 1 GB machines; the platforms with no number say unknown
+  equals "$(awk '$1 == "oci" { print $3 }' <<< "$out")" fits
+  equals "$(awk '$1 == "northflank" { print $3 }' <<< "$out")" fits
+  equals "$(awk '$1 == "gcp" { print $3 }' <<< "$out")" fits
+  equals "$(awk '$1 == "cloud-run" { print $3 }' <<< "$out")" unknown
+  contains "$(grep '^  cloud-run' <<< "$out")" "how much memory a free workload gets there isn't recorded"
+  # fits first, and what is recorded as always on before what isn't said, before what sleeps
+  equals "$(grep -E '^  (oci|northflank|gcp|azure|aws|cloud-run|scaleway) ' <<< "$out" | head -1 | awk '{ print $1 }')" northflank
+  equals "$(grep -E '^  [a-z-]+ +(host|platform)' <<< "$out" | tail -1 | awk '{ print $1 }')" render
+  contains "$(grep '^  render' <<< "$out")" "sleeps after 15 min"
+  contains "$(grep '^  cloud-run' <<< "$out")" "sleeps when idle"
+  contains "$(grep '^  northflank' <<< "$out")" "always on"
+  contains "$(grep '^  oci' <<< "$out")" "live"
+  # 2 GB and a volume: too much for the 1 GB and 512 MB sizes, and no volumes where freelunch makes none
+  out="$(FREELUNCH_CHECK_IMAGES=0 "$CLI" fit "$p/big" 2>&1)"
+  contains "$out" "memory 2048 MB, volumes yes"
+  equals "$(awk '$1 == "oci" { print $3 }' <<< "$out")" fits
+  equals "$(awk '$1 == "northflank" { print $3 }' <<< "$out")" no
+  contains "$(grep '^  northflank' <<< "$out")" "it asks for 2048 MB, the free size has 512 MB"
+  contains "$(grep '^  gcp' <<< "$out")" "the free size has 1024 MB"
+  contains "$(grep '^  cloud-run' <<< "$out")" "it has volumes, and freelunch makes none on cloud-run"
+  # no limit at all
+  out="$(FREELUNCH_CHECK_IMAGES=0 "$CLI" fit "$p/free" 2>&1)"
+  contains "$out" "memory not limited"
+  contains "$(grep '^  oci' <<< "$out")" "the app has no memory limit in its Compose file"
+  # the platforms of the image: an arm64 host needs an arm64 build
+  out="$(cd "$p" && PATH="$WORK/bin:$PATH" FAKE_LOG="$p/fake.log" FAKE_PLATFORMS="linux/amd64" "$CLI" fit "$p/small" 2>&1)"
+  contains "$out" "images linux/amd64"
+  contains "$(grep '^  oci' <<< "$out")" "its image has no build for linux/arm64 (linux/amd64)"
+  equals "$(awk '$1 == "northflank" { print $3 }' <<< "$out")" fits
+  if out="$("$CLI" fit "$p/nothing" 2>&1)"; then echo "fit should have failed"; return 1; fi
+  contains "$out" "fit: $p/nothing isn't a folder"
+}
+
+alias_in() { # alias_in <dir> [args]: freelunch with the fake ssh and docker
+  local dir="$1"; shift
+  (cd "$dir" && HOME="$dir/home" PATH="$WORK/wait-bin:$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" "$CLI" "$@" 2>&1)
+}
+
+# aliases = { ... } in apps.tfvars are short names for freelunch commands: they take the rest of the line, may not take the
+# name of a command, are listed by help, and check says what is wrong with them.
+test_aliases_are_short_names_for_commands() {
+  local p="$WORK/aliases" out key
+  new_project "$p"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  GHCR_TOKEN=x FAKE_HOST_KEY="$key" deploy_in "$p" >/dev/null 2>&1
+  cat >> "$p/.freelunch/apps.tfvars" <<'TFVARS'
+aliases = {
+  tail    = "logs api --lines 7"
+  console = "shell api -- ls"
+  status  = "logs api"
+  broken  = "frobnicate now"
+}
+TFVARS
+  : > "$p/fake.log"
+  out="$(alias_in "$p" tail --follow)"
+  grep -q 'docker compose --project-directory .*/apps/api logs --no-color --tail 7 --follow' "$p/fake.log"
+  : > "$p/fake.log"
+  alias_in "$p" console >/dev/null
+  grep -q 'exec -T api' "$p/fake.log"
+  # an alias takes the rest of the line, and the real command wins over an alias of its name
+  out="$(alias_in "$p" status)"
+  contains "$out" "Hosts"
+  # an alias to something that isn't a command says so
+  out="$(alias_in "$p" broken)" && { echo "a broken alias should fail"; return 1; }
+  contains "$out" "alias broken: 'frobnicate' isn't a freelunch command"
+  # help lists them
+  out="$(alias_in "$p" help)"
+  contains "$out" "Aliases of this project (apps.tfvars):"
+  contains "$out" "  tail         freelunch logs api --lines 7"
+  # check names the two wrong ones
+  out="$(alias_in "$p" check)" || true
+  contains "$out" "fail  alias status: that is a freelunch command, and an alias may not take its name"
+  contains "$out" "fail  alias broken: 'frobnicate' isn't a freelunch command"
+  contains "$out" "ok    alias tail: freelunch logs api --lines 7"
+  # no aliases, no section
+  sed -i.bak '/^aliases = {/,/^}/d' "$p/.freelunch/apps.tfvars"
+  out="$(alias_in "$p" help)"
+  lacks "$out" "Aliases of this project"
+}
+
+# The commands no alias may take are the commands main has.
+test_the_list_of_builtin_commands_matches_main() {
+  local labels name missing=""
+  labels="$(sed -n '/^main() {/,/^}/p' "$CLI" | sed -n 's/^    \([a-z|-][a-z|-]*\))  .*/\1/p' | tr '|' '\n' | grep -vE '^(-h|--help|\*)$' | sort -u)"
+  for name in $labels; do
+    grep -q "^BUILTIN_COMMANDS=.* $name " "$CLI" || missing="$missing $name"
+  done
+  [[ -z "$missing" ]] || { echo "BUILTIN_COMMANDS lacks:$missing" >&2; return 1; }
+}
+
 # freelunch backup runs the backup unit now and follows it; backup list prints the snapshots.
 test_backup_runs_now_and_lists_snapshots() {
   local p="$WORK/backup-now" out key
@@ -6863,6 +7023,55 @@ test_upgrade_waits_for_a_running_wait() {
   equals "$(cat "$p/.freelunch/version")" "v1.10.0"
 }
 
+# upgrade --dry-run says what an upgrade brings, from the changelog of the version, installing and pinning nothing; --plan
+# says what the new version would do to each stack.
+test_upgrade_dry_run_says_what_it_would_bring() {
+  local p="$WORK/upgrade-dry" src="$WORK/upgrade-dry-source" out
+  mkdir -p "$src/bin" "$p/.freelunch/oci"
+  cat > "$src/bin/freelunch" <<'EOS'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "plan oci") echo "==> oci: this plan replaces oci_core_vcn.this"; echo "Plan: 2 to add, 0 to change, 1 to destroy." ;;
+  *) echo "No changes. Your infrastructure matches the configuration." ;;
+esac
+EOS
+  chmod +x "$src/bin/freelunch"
+  git -C "$src" init -q -b main
+  commit_version() { # commit_version <tag> <changelog text>
+    printf '%s\n' "$2" > "$src/CHANGELOG.md"
+    git -C "$src" add -A
+    git -C "$src" -c user.name=test -c user.email=test@example.com commit -qm "$1"
+    git -C "$src" -c user.name=test -c user.email=test@example.com tag -a "$1" -m "$1"
+  }
+  commit_version v1.0.0 $'# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-01-01\n\n### Added\n\n- the first release'
+  commit_version v1.1.0 $'# Changelog\n\n## [Unreleased]\n\n## [1.1.0] - 2026-02-01\n\n### Added\n\n- a thing\n\n### Upgrading\n\n- rename x to y\n\n## [1.0.0] - 2026-01-01\n\n### Added\n\n- the first release'
+  commit_version v1.2.0 $'# Changelog\n\n## [Unreleased]\n\n## [1.2.0] - 2026-03-01\n\n### Fixed\n\n- a bug\n\n## [1.1.0] - 2026-02-01\n\n### Added\n\n- a thing\n\n### Upgrading\n\n- rename x to y\n\n## [1.0.0] - 2026-01-01\n\n### Added\n\n- the first release'
+  echo v1.0.0 > "$p/.freelunch/version"
+  jq -n '{version: 4, outputs: {hosts: {value: []}}, resources: []}' > "$p/.freelunch/oci/terraform.tfstate"
+  out="$(cd "$p" && FREELUNCH_SOURCE="$src" FREELUNCH_HOME="$p/home" FREELUNCH_BIN="$p/bin" "$CLI" upgrade --dry-run 2>&1)"
+  contains "$out" "freelunch v1.0.0 -> v1.2.0 (nothing is installed or pinned: a dry run)"
+  contains "$out" "## [1.2.0] - 2026-03-01"
+  contains "$out" "## [1.1.0] - 2026-02-01"
+  lacks "$out" "the first release"
+  # the Upgrading parts come first, under their version
+  equals "$(grep -n 'Upgrading:\|## \[1.2.0\]' <<< "$out" | head -1 | sed 's/^[0-9]*://')" "Upgrading:"
+  contains "$out" "  [1.1.0]"
+  contains "$out" "- rename x to y"
+  equals "$(cat "$p/.freelunch/version")" v1.0.0
+  fails test -e "$p/bin/freelunch"
+  # a named version stops there
+  out="$(cd "$p" && FREELUNCH_SOURCE="$src" FREELUNCH_HOME="$p/home" FREELUNCH_BIN="$p/bin" "$CLI" upgrade v1.1.0 --dry-run 2>&1)"
+  lacks "$out" "a bug"
+  contains "$out" "## [1.1.0]"
+  # --plan: what the new version would do to each deployed stack
+  out="$(cd "$p" && FREELUNCH_SOURCE="$src" FREELUNCH_HOME="$p/home" FREELUNCH_BIN="$p/bin" "$CLI" upgrade --dry-run --plan 2>&1)"
+  contains "$out" "What v1.2.0 would do to the stacks:"
+  contains "$out" "  oci: Plan: 2 to add, 0 to change, 1 to destroy."
+  contains "$out" "    this plan replaces oci_core_vcn.this"
+  contains "$out" "it destroys something: read freelunch plan oci with the new version before you pin it"
+  if (cd "$p" && FREELUNCH_SOURCE="$src" FREELUNCH_HOME="$p/home" "$CLI" upgrade --plan >/dev/null 2>&1); then echo "--plan alone should fail"; return 1; fi
+}
+
 # install.sh downloads the latest release and hands over to its upgrade, outside any project.
 test_install_script() {
   local p="$WORK/install" out
@@ -7290,6 +7499,42 @@ JSON
   contains "$out" "up: restored api from the backup of 2026-11-12T02:00:03Z"
   grep -q ' restore latest --target / --host api' "$p/fake.log"
   equals "$(grep -n 'up: restored api\|up: live on\|up: oci has no\|up: making oci' <<< "$out" | sed 's/^[0-9]*://' | cut -c1-24 | tr '\n' '|')" "==> up: making oci|==> up: restored api fro|==> up: live on oci-main|"
+}
+
+# down removes everything behind one confirmation that lists it, keeps the data guard of destroy, and says what is left.
+test_down_removes_the_project_and_looks_for_what_is_left() {
+  local p="$WORK/down" out
+  up_project "$p" oci
+  FAKE_UP="oci=ok" up_in "$p" >/dev/null 2>&1
+  # nobody to ask: it says what it would remove, and stops
+  : > "$p/fake.log"
+  if out="$(UP_CMD=down up_in "$p" </dev/null 2>&1)"; then echo "down should have asked"; return 1; fi
+  contains "$out" "down removes, from this project:"
+  contains "$out" "  oci (host: its VMs and what is on them)"
+  contains "$out" "down: this removes all of the above. Run it at a terminal, or with FREELUNCH_AUTO_APPROVE=1"
+  fails grep -q 'providers/oci/stack destroy' "$p/fake.log"
+  # at a terminal, no changes nothing
+  if out="$(FREELUNCH_INTERACTIVE=1 UP_CMD=down up_in "$p" <<< "n" 2>&1)"; then echo "down should have stopped"; return 1; fi
+  contains "$out" "down: nothing was changed"
+  # an app with data and no backup keeps it from going
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n    volumes: ["results:/var/lib/results"]\nvolumes:\n  results:\n' > "$p/compose.yaml"
+  if out="$(FREELUNCH_AUTO_APPROVE=1 UP_CMD=down up_in "$p" 2>&1)"; then echo "down should have been stopped by the data guard"; return 1; fi
+  contains "$out" "destroy: this would remove data nothing has a backup of: api on oci-main"
+  # approved: it destroys, and finds nothing left
+  printf 'services:\n  api:\n    image: ghcr.io/me/api:1.0.0\n' > "$p/compose.yaml"
+  out="$(FREELUNCH_AUTO_APPROVE=1 UP_CMD=down up_in "$p" 2>&1)" || { echo "$out" >&2; return 1; }
+  grep -q 'providers/oci/stack destroy' "$p/fake.log"
+  contains "$out" "down: nothing of this project is left on cloudflare, oci"
+  # something of the project still at the provider is listed, and the exit says so
+  up_project "$p-l" oci
+  FAKE_UP="oci=ok" up_in "$p-l" >/dev/null 2>&1
+  if out="$(FREELUNCH_AUTO_APPROVE=1 FAKE_SHARED_INSTANCES='[{"display-name": "main", "identifier": "ocid1.instance.oc1..m"}]' UP_CMD=down up_in "$p-l" 2>&1)"; then echo "down should have reported what is left"; return 1; fi
+  contains "$out" "down: what is still there"
+  contains "$out" "oci: instance main"
+  # with nothing deployed it says so
+  up_project "$p-n" oci
+  out="$(FREELUNCH_AUTO_APPROVE=1 UP_CMD=down up_in "$p-n" 2>&1)"
+  contains "$out" "down: nothing of this project is deployed"
 }
 
 # A host that other projects run on is not destroyed under them.

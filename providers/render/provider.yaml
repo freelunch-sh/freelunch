@@ -4,6 +4,7 @@ display_name: "Render"
 category: containers
 status: ready
 layer: platform
+volumes: "no"                   # freelunch makes no volumes on Render (deploy says so)
 arch: amd64
 terraform_provider: "render-oss/render"
 iac: partner

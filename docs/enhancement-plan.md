@@ -531,14 +531,14 @@ free platforms put apps to sleep.
 
 ## 9. Small commands that save a search
 
-- [ ] `freelunch next`: the one command to run now, with a reason. It reuses what `status`
+- [x] `freelunch next`: the one command to run now, with a reason. It reuses what `status`
   and `doctor` already compute, in this order: no `.freelunch/` → `setup`; a stack without
   tfvars → the file to fill; nothing deployed and no wait → `up`; a wait running → `status`
   (and its attempt count); a host whose key isn't pinned → `trust <host>`; apps not deployed
   or not running → `deploy`; a move recorded and unfinished → `rollback` or `up --move`;
   otherwise "nothing to do: freelunch status shows the project". `--run` runs it after
   asking. A test per branch
-- [ ] `freelunch fit [dir]`: where the app can run for free. Reads the Compose file's
+- [x] `freelunch fit [dir]`: where the app can run for free. Reads the Compose file's
   memory limits (the sum; "unknown" without limits), whether it has volumes, and the image
   architectures when the registry answers (`check_images`' code). Prints the `status: ready`
   host and platform providers as a table: fits or why not (memory over the free size,
@@ -546,18 +546,18 @@ free platforms put apps to sleep.
   card needed, `verified`. Data comes from `provider.yaml` (`limits`, the new fields) and
   the platform sizes `deploy/` knows; a provider with no numbers says "unknown", never a
   guess. Sorted: fits and always on first. Tests with two fixture Compose files
-- [ ] `freelunch down`: `destroy all` in reverse layer order with one confirmation that
+- [x] `freelunch down`: `destroy all` in reverse layer order with one confirmation that
   lists everything it removes, the existing data guard, then the leftover check for each
   provider that has one (for OCI the tenancy-wide parts of `doctor_oci_billing`), ending
   "down: nothing of this project is left on <providers>" or the list of what is. On a
   shared host it removes this project's namespace only. Tests
-- [ ] `freelunch upgrade --dry-run [version]`: no install, no pin. Prints the CHANGELOG
+- [x] `freelunch upgrade --dry-run [version]`: no install, no pin. Prints the CHANGELOG
   sections between the pinned version and the target (from the downloaded copy), with any
   "Upgrading" section first. With `--plan` it also runs `plan` for each deployed stack with
   the new version's code and says per stack "no changes", or what it would change, replace
   or destroy (reuse what `plan --out` prints about replacements). Tests with two fake
   versions in `FREELUNCH_HOME`
-- [ ] Short names: `aliases = { console = "shell api -- bin/console" }` in `apps.tfvars`;
+- [x] Short names: `aliases = { console = "shell api -- bin/console" }` in `apps.tfvars`;
   `freelunch <alias> [args]` runs it. An alias may not shadow a built-in command (error at
   `check`). `freelunch help` lists the project's aliases. Tests
 
@@ -731,6 +731,18 @@ Found while building sections 1 to 6. `[x]` means closed, with how; `[ ]` is ope
 - [ ] `freelunch watch` keeps its last result in `.freelunch/watch.state` only. The plan also asks for it in the state store when
   there is one; without that, a CI run (a fresh checkout every time) tells everything it finds each week, not what is new.
   The state store has no place for a file that is not a stack's state yet.
+
+**Section 9**
+
+- [ ] `down` looks for what is left only on OCI (instances, VCNs and load balancers the stacks tagged `managed-by = freelunch`), and
+  not for volumes, reserved IPs or the other providers' leftovers; the plan asked for each provider that has such a check.
+- [ ] `fit` knows a free memory size for four providers (OCI, GCP, Azure, Northflank) and "no volumes" for three platforms; the
+  others say unknown. The catalogue fields it reads (`free_memory_mb`, `volumes`) are filled from the providers' own notes only.
+  A VM is always on, but the catalogue doesn't say so (`always_on` is empty for hosts), so Oracle sorts below Northflank.
+- [ ] `next` suggests `cp ...terraform.tfvars.example ...terraform.tfvars` for a stack with no tfvars, which is a command for you,
+  so `next --run` refuses it; `freelunch doctor` lists what is still empty after.
+- [ ] shellcheck is not installed on this machine (the home folder moved), so the lint of everything since the commit of
+  section 8 is unchecked: run `shellcheck bin/freelunch` and `tests/cli.sh shellcheck_findings` where it is.
 
 **Housekeeping**
 

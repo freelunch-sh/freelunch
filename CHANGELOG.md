@@ -12,6 +12,10 @@ release can change commands and the project layout.
 
 ### Added
 
+- **Small commands that save a search.** `freelunch next` says the one command to run now and why; `fit` says where the app
+  can run for free; `down` removes everything the project made behind one confirmation and looks for what is left;
+  `upgrade --dry-run [--plan]` shows the changelog and what the new version would do to each stack without installing
+  it; `aliases` in `apps.tfvars` give short names.
 - **An OCI quota guard that prevents a charge.** `quota_guard = true` in the OCI stack makes a compartment quota that zeroes every
   compute family but the Always Free Arm and micro amounts (from the catalogue), so OCI refuses a launch outside them; `doctor` says
   whether it is on. Off by default, and not run against a tenancy yet. `ssh-add` no longer holds `doctor` up when an agent asks for

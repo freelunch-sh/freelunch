@@ -4,6 +4,7 @@ display_name: "Google Cloud Run"
 category: containers
 status: ready
 layer: platform
+volumes: "no"                   # freelunch makes no volumes on Cloud Run (deploy says so)
 always_on: "no"                 # scales to zero between requests (docs.cloud.google.com/free/docs/free-cloud-features, checked 2026-10-24); no idle time is stated
 arch: amd64
 terraform_provider: "hashicorp/google"

@@ -14,6 +14,8 @@ free_tier_type: always-free
 free_tier: "Sandbox: 2 services, 2 jobs and 1 database, always on with no sleeping, plans up to nf-compute-20 (0.2 vCPU, 512 MB) and up to $20/month of resources; no card"
 behavior: always-on
 always_on: "yes"                # the Sandbox is always on with no sleeping (northflank.com/pricing, checked 2026-10-24)
+free_memory_mb: 512             # nf-compute-20, the largest plan a free project gets: 512 MB (api.northflank.com/v1/plans, checked 2026-10-24)
+volumes: "yes"
 card_required: "no"
 url: "https://northflank.com/pricing"
 last_verified: "2026-10-24"

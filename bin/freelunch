@@ -103,6 +103,10 @@ Project:
   upgrade [version] [--force]
                           Install a release (the latest by default, or v1.2.0, main or a commit)
                           as the freelunch on this machine, and pin the project to it
+  upgrade --dry-run [version] [--plan]
+                          Install and pin nothing: print the changelog between the pinned version and
+                          that one, "Upgrading" parts first; --plan also plans every deployed stack
+                          with the new version and says whether it changes, replaces or destroys
   trust <host> [--instance <ocid>]
                           Pin a host's SSH keys in known_hosts from its serial console, so the
                           first deploy talks to the right machine (OCI hosts)
@@ -208,6 +212,14 @@ Infrastructure:
                           failed backup, a full disk, a bill, a machine Oracle may reclaim as idle. It
                           tells whoever listens (FREELUNCH_NOTIFY) only what is new since the last run;
                           --strict exits 1 while anything is wrong
+  down [--discard-data]   Remove everything the project made: destroy all in reverse layer order behind one
+                          confirmation that lists it, the project's place on a shared host, and a look at
+                          what is left at the provider
+  fit [dir]               Where the app in dir's compose.yaml can run for free: its memory limits, volumes
+                          and the platforms of its images against what each ready host and platform
+                          records; "unknown" where a provider doesn't say
+  next [--run]            The one command to run now, and why: from what status and doctor know. --run
+                          runs it after asking
   host [name] [--json]    Who is on a VM host: the projects, their apps with the memory they reserve and use
                           now, the disk, and the week's heavy jobs in time order
   restart <app> [--host h] Restart an app on its VM host and wait until it is healthy; if it is not,
@@ -374,7 +386,7 @@ fetch_version() {
 switch_version() {
   local pin dir
   pin="$(pinned_version)"
-  [[ -n "$pin" && ! -e "$ROOT/.git" && "$pin" != "$(self_version)" ]] || return 0
+  [[ -z "${FREELUNCH_NO_SWITCH:-}" && -n "$pin" && ! -e "$ROOT/.git" && "$pin" != "$(self_version)" ]] || return 0
   dir="$(fetch_version "$pin")"
   exec "$dir/bin/freelunch" "$@"
 }
@@ -395,17 +407,84 @@ cmd_version() {
 
 # upgrade [version]: install that version (the latest release by default) as the freelunch
 # this machine runs, and in a project pin it there too
+# changelog_between <CHANGELOG.md> <old version> <new version>: the sections of the changelog newer than the old version
+# and up to the new one (the Unreleased section too when the new one is a commit, not a release), with the "Upgrading"
+# parts of them first, under their version
+changelog_between() {
+  local file="$1" old="${2#v}" new="${3#v}" release=0
+  [[ "$3" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && release=1
+  [[ -f "$file" ]] || return 0
+  awk -v old="$old" -v new="$new" -v release="$release" '
+    function newer(a, b,   x, y, n, i) {
+      n = split(a, x, "."); split(b, y, ".")
+      for (i = 1; i <= 3; i++) { if ((x[i] + 0) > (y[i] + 0)) return 1; if ((x[i] + 0) < (y[i] + 0)) return 0 }
+      return 0
+    }
+    /^## \[/ {
+      v = $0; sub(/^## \[/, "", v); sub(/\].*/, "", v)
+      keep = 0
+      if (v == "Unreleased") keep = !release
+      else if ((old == "" || newer(v, old)) && !newer(v, new)) keep = 1
+      sect = keep ? v : ""
+      if (keep) head[v] = $0
+      sub_name = ""
+      next
+    }
+    sect == "" { next }
+    /^### / { sub_name = $0; sub(/^### /, "", sub_name) }
+    { body[sect] = body[sect] $0 "\n"; if (sub_name == "Upgrading") up[sect] = up[sect] $0 "\n"; if (!(sect in seen)) { seen[sect] = 1; order[++n] = sect } }
+    END {
+      printed = 0
+      for (i = 1; i <= n; i++) if (up[order[i]] != "") {
+        if (!printed) { print "Upgrading:"; printed = 1 }
+        printf "  [%s]\n%s", order[i], up[order[i]]
+      }
+      if (printed) print ""
+      for (i = 1; i <= n; i++) printf "%s\n%s", head[order[i]], body[order[i]]
+    }' "$file"
+}
+
+# upgrade_dry_run <ref> <plan 0|1>: what an upgrade would bring, and with --plan what it would do to each stack, installing
+# and pinning nothing
+upgrade_dry_run() {
+  local ref="$1" plan="$2" dir old p out line
+  dir="$(fetch_version "$ref")"
+  old="$(pinned_version)"
+  echo "freelunch ${old:-?} -> $ref (nothing is installed or pinned: a dry run)"
+  echo
+  out="$(changelog_between "$dir/CHANGELOG.md" "$old" "$ref")"
+  if [[ -n "$out" ]]; then printf '%s\n' "$out"; else echo "The changelog has nothing between ${old:-the start} and $ref."; fi
+  [[ "$plan" -eq 1 ]] || return 0
+  echo
+  [[ -n "$PROJECT" ]] || { echo "No project here, so there is nothing to plan."; return 0; }
+  echo "What $ref would do to the stacks:"
+  for p in $(project_stacks); do
+    is_deployed "$p" || continue
+    out="$(FREELUNCH_NO_SWITCH=1 "$dir/bin/freelunch" plan "$p" 2>&1 </dev/null || true)"
+    if grep -q 'No changes' <<< "$out" || ! grep -q '^Plan:\|Plan: ' <<< "$out"; then echo "  $p: no changes"
+    else
+      line="$(grep -h 'Plan: ' <<< "$out" | tail -n1 | sed 's/^[^P]*//')"
+      echo "  $p: $line"
+      grep -h 'this plan replaces' <<< "$out" | sed 's/^[^:]*: /    /' | head -3
+      grep -q ' to destroy' <<< "$line" && ! grep -q ' 0 to destroy' <<< "$line" && echo "    it destroys something: read freelunch plan $p with the new version before you pin it"
+    fi
+  done
+}
+
 cmd_upgrade() {
-  local ref="" force=0 home bin old t missing=() f stack pid
+  local ref="" force=0 dry=0 plan=0 home bin old t missing=() f stack pid
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --force) force=1 ;;
+      --dry-run) dry=1 ;;
+      --plan) plan=1 ;;
       -*) die "upgrade: unknown option $1" ;;
       *) [[ -z "$ref" ]] || die "upgrade takes one version at most"; ref="$1" ;;
     esac
     shift
   done
   command -v git >/dev/null || die "upgrade needs git"
+  [[ $plan -eq 0 || $dry -eq 1 ]] || die "upgrade: --plan goes with --dry-run"
   # bash reads a script while it runs, so replacing freelunch under a wait can break it
   if [[ -n "$PROJECT" && $force -eq 0 ]]; then
     for f in "$PROJECT"/*/wait.state; do
@@ -421,6 +500,7 @@ cmd_upgrade() {
     "")   ref="$(latest_version)" ;;
     main) ref="$(main_commit)" ;;
   esac
+  if [[ $dry -eq 1 ]]; then upgrade_dry_run "$ref" "$plan"; return 0; fi
   fetch_version "$ref" >/dev/null
   home="$(versions_home)"
   ln -sfn "$ref" "$home/current"
@@ -3644,6 +3724,314 @@ host_report_text() {
     jq -r '.heavy_jobs[:40][] | "    \(.start)  \(.project)/\(.job) (up to \(.timeout_minutes) min)"' <<< "$json"
     [[ "$(jq '.heavy_jobs | length' <<< "$json")" -le 40 ]] || echo "    ... and more"
   fi
+}
+
+# usage_aliases: the project's aliases, after the help
+usage_aliases() {
+  local name cmd first=1
+  while IFS=$'\t' read -r name cmd; do
+    [[ -n "$name" ]] || continue
+    if [[ $first -eq 1 ]]; then echo; echo "Aliases of this project (apps.tfvars):"; first=0; fi
+    printf '  %-12s freelunch %s\n' "$name" "$cmd"
+  done < <(project_aliases)
+}
+
+# --- aliases ----------------------------------------------------------------------------
+# aliases = { console = "shell api -- bin/console" } in apps.tfvars gives a project short names: `freelunch console` runs
+# `freelunch shell api -- bin/console`, with the rest of the line added. An alias is one freelunch command, and can't take
+# the name of one (check says so).
+
+# the commands of freelunch itself, which no alias may shadow (a test keeps the list in step with main)
+BUILTIN_COMMANDS=" init setup version upgrade state ci deploy up rollback volume domain list plan apply destroy status logs restart shell jobs backup host watch next fit down restore doctor journey check verify build harden agent trust hybrid inventory output catalog dns api cli guided engine test fmt help "
+
+# project_aliases: one alias a line, "<name><TAB><command>"
+project_aliases() {
+  local file="$PROJECT/apps.tfvars"
+  [[ -n "$PROJECT" && -f "$file" ]] || return 0
+  awk '
+    { sub(/#.*/, "") }
+    !inside { if ($0 ~ /^[ \t]*aliases[ \t]*=[ \t]*[{]/) { inside = 1; depth = 0 } else next }
+    {
+      line = $0
+      if (depth == 1 && match(line, /^[ \t]*"?[A-Za-z0-9_-]+"?[ \t]*=[ \t]*"[^"]*"/)) {
+        name = line; sub(/^[ \t]*"?/, "", name); sub(/"?[ \t]*=.*$/, "", name)
+        val = line; sub(/^[^=]*=[ \t]*"/, "", val); sub(/".*$/, "", val)
+        print name "\t" val
+      }
+      depth += gsub(/[{]/, "{", line) - gsub(/[}]/, "}", line)
+      if (depth <= 0) exit
+    }' "$file"
+}
+
+# run_alias <name> <args...>: run the alias if the project has one of that name; returns 1 when it has none
+run_alias() {
+  local name="$1" cmd words=()
+  shift
+  cmd="$(project_aliases | awk -F'\t' -v n="$name" '$1 == n { print $2; exit }')"
+  [[ -n "$cmd" ]] || return 1
+  read -ra words <<< "$cmd"
+  [[ "$BUILTIN_COMMANDS" == *" ${words[0]} "* ]] || die "alias $name: '${words[0]}' isn't a freelunch command (an alias is a command like \"shell api -- bin/console\")"
+  main "${words[@]}" "$@"
+  exit $?
+}
+
+# check_aliases: aliases that shadow a command, or aren't commands
+check_aliases() {
+  local name cmd words=() any=0
+  while IFS=$'\t' read -r name cmd; do
+    [[ -n "$name" ]] || continue
+    any=1
+    read -ra words <<< "$cmd"
+    if [[ "$BUILTIN_COMMANDS" == *" $name "* ]]; then check fail "alias $name: that is a freelunch command, and an alias may not take its name"
+    elif [[ ! "$name" =~ ^[a-z][a-z0-9-]*$ ]]; then check fail "alias $name: a name is lowercase letters, digits and hyphens"
+    elif [[ ${#words[@]} -eq 0 || "$BUILTIN_COMMANDS" != *" ${words[0]} "* ]]; then check fail "alias $name: '${words[0]:-}' isn't a freelunch command"
+    else check ok "alias $name: freelunch $cmd"; fi
+  done < <(project_aliases)
+  [[ $any -eq 0 ]] || return 0
+}
+
+# --- down -------------------------------------------------------------------------------
+# freelunch down removes everything the project made: `destroy all` in reverse layer order behind one confirmation that
+# lists it, the data guard of destroy, the project's place on a host it shares, and then a look for what is left.
+
+# down_leftovers <provider>: what of the project is still at the provider, one a line (nothing when it can't ask)
+down_leftovers() {
+  local p="$1" tfvars tenancy items type
+  case "$p" in
+    oci)
+      tfvars="$(config_dir oci)/terraform.tfvars"
+      [[ -f "$tfvars" ]] && command -v oci >/dev/null || return 0
+      tenancy="$(tfvar "$tfvars" tenancy_ocid)"
+      [[ -n "$tenancy" ]] || return 0
+      oci_args "$tfvars"
+      for type in instance vcn loadbalancer; do
+        items="$(oci_search "$tenancy" "query $type resources where freeformTags.key = 'managed-by' && freeformTags.value = 'freelunch' && lifeCycleState != 'TERMINATED' && lifeCycleState != 'TERMINATING'" 2>/dev/null)" || continue
+        jq -r --arg t "$type" '.[]? | "\($t) \(.["display-name"] // .identifier)"' <<< "$items" 2>/dev/null || true
+      done ;;
+  esac
+}
+
+cmd_down() {
+  local discard=0 a p stacks=() shared=() what="" answer left="" all="" extra=()
+  for a in "$@"; do
+    case "$a" in
+      --discard-data) discard=1 ;;
+      *) die "down: freelunch down [--discard-data]" ;;
+    esac
+  done
+  [[ -n "$PROJECT" ]] || die "down: run it in a project, where its .freelunch/ folder is"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  need_tf
+  for p in $(project_stacks); do
+    if is_deployed "$p" || wait_pid "$p" >/dev/null; then stacks+=("$p"); fi
+  done
+  while IFS= read -r p; do [[ -z "$p" ]] || shared+=("$p"); done < <(shared_hosts)
+  if [[ ${#stacks[@]} -eq 0 && ${#shared[@]} -eq 0 ]]; then
+    log "down: nothing of this project is deployed"
+    return 0
+  fi
+  {
+    echo "down removes, from this project:"
+    for p in ${stacks[@]+"${stacks[@]}"}; do echo "  $p ($(meta "$p" layer)$([[ "$(meta "$p" layer)" == host ]] && echo ": its VMs and what is on them"))"; done
+    for p in ${shared[@]+"${shared[@]}"}; do echo "  its apps, volumes, jobs and backups' timers on $p (a host other projects use: nothing of theirs)"; done
+    if [[ $discard -eq 1 ]]; then echo "  and the data in Docker volumes, with no backup asked for (--discard-data)"
+    else echo "  and the data in Docker volumes only where a backup of it exists (volume pull, or a restic backup)"; fi
+  } >&2
+  if [[ "${FREELUNCH_AUTO_APPROVE:-0}" != 1 ]]; then
+    interactive || die "down: this removes all of the above. Run it at a terminal, or with FREELUNCH_AUTO_APPROVE=1"
+    answer="$(ask "Remove all of it? (y/n)" n)"
+    case "$answer" in y|Y|yes) ;; *) die "down: nothing was changed" ;; esac
+  fi
+  export FREELUNCH_AUTO_APPROVE=1
+  [[ $discard -eq 0 ]] || extra=(--discard-data)
+  for p in ${shared[@]+"${shared[@]}"}; do shared_leave "$p" "$discard"; done
+  if [[ ${#stacks[@]} -gt 0 ]]; then cmd_lifecycle destroy all ${extra[@]+"${extra[@]}"}; fi
+  # what is still there
+  for p in ${stacks[@]+"${stacks[@]}"}; do
+    left="$(down_leftovers "$p")"
+    [[ -z "$left" ]] || all="${all:+$all
+}$p: $(paste -sd, - <<< "$left" | sed 's/,/, /g')"
+  done
+  if [[ -n "$all" ]]; then
+    log "down: what is still there (freelunch doctor and the provider's console say more):"
+    while IFS= read -r a; do echo "      $a" >&2; done <<< "$all"
+    return 1
+  fi
+  log "down: nothing of this project is left on $(printf '%s ' ${stacks[@]+"${stacks[@]}"} ${shared[@]+"${shared[@]}"} | sed 's/ $//; s/ /, /g')"
+}
+
+# --- fit --------------------------------------------------------------------------------
+# freelunch fit says where an app can run for free: its Compose file's memory limits, its volumes and the platforms its
+# images are built for, against what each ready host and platform records in its provider.yaml (free_memory_mb, volumes,
+# arch, always_on). What a provider doesn't record is "unknown", never a guess.
+
+# compose_memory_mb <file>: the memory limits of the services (mem_limit, or deploy.resources.limits.memory) summed, in MB;
+# nothing when a service has no limit
+compose_memory_mb() {
+  awk '
+    function mb(v,   n, u) {
+      v = tolower(v); gsub(/["\047]/, "", v)
+      if (v !~ /^[0-9.]+(b|k|kb|m|mb|g|gb)?$/) return ""
+      n = v + 0; u = v; sub(/^[0-9.]+/, "", u)
+      if (u == "g" || u == "gb") return n * 1024
+      if (u == "m" || u == "mb" || u == "") return (u == "" ? n / 1048576 : n)
+      if (u == "k" || u == "kb") return n / 1024
+      return n / 1048576
+    }
+    /^services:/ { ins = 1; next }
+    ins && /^[^ #\t]/ { ins = 0 }
+    !ins { next }
+    /^  [A-Za-z0-9_.-]+:[ \t]*(#.*)?$/ { svc = $1; sub(":", "", svc); n++; lim = 0; next }
+    svc != "" && /^[ \t]+mem_limit:/ { v = mb($2); if (v != "") { got[svc] = v } ; next }
+    svc != "" && /^[ \t]+limits:/ { lim = 1; next }
+    svc != "" && /^[ \t]+(reservations|resources):/ { lim = ($1 == "resources:") ? lim : 0; next }
+    svc != "" && lim && /^[ \t]+memory:/ { v = mb($2); if (v != "") got[svc] = v; next }
+    END { t = 0; c = 0; for (k in got) { t += got[k]; c++ } if (n > 0 && c == n) printf "%d\n", t + 0.5 }
+  ' "$1"
+}
+
+# fit_provider <provider> <memory MB or ""> <volumes 0|1> <platforms of the images, "" when not asked>: "fits", "unknown: why"
+# or "no: why"
+fit_provider() {
+  local p="$1" mem="$2" vols="$3" plats="$4" free arch v
+  free="$(meta "$p" free_memory_mb)"
+  if [[ -n "$mem" && -n "$free" && "$mem" =~ ^[0-9]+$ && "$free" =~ ^[0-9]+$ && $mem -gt $free ]]; then
+    echo "no: it asks for $mem MB, the free size has $free MB"; return 0
+  fi
+  v="$(meta "$p" volumes)"
+  if [[ $vols -eq 1 && "$v" == no ]]; then echo "no: it has volumes, and freelunch makes none on $p"; return 0; fi
+  arch="$(meta "$p" arch)"
+  if [[ -n "$arch" && -n "$plats" && " $plats " != *" linux/$arch "* ]]; then
+    echo "no: its image has no build for linux/$arch ($plats)"; return 0
+  fi
+  if [[ -n "$mem" && -z "$free" ]]; then echo "unknown: how much memory a free workload gets there isn't recorded"; return 0; fi
+  if [[ -z "$mem" ]]; then echo "unknown: the app has no memory limit in its Compose file"; return 0; fi
+  echo fits
+}
+
+# cmd_fit [dir]
+cmd_fit() {
+  local dir="${1:-.}" compose="" f mem vols=0 images="" image plats="" one p rows="" verdict rank awake name n
+  [[ $# -le 1 ]] || die "usage: freelunch fit [dir]"
+  [[ -d "$dir" ]] || die "fit: $dir isn't a folder"
+  for f in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do [[ -f "$dir/$f" ]] && { compose="$dir/$f"; break; }; done
+  [[ -n "$compose" ]] || die "fit: no compose.yaml in $dir"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  mem="$(compose_memory_mb "$compose")"
+  grep -Eq '^[[:space:]]*volumes:' "$compose" && vols=1
+  images="$(compose_images "$compose")"
+  if [[ -n "$images" && "${FREELUNCH_CHECK_IMAGES:-1}" != 0 ]] && command -v curl >/dev/null; then
+    # the platforms every image is built for, in common
+    for image in $images; do
+      one="$(image_platforms "$image" 2>/dev/null || true)"
+      case "$one" in
+        ""|denied|missing|unknown) plats="" ; break ;;
+        *) if [[ -z "$plats" ]]; then plats="$one"; else plats="$(comm -12 <(tr ' ' '\n' <<< "$plats" | sort) <(tr ' ' '\n' <<< "$one" | sort) | tr '\n' ' ' | sed 's/ $//')"; fi ;;
+      esac
+    done
+  fi
+  echo "fit: $(rel "$compose"): memory $([[ -n "$mem" ]] && echo "$mem MB" || echo "not limited"), volumes $([[ $vols -eq 1 ]] && echo yes || echo no), images ${plats:-not asked or unknown}"
+  for p in $(all_providers); do
+    [[ "$(meta "$p" status)" == ready ]] || continue
+    case "$(meta "$p" layer)" in host|platform) ;; *) continue ;; esac
+    verdict="$(fit_provider "$p" "$mem" "$vols" "$plats")"
+    case "$verdict" in fits) rank=0 ;; unknown*) rank=1 ;; *) rank=2 ;; esac
+    case "$(meta "$p" always_on)" in yes) awake="0 always on" ;; no) awake="2 $(sleeps_note "$p" "" | sed 's/^sleeps/sleeps/')" ;; *) awake="1 on or off isn't recorded" ;; esac
+    rows="$rows$rank|${awake%% *}|$p|$(meta "$p" layer)|$verdict|${awake#* }|$(meta "$p" card_required)|$(meta "$p" verified)"$'\n'
+  done
+  printf '  %-12s %-9s %-9s %-26s %-6s %-9s %s\n' provider layer fits "always on" card verified why
+  printf '%s' "$rows" | sort -t'|' -k1,1n -k2,2n -k3,3 | while IFS='|' read -r rank n name layer verdict awake card verified; do
+    printf '  %-12s %-9s %-9s %-26s %-6s %-9s %s\n' "$name" "$layer" "${verdict%%:*}" "$awake" "$card" "${verified:--}" "$([[ "$verdict" == *:* ]] && echo "${verdict#*: }" || true)"
+  done
+}
+
+# --- next ------------------------------------------------------------------------------
+# freelunch next says the one command to run now, and why, from what status and doctor already know. It looks in
+# this order: no project, a stack with no tfvars, nothing deployed, a wait running, a host key not pinned, apps not
+# deployed or not running, a move that did not finish. NEXT_CMD and NEXT_WHY hold the answer.
+
+next_step() {
+  local d p wait_attempt stacks=() host rows
+  NEXT_CMD="" NEXT_WHY=""
+  if [[ -z "$PROJECT" ]]; then
+    NEXT_CMD="freelunch setup"; NEXT_WHY="there is no .freelunch/ here yet: setup asks where the app may run and writes it"; return 0
+  fi
+  # a stack that has its example but no tfvars
+  for d in "$PROJECT"/*/; do
+    p="$(basename "$d")"
+    [[ -d "$(stack_dir "$p")" && -f "$d/terraform.tfvars.example" && ! -f "$d/terraform.tfvars" ]] || continue
+    NEXT_CMD="cp $(rel "$d")terraform.tfvars.example $(rel "$d")terraform.tfvars"
+    NEXT_WHY="$p has no terraform.tfvars: copy the example and fill it in (freelunch doctor lists what is still empty)"
+    return 0
+  done
+  # a wait that runs now
+  for p in $(project_stacks); do
+    if wait_pid "$p" >/dev/null; then
+      wait_attempt="$(sed -n 's/^attempt=//p' "$(config_dir "$p")/wait.state" 2>/dev/null)"
+      NEXT_CMD="freelunch status"; NEXT_WHY="a wait for capacity on $p is running (attempt ${wait_attempt:-1}): status shows how it goes"; return 0
+    fi
+    [[ ! -f "$(config_dir "$p")/approved.json" ]] || { NEXT_CMD="freelunch status"; NEXT_WHY="a wait for capacity on $p is approved and runs in CI: status shows how it goes"; return 0; }
+  done
+  # nothing deployed
+  local any=0
+  for p in $(project_stacks); do
+    case "$(meta "$p" layer)" in host|platform) is_deployed "$p" && any=1 ;; esac
+  done
+  if [[ $any -eq 0 ]]; then
+    NEXT_CMD="freelunch up"; NEXT_WHY="nothing is deployed yet: up takes the first target that has room, and deploys the app there"; return 0
+  fi
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  local tunnel_state=""
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if ! { cmd_hybrid && deploy_plan "$(state_root)/apps.tfvars" "$tunnel_state"; } >/dev/null 2>&1; then
+    NEXT_CMD="freelunch deploy --dry-run"; NEXT_WHY="apps.tfvars doesn't resolve against the inventory yet: the dry run says why"; return 0
+  fi
+  # a host whose key is not pinned
+  for host in $(jq -r 'to_entries[] | select(.value.kind != "platform") | .key' "$TMP/targets.json"); do
+    d="$(jq -r --arg h "$host" '.[$h].address // empty' "$TMP/targets.json")"
+    [[ -n "$d" ]] || continue
+    if ! ssh-keygen -F "$d" -f "$(state_root)/known_hosts" >/dev/null 2>&1; then
+      NEXT_CMD="freelunch trust $host"; NEXT_WHY="the SSH key of $host isn't pinned yet: trust reads it from its console, so the first deploy talks to the right machine"; return 0
+    fi
+  done
+  # apps that are not deployed or not running
+  rows="$( ( cmd_probe --json ) 2>/dev/null || true)"
+  if jq -e 'type == "array"' <<< "$rows" >/dev/null 2>&1; then
+    host="$(jq -r '[.[] | select(.type == "app" and (.exists == false or .healthy == false)) | .node] | join(", ")' <<< "$rows")"
+    if [[ -n "$host" ]]; then NEXT_CMD="freelunch deploy"; NEXT_WHY="$host aren't deployed or aren't running: deploy puts them right"; return 0; fi
+  fi
+  # a move that did not finish
+  if [[ -f "$(move_file)" ]]; then
+    NEXT_CMD="freelunch rollback"; NEXT_WHY="a move of the app between hosts did not finish (.freelunch/up-move.state): rollback moves it back, or freelunch up --move goes on"; return 0
+  fi
+  NEXT_WHY="nothing to do: freelunch status shows the project"
+}
+
+# cmd_next [--run]
+cmd_next() {
+  local run=0 a answer
+  for a in "$@"; do
+    case "$a" in
+      --run) run=1 ;;
+      *) die "next: freelunch next [--run]" ;;
+    esac
+  done
+  next_step
+  if [[ -z "$NEXT_CMD" ]]; then echo "$NEXT_WHY"; return 0; fi
+  echo "$NEXT_CMD"
+  echo "  $NEXT_WHY" >&2
+  [[ $run -eq 1 ]] || return 0
+  case "$NEXT_CMD" in
+    freelunch\ *) ;;
+    *) die "next: $NEXT_CMD is for you to do, not freelunch" ;;
+  esac
+  if [[ "${FREELUNCH_AUTO_APPROVE:-0}" != 1 ]]; then
+    interactive || die "next: --run asks first: run it at a terminal, or with FREELUNCH_AUTO_APPROVE=1"
+    answer="$(ask "Run $NEXT_CMD? (y/n)" n)"
+    case "$answer" in y|Y|yes) ;; *) return 0 ;; esac
+  fi
+  # shellcheck disable=SC2086 # the command is a few words of ours
+  "$ROOT/bin/freelunch" ${NEXT_CMD#freelunch }
 }
 
 # --- watch ------------------------------------------------------------------------------
@@ -9948,6 +10336,7 @@ cmd_check() {
   [[ -f "$PROJECT/apps.tfvars" ]] || check fail "$(rel "$PROJECT")/apps.tfvars is missing: it says which apps run and where"
   ( up_targets ) >/dev/null 2>"$TMP/check.err" || check fail "$(sed -e "s/^freelunch: //" "$TMP/check.err" | head -1)"
   doctor_job_overlaps
+  if [[ -n "$(project_aliases)" ]]; then echo "Aliases"; check_aliases; fi
   echo
   if [[ $FAILS -eq 0 ]]; then echo "The config is complete."; else echo "$FAILS problem(s)."; return 1; fi
 }
@@ -12862,6 +13251,9 @@ main() {
     backup)               cmd_backup "$@" ;;
     host)                 cmd_host "$@" ;;
     watch)                resolve_env_refs; cmd_watch "$@" ;;
+    next)                 cmd_next "$@" ;;
+    fit)                  cmd_fit "$@" ;;
+    down)                 resolve_env_refs; resolve_state_refs; sync_start destroy; cmd_down "$@" ;;
     restore)              cmd_restore "$@" ;;
     doctor)               cmd_doctor ;;
     journey)              resolve_state_refs; sync_start status; cmd_journey "$@" ;;
@@ -12882,8 +13274,8 @@ main() {
     engine)               [[ -d "$PROVIDERS_DIR/${1:-}" ]] || die "engine: freelunch engine <provider> [kind]"; engine_of "$@" ;;
     test)                 cmd_test "$@" ;;
     fmt)                  cmd_fmt "$@" ;;
-    help|-h|--help)       usage ;;
-    *)                    usage; exit 1 ;;
+    help|-h|--help)       usage; usage_aliases ;;
+    *)                    run_alias "$cmd" "$@" || { usage; exit 1; } ;;
   esac
 }
 

@@ -61,10 +61,13 @@ locals {
     # always_on is "yes" or "no"; sleeps_after_minutes goes with "no" and is a number; a host's idle rule has both a percent and a number of days
     bad_always_on = [for k, p in local.providers : k if try(p.always_on, null) != null && !contains(["yes", "no"], tostring(p.always_on))]
     bad_sleeps    = [for k, p in local.providers : k if try(p.sleeps_after_minutes, null) != null && (try(tostring(p.always_on), "") != "no" || !can(tonumber(p.sleeps_after_minutes)))]
-    bad_idle      = [for k, p in local.providers : k if try(p.limits.compute.idle, null) != null && !(can(tonumber(p.limits.compute.idle.percent)) && can(tonumber(p.limits.compute.idle.days)))]
-    bad_engine    = [for k, p in local.providers : k if !alltrue([for f, v in p : contains(local.engines, tostring(v)) if f == "engine" || startswith(f, "engine_")])]
-    bad_jobs      = [for k, p in local.providers : k if try(p.jobs, null) != null && !alltrue([for j in p.jobs : contains(local.jobs, tostring(j))])]
-    bad_verified  = [for k, p in local.providers : k if try(p.verified, null) != null && !contains(local.verified, tostring(p.verified))]
+    # free_memory_mb is a number; volumes is "yes" or "no"
+    bad_free_memory = [for k, p in local.providers : k if try(p.free_memory_mb, null) != null && !can(tonumber(p.free_memory_mb))]
+    bad_volumes     = [for k, p in local.providers : k if try(p.volumes, null) != null && !contains(["yes", "no"], tostring(p.volumes))]
+    bad_idle        = [for k, p in local.providers : k if try(p.limits.compute.idle, null) != null && !(can(tonumber(p.limits.compute.idle.percent)) && can(tonumber(p.limits.compute.idle.days)))]
+    bad_engine      = [for k, p in local.providers : k if !alltrue([for f, v in p : contains(local.engines, tostring(v)) if f == "engine" || startswith(f, "engine_")])]
+    bad_jobs        = [for k, p in local.providers : k if try(p.jobs, null) != null && !alltrue([for j in p.jobs : contains(local.jobs, tostring(j))])]
+    bad_verified    = [for k, p in local.providers : k if try(p.verified, null) != null && !contains(local.verified, tostring(p.verified))]
     # a ready provider (or one that says so) has what its engine runs on: tofu a stack, api an api.yaml
     no_stack        = [for k, p in local.providers : k if local.resolved_engine[k] == "tofu" && (try(p.engine, null) != null || try(p.status, "") == "ready") && !contains(local.stack_dirs, k)]
     no_api_yaml     = [for k, p in local.providers : k if local.resolved_engine[k] == "api" && !contains(local.api_dirs, k)]
