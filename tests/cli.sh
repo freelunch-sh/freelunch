@@ -568,6 +568,8 @@ while [[ $# -gt 0 ]]; do
              while IFS= read -r cl; do
                [[ "$cl" != 'header = "Authorization: Token '* ]] || { dtoken="${cl#header = \"Authorization: Token }"; dtoken="${dtoken%\"}"; }
                [[ "$cl" != 'url = "'* ]] || { url="${cl#url = \"}"; url="${url%\"}"; }
+               [[ "$cl" != 'header = "Authorization: Bearer '* ]] || { auth="${cl#header = \"Authorization: Bearer }"; auth="${auth%\"}"; }
+               [[ "$cl" != 'header = "X-Auth-Token: '* ]] || { auth="${cl#header = \"X-Auth-Token: }"; auth="${auth%\"}"; }
              done < "$2"; shift ;;
     -*)      ;;
     *)       url="$1" ;;

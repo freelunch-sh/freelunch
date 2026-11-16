@@ -18,6 +18,7 @@ release can change commands and the project layout.
 
 ### Added
 
+- **API tokens stay off the command line.** The Northflank, Cloud Run, Scaleway, Render and Cloudflare calls pass their token to `curl` through a pipe (`-K`), so `ps` no longer shows it; the Codeberg pipeline takes its `run` input through the environment.
 - **Small commands that save a search.** `freelunch next` says the one command to run now and why; `fit` says where the app
   can run for free; `down` removes everything the project made behind one confirmation and looks for what is left;
   `upgrade --dry-run [--plan]` shows the changelog and what the new version would do to each stack without installing

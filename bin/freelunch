@@ -286,6 +286,11 @@ FREELUNCH_SSH_STRICT=1 makes deploy talk only to hosts whose key known_hosts has
 EOF
 }
 
+# auth_header <header>: a curl config holding the header, for curl -K <(auth_header "..."). A token given
+# with -H is in the arguments, which `ps` shows to every user of the machine; this one goes through a pipe
+# (printf is a builtin, so no process holds it either) and touches no file.
+auth_header() { local h="${1//\\/\\\\}"; h="${h//\"/\\\"}"; printf 'header = "%s"\n' "$h"; }
+
 need_tf() { [[ -n "$TF" ]] || die "neither tofu nor terraform found in PATH (or use the runner image, see README)"; }
 
 meta() { # meta <provider> <field>: the first "field: value" line of provider.yaml, read without spawning anything; also left in $META, so a loop can call it without a subshell
@@ -7865,7 +7870,7 @@ nf() {
     args=(--data-binary "@$3")
     jq -c '[.credentials.password?, (.runtimeEnvironment // {} | .[])] | map(strings | select(length >= 4))' "$3" > "$TMP/nf.secrets" 2>/dev/null || echo '[]' > "$TMP/nf.secrets"
   fi
-  code="$(curl -sS --max-time 60 -o "$TMP/nf.json" -w '%{http_code}' -X "$1" -H "Authorization: Bearer $NORTHFLANK_API_TOKEN" \
+  code="$(curl -sS --max-time 60 -o "$TMP/nf.json" -w '%{http_code}' -X "$1" -K <(auth_header "Authorization: Bearer $NORTHFLANK_API_TOKEN") \
     -H "Content-Type: application/json" ${args[@]+"${args[@]}"} "$NF_API$2")" || code=000
   echo "$code"
 }
@@ -8891,7 +8896,7 @@ cr() {
     args=(--data-binary "@$3")
     jq -c '[.template.containers[]?.env[]?.value | strings | select(length >= 4)]' "$3" > "$TMP/cr.secrets" 2>/dev/null || echo '[]' > "$TMP/cr.secrets"
   fi
-  code="$(curl -sS --max-time 60 -o "$TMP/cr.json" -w '%{http_code}' -X "$1" -H "Authorization: Bearer $CR_TOKEN" \
+  code="$(curl -sS --max-time 60 -o "$TMP/cr.json" -w '%{http_code}' -X "$1" -K <(auth_header "Authorization: Bearer $CR_TOKEN") \
     ${CR_PROJECT:+-H "x-goog-user-project: $CR_PROJECT"} -H "Content-Type: application/json" ${args[@]+"${args[@]}"} "$2")" || code=000
   echo "$code"
 }
@@ -9207,7 +9212,7 @@ sw() {
     args=(--data-binary "@$4")
     jq -c '[.secret_environment_variables // {} | .[] | strings | select(length >= 4)]' "$4" > "$TMP/sw.secrets" 2>/dev/null || echo '[]' > "$TMP/sw.secrets"
   fi
-  code="$(curl -sS --max-time 60 -o "$TMP/sw.json" -w '%{http_code}' -X "$1" -H "X-Auth-Token: $SCW_SECRET_KEY" \
+  code="$(curl -sS --max-time 60 -o "$TMP/sw.json" -w '%{http_code}' -X "$1" -K <(auth_header "X-Auth-Token: $SCW_SECRET_KEY") \
     -H "Content-Type: application/json" ${args[@]+"${args[@]}"} "https://api.scaleway.com/containers/v1/regions/$2$3")" || code=000
   echo "$code"
 }
@@ -9237,13 +9242,13 @@ scaleway_namespace() {
 scaleway_registry() {
   local region="$1" project="$2" name="$3" code endpoint
   echo '[]' > "$TMP/sw.secrets"
-  code="$(curl -sS --max-time 60 -o "$TMP/sw.json" -w '%{http_code}' -H "X-Auth-Token: $SCW_SECRET_KEY" \
+  code="$(curl -sS --max-time 60 -o "$TMP/sw.json" -w '%{http_code}' -K <(auth_header "X-Auth-Token: $SCW_SECRET_KEY") \
     "https://api.scaleway.com/registry/v1/regions/$region/namespaces?project_id=$project&name=$name")" || code=000
   sw_ok "$code" || die "scaleway: can't list the registry namespaces ($code): $(sw_error)"
   endpoint="$(jq -r --arg n "$name" --arg m "$SW_MARK" '[.namespaces[]? | select(.name == $n and (.description // "" | startswith($m)))][0].endpoint // empty' "$TMP/sw.json")"
   if [[ -z "$endpoint" ]]; then
     jq -n --arg n "$name" --arg p "$project" --arg d "$SW_MARK" '{name: $n, project_id: $p, description: $d, is_public: false}' > "$TMP/registry-ns.json"
-    code="$(curl -sS --max-time 60 -o "$TMP/sw.json" -w '%{http_code}' -X POST -H "X-Auth-Token: $SCW_SECRET_KEY" -H "Content-Type: application/json" \
+    code="$(curl -sS --max-time 60 -o "$TMP/sw.json" -w '%{http_code}' -X POST -K <(auth_header "X-Auth-Token: $SCW_SECRET_KEY") -H "Content-Type: application/json" \
       --data-binary "@$TMP/registry-ns.json" "https://api.scaleway.com/registry/v1/regions/$region/namespaces")" || code=000
     sw_ok "$code" || die "scaleway: can't make the registry namespace $name ($code): $(sw_error). Registry names are shared in a region: pick another name_prefix"
     endpoint="$(jq -r '.endpoint // empty' "$TMP/sw.json")"
@@ -9257,12 +9262,12 @@ scaleway_registry() {
 scaleway_registry_down() {
   local code id
   echo '[]' > "$TMP/sw.secrets"
-  code="$(curl -sS --max-time 60 -o "$TMP/sw.json" -w '%{http_code}' -H "X-Auth-Token: $SCW_SECRET_KEY" \
+  code="$(curl -sS --max-time 60 -o "$TMP/sw.json" -w '%{http_code}' -K <(auth_header "X-Auth-Token: $SCW_SECRET_KEY") \
     "https://api.scaleway.com/registry/v1/regions/$1/namespaces?project_id=$2&name=$3")" || code=000
   sw_ok "$code" || return 0
   id="$(jq -r --arg n "$3" --arg m "$SW_MARK" '[.namespaces[]? | select(.name == $n and (.description // "" | startswith($m)))][0].id // empty' "$TMP/sw.json")"
   [[ -n "$id" ]] || return 0
-  code="$(curl -sS --max-time 60 -o "$TMP/sw.json" -w '%{http_code}' -X DELETE -H "X-Auth-Token: $SCW_SECRET_KEY" \
+  code="$(curl -sS --max-time 60 -o "$TMP/sw.json" -w '%{http_code}' -X DELETE -K <(auth_header "X-Auth-Token: $SCW_SECRET_KEY") \
     "https://api.scaleway.com/registry/v1/regions/$1/namespaces/$id")" || code=000
   if sw_ok "$code"; then log "scaleway: deleted the registry namespace $3"; else log "scaleway: can't delete the registry namespace $3 ($code): $(sw_error)"; fi
 }
@@ -9503,7 +9508,7 @@ rd() {
     args=(--data-binary "@$3")
     jq -c '[(.envVars // . | if type == "array" then .[] else empty end | .value? | strings), (.authToken? | strings) | select(length >= 4)]' "$3" > "$TMP/rd.secrets" 2>/dev/null || echo '[]' > "$TMP/rd.secrets"
   fi
-  code="$(curl -sS --max-time 60 -o "$TMP/rd.json" -w '%{http_code}' -X "$1" -H "Authorization: Bearer $RENDER_API_KEY" \
+  code="$(curl -sS --max-time 60 -o "$TMP/rd.json" -w '%{http_code}' -X "$1" -K <(auth_header "Authorization: Bearer $RENDER_API_KEY") \
     -H "Accept: application/json" -H "Content-Type: application/json" ${args[@]+"${args[@]}"} "$RD_API$2")" || code=000
   echo "$code"
 }
@@ -9909,7 +9914,7 @@ cf_api() {
   local out args=()
   [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || die "domain: CLOUDFLARE_API_TOKEN is not set (export it, or put it in .freelunch/.env)"
   [[ $# -lt 3 ]] || args=(--data "$3")
-  out="$(curl -sS --max-time 30 -X "$1" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" ${args[@]+"${args[@]}"} "$CF_API$2")" \
+  out="$(curl -sS --max-time 30 -X "$1" -K <(auth_header "Authorization: Bearer $CLOUDFLARE_API_TOKEN") -H "Content-Type: application/json" ${args[@]+"${args[@]}"} "$CF_API$2")" \
     || die "domain: can't reach the Cloudflare API"
   printf '%s\n' "$out"
 }
@@ -10635,7 +10640,7 @@ doctor_images() {
 
 # cf_get <path>: GET from the Cloudflare API, or nothing when it can't be reached
 cf_get() {
-  curl -s --max-time 30 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$CF_API$1" || true
+  curl -s --max-time 30 -K <(auth_header "Authorization: Bearer $CLOUDFLARE_API_TOKEN") "$CF_API$1" || true
 }
 
 cf_ok() { [[ "$(jq -r '.success' <<< "$1" 2>/dev/null)" == "true" ]]; }
