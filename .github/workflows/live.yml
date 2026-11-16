@@ -1,0 +1,52 @@
+name: live
+
+# Checks against real accounts, started by hand from the Actions tab. It runs only what the
+# `live` environment has credentials for and passes, doing nothing, when it has none.
+# Credentials belong to the environment (Settings > Environments > live, with the maintainer
+# as the required reviewer), never to the repository. docs/live-tests.md says what runs.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency: live
+
+env:
+  TOFU_VERSION: 1.12.7
+
+jobs:
+  live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: live
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+      - name: which credentials the environment has
+        id: have
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          NORTHFLANK_API_TOKEN: ${{ secrets.NORTHFLANK_API_TOKEN }}
+        run: |
+          have=""
+          [ -z "$CLOUDFLARE_API_TOKEN" ] || have="$have cloudflare"
+          [ -z "$NORTHFLANK_API_TOKEN" ] || have="$have northflank"
+          echo "providers=${have# }" >> "$GITHUB_OUTPUT"
+          echo "credentials for: ${have:- none, so nothing will run}"
+      - name: version and catalogue
+        run: |
+          bin/freelunch version
+          bin/freelunch list > /dev/null
+      - name: doctor (only when the environment has credentials)
+        if: steps.have.outputs.providers != ''
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          NORTHFLANK_API_TOKEN: ${{ secrets.NORTHFLANK_API_TOKEN }}
+        run: bin/freelunch doctor
