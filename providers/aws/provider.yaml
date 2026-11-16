@@ -5,6 +5,7 @@ display_name: "Amazon Web Services"
 category: hyperscalers
 status: ready
 layer: host
+always_on: "yes"                # a virtual machine stays on until stopped (it can be reclaimed: see the provider notes)
 arch: amd64
 terraform_provider: "hashicorp/aws"
 iac: official

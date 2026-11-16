@@ -725,28 +725,32 @@ Found while building sections 1 to 6. `[x]` means closed, with how; `[ ]` is ope
 
 **Section 8**
 
-- [ ] The tests of `providers/oci` (the compute module's and the stack's plan tests) fail on `Invalid mock/override field shapes`:
+- [x] The tests of `providers/oci` (the compute module's and the stack's plan tests) fail on `Invalid mock/override field shapes`:
   the mocked `oci_core_shapes` data no longer matches the `oracle/oci` provider the tests download. They fail the same without
   any change of this plan's; fix the mocks against the provider's current schema.
+  **Done:** the mocks of `oci_core_shapes` and `oci_core_images` now give every attribute of the provider's schema (null for the ones the modules don't read); the compute (16), docker-host (1) and stack (3) tests pass.
 - [ ] Only what the notes and sources state was filled in: Northflank (always on), Render (sleeps after 15 min), Cloud Run (scales
   to zero, no minutes stated), OCI's idle rule. Scaleway, Deno Deploy, the other hyperscalers and the edge providers say nothing
   precise enough; fill them when a dated page does.
 
-- [ ] `freelunch watch` keeps its last result in `.freelunch/watch.state` only. The plan also asks for it in the state store when
+- [x] `freelunch watch` keeps its last result in `.freelunch/watch.state` only. The plan also asks for it in the state store when
   there is one; without that, a CI run (a fresh checkout every time) tells everything it finds each week, not what is new.
   The state store has no place for a file that is not a stack's state yet.
+  **Done:** with a state store the result is the record `watch-state` there (`lines`), read before and pushed after each run; a fresh checkout tells only what is new. Test: `watch_keeps_its_last_result_in_the_state_store`.
 
 **Section 9**
 
 - [ ] `down` looks for what is left only on OCI (instances, VCNs and load balancers the stacks tagged `managed-by = freelunch`), and
   not for volumes, reserved IPs or the other providers' leftovers; the plan asked for each provider that has such a check.
-- [ ] `fit` knows a free memory size for four providers (OCI, GCP, Azure, Northflank) and "no volumes" for three platforms; the
+- [x] `fit` knows a free memory size for four providers (OCI, GCP, Azure, Northflank) and "no volumes" for three platforms; the
   others say unknown. The catalogue fields it reads (`free_memory_mb`, `volumes`) are filled from the providers' own notes only.
   A VM is always on, but the catalogue doesn't say so (`always_on` is empty for hosts), so Oracle sorts below Northflank.
+  **Done:** OCI, AWS, Azure and GCP now say `always_on: yes` (a VM stays on), so a VM sorts above a platform that sleeps; the memory sizes and volumes stay as the providers' notes give them.
 - [ ] `next` suggests `cp ...terraform.tfvars.example ...terraform.tfvars` for a stack with no tfvars, which is a command for you,
   so `next --run` refuses it; `freelunch doctor` lists what is still empty after.
-- [ ] shellcheck is not installed on this machine (the home folder moved), so the lint of everything since the commit of
+- [x] shellcheck is not installed on this machine (the home folder moved), so the lint of everything since the commit of
   section 8 is unchecked: run `shellcheck bin/freelunch` and `tests/cli.sh shellcheck_findings` where it is.
+  **Done:** installed (0.11.0); no warnings left in what graph and the later sections added. The baseline is now 28 (notes and style hints; the old 23 was counted by an older version): `tests/shellcheck.baseline`.
 
 **Section 10**
 
@@ -756,11 +760,12 @@ Found while building sections 1 to 6. `[x]` means closed, with how; `[ ]` is ope
   publish its variables as an output.
 - [ ] `graph check`'s room check for a shared host reads only the document; the other projects on the machine are known to the
   host, which `deploy --dry-run` asks.
-- [ ] The answer of the writing-back spike (section 10): `*.tfvars.json` is not used, see docs/graph.md ("Why HCL").
+- [x] The answer of the writing-back spike (section 10): `*.tfvars.json` is not used, see docs/graph.md ("Why HCL").
 
-- [ ] `graph --json` leaves out DNS records, mesh nodes and what `api` and `cli` engines made (records in the state store); the ids
+- [x] `graph --json` leaves out DNS records, mesh nodes and what `api` and `cli` engines made (records in the state store); the ids
   of those nodes are `check`'s, so adding them is reading what `probe_dns` and `probe_record_nodes` already know, without the
   network.
+  **Done:** the live graph has `mesh` nodes (with `member-of` edges from their hosts), `record` nodes for a dns provider's records (with `points-to` and `in-zone` edges, and the zone), and the databases, buckets and services of api and cli engines' records. `graph --config` stays the declared project.
 - [ ] A node's settings come from the deploy plan and the stacks' outputs, not from every stack's tfvars: a stack's own settings
   (a region, a size) aren't in the document except for platforms.
 

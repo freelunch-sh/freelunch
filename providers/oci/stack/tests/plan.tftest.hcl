@@ -18,13 +18,18 @@ mock_provider "oci" {
 
   mock_data "oci_core_shapes" {
     defaults = {
-      shapes = [{ name = "VM.Standard.A1.Flex" }, { name = "VM.Standard.E2.1.Micro" }]
+      shapes = [
+        { name = "VM.Standard.A1.Flex", baseline_ocpu_utilizations = null, billing_type = null, bs_nvme_attachments_config = null, gpu_description = null, gpus = null, is_billed_for_stopped_instance = null, is_cnic = null, is_flexible = null, is_live_migration_supported = null, is_subcore = null, local_disk_description = null, local_disks = null, local_disks_total_size_in_gbs = null, max_vnic_attachment_options = null, max_vnic_attachments = null, memory_in_gbs = null, memory_options = null, min_total_baseline_ocpus_required = null, network_ports = null, networking_bandwidth_in_gbps = null, networking_bandwidth_options = null, ocpu_options = null, ocpus = null, platform_config_options = null, platform_names = null, processor_description = null, quota_names = null, rdma_bandwidth_in_gbps = null, rdma_ports = null, recommended_alternatives = null, resize_compatible_shapes = null, supported_resource_management = null },
+        { name = "VM.Standard.E2.1.Micro", baseline_ocpu_utilizations = null, billing_type = null, bs_nvme_attachments_config = null, gpu_description = null, gpus = null, is_billed_for_stopped_instance = null, is_cnic = null, is_flexible = null, is_live_migration_supported = null, is_subcore = null, local_disk_description = null, local_disks = null, local_disks_total_size_in_gbs = null, max_vnic_attachment_options = null, max_vnic_attachments = null, memory_in_gbs = null, memory_options = null, min_total_baseline_ocpus_required = null, network_ports = null, networking_bandwidth_in_gbps = null, networking_bandwidth_options = null, ocpu_options = null, ocpus = null, platform_config_options = null, platform_names = null, processor_description = null, quota_names = null, rdma_bandwidth_in_gbps = null, rdma_ports = null, recommended_alternatives = null, resize_compatible_shapes = null, supported_resource_management = null },
+      ]
     }
   }
 
   mock_data "oci_core_images" {
     defaults = {
-      images = [{ id = "ocid1.image.oc1..mock" }]
+      images = [
+        { id = "ocid1.image.oc1..mock", agent_features = null, base_image_id = null, billable_size_in_gbs = null, compartment_id = null, create_image_allowed = null, defined_tags = null, display_name = null, freeform_tags = null, image_source_details = null, instance_id = null, launch_mode = null, launch_options = null, listing_type = null, operating_system = null, operating_system_version = null, size_in_mbs = null, state = null, time_created = null },
+      ]
     }
   }
 }

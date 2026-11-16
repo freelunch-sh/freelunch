@@ -7,6 +7,7 @@ status: ready
 verified: live
 free_memory_mb: 12288            # the Arm allowance since 2026-06-15: 12 GB (limits.compute.a1_flex.max_memory_gb)
 layer: host
+always_on: "yes"                # a virtual machine stays on until stopped (it can be reclaimed: see the provider notes)
 arch: arm64
 terraform_provider: "oracle/oci"
 iac: partner

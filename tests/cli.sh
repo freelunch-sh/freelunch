@@ -2731,7 +2731,8 @@ test_fit_says_where_an_app_can_run_for_free() {
   contains "$(grep '^  cloud-run' <<< "$out")" "how much memory a free workload gets there isn't recorded"
   # fits first, and what is recorded as always on before what isn't said, before what sleeps
   equals "$(grep -E '^  (oci|northflank|gcp|azure|aws|cloud-run|scaleway) ' <<< "$out" | head -1 | awk '{ print $1 }')" northflank
-  equals "$(grep -E '^  [a-z-]+ +(host|platform)' <<< "$out" | tail -1 | awk '{ print $1 }')" render
+  equals "$(grep -E '^  (oci|northflank|gcp|azure|aws|cloud-run|scaleway) ' <<< "$out" | sed -n 2p | awk '{ print $1 }')" oci
+  equals "$(grep -E '^  [a-z-]+ +(host|platform)' <<< "$out" | tail -1 | awk '{ print $1 }')" cloud-run
   contains "$(grep '^  render' <<< "$out")" "sleeps after 15 min"
   contains "$(grep '^  cloud-run' <<< "$out")" "sleeps when idle"
   contains "$(grep '^  northflank' <<< "$out")" "always on"
@@ -2980,6 +2981,27 @@ TFVARS
   equals "$(jq -c . "$q/.freelunch/canvas.json")" '{}'
   # nothing else reads canvas.json: the graph is the same with it
   graph_decl_in "$q" --config --json >/dev/null
+}
+
+# The live graph also holds what only the state store knows (records of api and cli engines), a mesh with its members, and
+# the DNS records a dns provider keeps, each pointing at its host.
+test_graph_holds_records_mesh_and_dns() {
+  local p="$WORK/graph-more" out tmp
+  dns_project "$p"
+  tmp="$(jq '.outputs.mesh = {type: ["object", {"oci-main": ["object", {address: "string", ssh: "bool"}]}], value: {"oci-main": {address: "100.64.0.1", ssh: false}}}' "$p/.freelunch/oci/terraform.tfstate")"
+  printf '%s\n' "$tmp" > "$p/.freelunch/oci/terraform.tfstate"
+  state_store "$p"
+  mkdir -p "$p/.freelunch/deno-deploy"
+  jq -n '{engine: "api", resources: [], outputs: {
+      databases: [{provider: "turso", name: "app", engine: "libsql", host: "app-me.turso.io", port: 443}],
+      buckets: [{provider: "tigris", name: "files", bucket: "files", endpoint: "https://fly.storage.tigris.dev"}]}}' > "$p/rec.json"
+  in_dir "$p" "$CLI" state record push deno-deploy "$p/rec.json" >/dev/null 2>&1
+  out="$(dns_in "$p" graph --json 2>/dev/null)" || { echo "graph failed" >&2; return 1; }
+  equals "$(jq -r '[.nodes[] | select(.type == "database" or .type == "bucket" or .type == "mesh" or .type == "record" or .type == "zone") | "\(.type):\(.id)"] | sort | join(" ")' <<< "$out")" "bucket:tigris-files database:turso-app mesh:mesh-oci record:dns-desec-api zone:myapp.dedyn.io"
+  equals "$(jq -r '.edges[] | select(.from == "dns-desec-api") | "\(.kind)>\(.to)"' <<< "$out" | sort | tr '\n' ' ')" "in-zone>myapp.dedyn.io points-to>oci-main "
+  equals "$(jq -r '.edges[] | select(.to == "mesh-oci") | "\(.from) \(.kind)"' <<< "$out")" "oci-main member-of"
+  equals "$(jq -r '.nodes[] | select(.id == "turso-app") | "\(.provider) \(.settings.engine) \(.settings.port)"' <<< "$out")" "turso libsql 443"
+  contains "$(dns_in "$p" graph 2>&1)" "record dns-desec-api (desec)"
 }
 
 # freelunch backup runs the backup unit now and follows it; backup list prints the snapshots.
@@ -6783,6 +6805,26 @@ test_ci_init_pipeline_fills_in_the_template() {
   fails grep -q 'secrets.FREELUNCH_BUNDLE' "$w"
   if python3 -c 'import yaml' 2>/dev/null; then python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$w"; fi
   if command -v actionlint >/dev/null; then actionlint "$w"; fi
+}
+
+# With a state store the last result is kept there: a fresh checkout (no .freelunch/watch.state) tells only what is new
+test_watch_keeps_its_last_result_in_the_state_store() {
+  local p="$WORK/watch-store" soon
+  watch_source >/dev/null
+  new_project "$p"
+  state_store "$p"
+  cp "$ROOT/providers/oci/stack/project.tfvars.example" "$p/.freelunch/oci/terraform.tfvars"
+  soon="$(date -u -v+10d +%Y-%m-%d 2>/dev/null || date -u -d '+10 days' +%Y-%m-%d)"
+  printf 'credit_expires_gcp = "%s"\n' "$soon" > "$p/.freelunch/billing.tfvars"
+  : > "$p/fake.log"
+  FREELUNCH_NOTIFY=https://ntfy.sh/topic watch_in "$p" >/dev/null 2>&1
+  grep -q '^post https://ntfy.sh/topic \[text/plain\] .*watch: new: ' "$p/fake.log" || { echo "the first run should tell"; return 1; }
+  # a fresh checkout: the local file is gone, the store has it
+  rm -f "$p/.freelunch/watch.state"
+  : > "$p/fake.log"
+  FREELUNCH_NOTIFY=https://ntfy.sh/topic watch_in "$p" >/dev/null 2>&1
+  fails grep -q '^post ' "$p/fake.log"
+  exists "$p/.freelunch/watch.state"
 }
 
 # --jobs=watch writes the watch workflow alone, with the secrets the project's checks use, one by one; ci needs names what is missing

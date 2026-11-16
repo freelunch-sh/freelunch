@@ -103,7 +103,7 @@ locals {
   }
 
   # The node types a provider can make, for a canvas's palette: provider.yaml's node_types, else what its layer and category say.
-  node_types_known = ["host", "platform", "app", "database", "bucket", "service", "tunnel", "route", "zone", "mesh"]
+  node_types_known = ["host", "platform", "app", "database", "bucket", "service", "tunnel", "route", "zone", "mesh", "record"]
   default_node_types = {
     host     = ["host"]
     platform = ["platform"]
@@ -114,7 +114,7 @@ locals {
     observability = ["service"]
     secrets       = ["service"]
     messaging     = ["service"]
-    dns           = ["zone"]
+    dns           = ["zone", "record"]
     networking    = ["mesh"]
     edge          = ["tunnel", "route", "zone"]
   }

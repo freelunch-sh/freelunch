@@ -236,7 +236,7 @@ is an indented tree. It reads state and tfvars and asks nothing. `--live` adds e
 ```
 
 - **`format`** is the version of this document (`1`); a reader that doesn't know it should stop.
-- **Node `type`s** are `host`, `platform`, `app`, `database`, `bucket`, `service`, `tunnel`, `route` and `zone`. The `id` of a node
+- **Node `type`s** are `host`, `platform`, `app`, `database`, `bucket`, `service`, `tunnel`, `route`, `zone`, `mesh` and `record`. The `id` of a node
   is the one `freelunch check --json` uses (`oci-main`, `api`, `neon-main`, `tunnel-oci-main`); a route's id is its hostname and
   the zone's is its name. `target` is where it runs (an app's host, a tunnel's host, a route's host).
 - **`settings`** are what the tfvars and the state say, never a secret. A provider's credentials are named in **`secrets`**, each
@@ -250,8 +250,10 @@ is an indented tree. It reads state and tfvars and asks nothing. `--live` adds e
 - **`--live`** adds `health` to a node that `check` asks: `exists`, `reachable`, `healthy`, `reason`, and for a host its
   `disk_percent` and memory numbers, and for an app `backup_age_hours`. A canvas polls this to colour its blocks.
 
-Not in the document yet: DNS records of a `dns` provider, mesh nodes, and databases, buckets and services that an `api` or
-`cli` engine made (they live in the state store's records, not in a state file).
+The live document also holds `mesh` nodes (`mesh-<provider>`, with a `member-of` edge from each host on it), `record` nodes for the
+DNS records a `dns` provider keeps (`dns-<provider>-<name>`, with a `points-to` edge to the host it names and an `in-zone` edge to its
+zone), and the databases, buckets and services of `api` and `cli` engines, read from their records in the state store. `graph apply`
+writes none of these: it writes the apps, shared hosts, zone and routes of `--config`.
 
 ### What the project declares, and writing a drawing back
 

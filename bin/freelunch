@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2030,SC2031 # watch_field sets PROVIDERS_DIR in a subshell on purpose, to read another checkout's catalogue
 # freelunch: provision free-tier infrastructure per provider, combine it into a hybrid
 # inventory, and deploy Compose apps to the hosts.
 set -euo pipefail
@@ -3859,7 +3860,7 @@ graph_validate() {
     [[ -n "$n" ]] || continue
     id="$(jq -r '.id' <<< "$n")"; type="$(jq -r '.type' <<< "$n")"; provider="$(jq -r '.provider // empty' <<< "$n")"
     reason=""
-    case "$type" in host|platform|app|database|bucket|service|tunnel|route|zone|mesh) ;; *) reason="'$type' is not a node type (host, platform, app, database, bucket, service, tunnel, route, zone, mesh)" ;; esac
+    case "$type" in host|platform|app|database|bucket|service|tunnel|route|zone|mesh|record) ;; *) reason="'$type' is not a node type (host, platform, app, database, bucket, service, tunnel, route, zone, mesh, record)" ;; esac
     if [[ -z "$reason" && -n "$provider" && ! -f "$PROVIDERS_DIR/$provider/provider.yaml" ]]; then reason="the catalogue has no provider '$provider'"; fi
     if [[ -z "$reason" && -n "$provider" ]]; then
       layer="$(meta "$provider" layer)"
@@ -3909,8 +3910,21 @@ provider_secrets_json() {
 }
 
 # graph_document <live 0|1>: the document, on stdout
+# graph_output_nodes <nodes JSON> <outputs JSON>: the nodes plus the databases, buckets and services of a stack's outputs
+# (each output is {"value": [...]}, as in a state file)
+graph_output_nodes() {
+  jq -c --argjson o "$2" '. + [
+      ($o.databases.value[]? | {id: "\(.provider)-\(.name)", type: "database", provider: .provider, target: null,
+        settings: {engine: (.engine // null), host: (.host // null), port: (.port // null), database: (.database // null), region: (.region // null)}, status: "deployed"}),
+      ($o.buckets.value[]? | {id: "\(.provider)-\(.name)", type: "bucket", provider: .provider, target: null,
+        settings: {bucket: .bucket, endpoint: .endpoint, region: (.region // null)}, status: "deployed"}),
+      ($o.services.value[]? | {id: "\(.provider)-\(.name)", type: "service", provider: .provider, target: null,
+        settings: {kind: (.kind // null), host: (.host // null), port: (.port // null)}, status: "deployed"})
+    ]' <<< "$1"
+}
+
 graph_document() {
-  local apps_file tunnel_state="" inv state_arg=() root p state nodes stacks='[]' routes='[]' zone ps providers secrets rows
+  local apps_file tunnel_state="" inv state_arg=() root p state nodes gstacks='[]' routes='[]' zone ps providers secrets rows meshes='[]' rec dzone drows
   apps_file="$(state_root)/apps.tfvars"
   [[ -f "$apps_file" ]] || die "graph: no $(rel "$apps_file"): the apps come from there"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
@@ -3919,25 +3933,41 @@ graph_document() {
   [[ -z "$PROJECT" ]] || state_arg=(-state="$(hybrid_state)")
   inv="$(tf_for hybrid "$ROOT/hybrid" output ${state_arg[@]+"${state_arg[@]}"} -json hosts 2>/dev/null || echo '[]')"
   root="$(dirname "$PROJECT")"
-  # databases, buckets and services the deployed stacks made
+  # databases, buckets and services the deployed gstacks made, and what the api and cli engines recorded in the state store
   for p in $(all_providers); do
     [[ -d "$(stack_dir "$p")" ]] && is_deployed "$p" || continue
     state="$(config_dir "$p")/terraform.tfstate"
-    stacks="$(jq -c --arg p "$p" --slurpfile s "$state" '. + [
-      ($s[0].outputs.databases.value[]? | {id: "\(.provider)-\(.name)", type: "database", provider: .provider, target: null,
-        settings: {engine: (.engine // null), host: (.host // null), port: (.port // null), database: (.database // null), region: (.region // null)}, status: "deployed"}),
-      ($s[0].outputs.buckets.value[]? | {id: "\(.provider)-\(.name)", type: "bucket", provider: .provider, target: null,
-        settings: {bucket: .bucket, endpoint: .endpoint, region: (.region // null)}, status: "deployed"}),
-      ($s[0].outputs.services.value[]? | {id: "\(.provider)-\(.name)", type: "service", provider: .provider, target: null,
-        settings: {kind: (.kind // null), host: (.host // null), port: (.port // null)}, status: "deployed"})
-    ]' <<< "$stacks")"
+    gstacks="$(graph_output_nodes "$gstacks" "$(jq -c '.outputs' "$state")")"
+    if jq -e '.outputs.mesh' "$state" >/dev/null 2>&1; then
+      gstacks="$(jq -c --arg p "$p" '. + [{id: "mesh-\($p)", type: "mesh", provider: $p, target: null, settings: {}, status: "deployed"}]' <<< "$gstacks")"
+      meshes="$(jq -c --arg p "$p" --slurpfile s "$state" '. + [($s[0].outputs.mesh.value | to_entries[] | {from: .key, to: "mesh-\($p)", kind: "member-of", medium: (.value.address // "mesh")})]' <<< "$meshes")"
+    fi
+  done
+  if [[ -n "$(state_config)" && $STATE_ON -eq 1 ]]; then
+    for p in $(cd "$PROVIDERS_DIR" && ls -d -- */ 2>/dev/null | sed 's|/$||' | grep -v '^_'); do
+      [[ -d "$PROJECT/$p" ]] && { [[ -f "$PROVIDERS_DIR/$p/api.yaml" || -f "$PROVIDERS_DIR/$p/cli.yaml" ]]; } || continue
+      rec="$(record_pull "$p")"
+      [[ -n "$rec" ]] && jq -e '.outputs' <<< "$rec" >/dev/null 2>&1 || continue
+      gstacks="$(graph_output_nodes "$gstacks" "$(jq -c '.outputs | with_entries(.value |= {value: .})' <<< "$rec")")"
+    done
+  fi
+  # DNS records a dns provider keeps for the project, each pointing at a host or a value
+  for p in $(dns_providers); do
+    dns_load "$p"
+    dns_has "$p" mode && continue
+    dzone="$(tfvar "$(config_dir "$p")/terraform.tfvars" zone)"
+    drows="$(tfvars_map "$(config_dir "$p")/terraform.tfvars" records host type value ttl 2>/dev/null | jq -R -s -c --arg p "$p" --arg z "$dzone" '
+      split("\n") | map(select(. != "") | split("\t") | {id: "dns-\($p)-\(.[0])", type: "record", provider: $p, target: (if (.[1] // "") == "" then null else .[1] end),
+        settings: ({name: .[0], zone: $z, record_type: ((.[2] // "") | if . == "" then "A" else . end), value: (.[3] // ""), ttl: ((.[4] // "") | tonumber? // null)} | with_entries(select(.value != null and .value != ""))), status: "planned"})')"
+    gstacks="$(jq -c --argjson d "$drows" --arg p "$p" --arg z "$dzone" '. + $d + (if $z != "" then [{id: $z, type: "zone", provider: $p, target: null, settings: {}, status: "deployed"}] else [] end)' <<< "$gstacks")"
+    meshes="$(jq -c --argjson d "$drows" --arg z "$dzone" '. + [$d[] | select(.target != null) | {from: .id, to: .target, kind: "points-to", medium: "dns"}] + (if $z != "" then [$d[] | {from: .id, to: $z, kind: "in-zone", medium: null}] else [] end)' <<< "$meshes")"
   done
   # the Cloudflare tunnels and routes, from its state and its tfvars
   zone="$(tfvar "$(config_dir cloudflare)/terraform.tfvars" zone 2>/dev/null || true)"
   if [[ -n "$tunnel_state" ]]; then
     routes="$(jq -c '(.outputs.routes.value // {}) | to_entries | map({hostname: .key, host: .value.host, service: .value.service, protected: (.value.protected // false)})' "$tunnel_state")"
   fi
-  nodes="$(jq -n --argjson inv "$inv" --argjson stacks "$stacks" --argjson routes "$routes" --arg zone "$zone" --arg root "$root" \
+  nodes="$(jq -n --argjson inv "$inv" --argjson gstacks "$gstacks" --argjson routes "$routes" --arg zone "$zone" --arg root "$root" \
     --slurpfile t "$TMP/targets.json" --slurpfile g "$TMP/graph.json" --slurpfile pl "$TMP/platforms.json" \
     --slurpfile tun "${tunnel_state:-/dev/null}" '
     ($t[0]) as $T | ($g[0]) as $G | ($pl[0] // {}) as $P | (($tun[0].outputs.tunnels.value) // {}) as $TU
@@ -3954,7 +3984,7 @@ graph_document() {
                       pre_deploy: (.value.pre_deploy // null), post_deploy: (.value.post_deploy // null),
                       backup: (.value.backup // null), memory_mb: (.value.memory_mb // null)} | with_entries(select(.value != null and .value != []))),
           status: "deployed"} ]
-    + $stacks
+    + $gstacks
     + [ $TU | to_entries[] | {id: "tunnel-\(.key)", type: "tunnel", provider: "cloudflare", target: .key, settings: {}, status: "deployed"} ]
     + [ $routes[] | {id: .hostname, type: "route", provider: "cloudflare", target: .host, settings: {service: .service, protected: .protected}, status: "deployed"} ]
     + (if $zone != "" then [{id: $zone, type: "zone", provider: "cloudflare", target: null, settings: {}, status: "deployed"}] else [] end)
@@ -3969,7 +3999,7 @@ graph_document() {
     jq -e 'type == "array"' <<< "$rows" >/dev/null 2>&1 || rows='[]'
     nodes="$(jq -c --argjson rows "$rows" 'map(. as $n | ($rows | map(select(.node == $n.id)) | first) as $r | if $r == null then . else . + {health: ($r | del(.node, .type))} end)' <<< "$nodes")"
   fi
-  jq -n --argjson nodes "$nodes" --slurpfile t "$TMP/targets.json" --slurpfile g "$TMP/graph.json" --slurpfile e "$TMP/edges.json" \
+  jq -n --argjson nodes "$nodes" --argjson extra "$meshes" --slurpfile t "$TMP/targets.json" --slurpfile g "$TMP/graph.json" --slurpfile e "$TMP/edges.json" \
     --argjson routes "$routes" --slurpfile tun "${tunnel_state:-/dev/null}" --arg live "$1" '
     ($t[0]) as $T | ($g[0]) as $G | ($e[0] // []) as $E | ($nodes | map({key: .id, value: .type}) | from_entries) as $types
     | { format: 1, live: ($live == "1"), nodes: $nodes,
@@ -3984,6 +4014,7 @@ graph_document() {
         + [ $routes[] | {from: .hostname, to: ("tunnel-" + .host), kind: "route", medium: "cloudflare tunnel"} ]
         + [ $routes[] | .hostname as $h | .host as $host | ($T[$host].apps // {} | keys[]) as $a
             | select($G[$a].port != null and ((.service | endswith(":" + ($G[$a].port | tostring))) )) | {from: $h, to: $a, kind: "route", medium: "cloudflare tunnel"} ]
+        + $extra
         ) | unique_by([.from, .to, .kind]) | map(select(.to as $x | ($types[$x] != null))) | map(select(.from as $x | ($types[$x] != null))) ) }'
 }
 
@@ -3999,7 +4030,7 @@ graph_text() {
       ($d.edges[] | select(.kind == "runs-on" and .to == $h.id) | .from as $f | "  " + line($N[$f]),
         ($d.edges[] | select(.from == $f and (.kind == "needs" or .kind == "database" or .kind == "bucket")) | "      needs \(.to) (\(.kind)\(if .medium then ", " + .medium else "" end))"))' <<< "$1"
   jq -r '. as $d | ($d.nodes | map({key: .id, value: .}) | from_entries) as $N
-    | $d.nodes[] | select(.type == "database" or .type == "bucket" or .type == "service" or .type == "route" or .type == "zone")
+    | $d.nodes[] | select(.type == "database" or .type == "bucket" or .type == "service" or .type == "route" or .type == "zone" or .type == "mesh" or .type == "record")
     | "\(.type) \(.id)" + (if .provider then " (\(.provider))" else "" end)
       + (if .health then (if .health.healthy == true then "  ok" elif .health.healthy == false then "  NOT HEALTHY: \(.health.reason)" else "  not asked" end) else "" end)' <<< "$1"
 }
@@ -4068,7 +4099,7 @@ $bad"
 
 # graph_check <file|->: the validation of graph apply without writing, as JSON, with what fit and the room of a shared host say
 graph_check() {
-  local doc checks ok=true apps='[]' app id host mem prov compose vols root verdict hosts_json
+  local doc checks ok=true apps='[]' app id host mem prov compose vols root verdict
   doc="$(graph_read "${1:--}")"
   checks="$(graph_validate "$doc")" || ok=false
   root="$(dirname "$PROJECT")"
@@ -4085,10 +4116,6 @@ graph_check() {
     if [[ -n "$host" && -f "$PROVIDERS_DIR/$prov/provider.yaml" ]]; then verdict="$(fit_provider "$prov" "$mem" "$vols" "")"; else verdict="unknown: the host isn't a provider's"; fi
     apps="$(jq -c --arg id "$id" --arg v "$verdict" --arg m "$mem" '. + [{id: $id, memory_mb: ($m | tonumber? // null), fit: $v}]' <<< "$apps")"
   done < <(graph_fit_rows "$doc")
-  # a shared host: what its apps here reserve against what the machine gives a free workload (the other projects on it are only
-  # known to the host: deploy --dry-run asks it)
-  hosts_json="$(jq -c --argjson apps "$apps" '[.nodes[]? | select(.type == "host" and .settings.shared == true) | .id as $h
-    | {host: $h, reserved_mb: ([.. | objects | select(.type? == "app" and .target? == $h)] | length)}]' <<< "$doc")"
   jq -n --argjson ok "$ok" --argjson checks "$checks" --argjson apps "$apps" '{format: 1, ok: $ok, checks: $checks, apps: $apps}'
   [[ "$ok" == true ]]
 }
@@ -4295,7 +4322,7 @@ fit_provider() {
 
 # cmd_fit [dir]
 cmd_fit() {
-  local dir="${1:-.}" compose="" f mem vols=0 images="" image plats="" one p rows="" verdict rank awake name n
+  local dir="${1:-.}" compose="" f mem vols=0 images="" image plats="" one p rows="" verdict rank awake name n card ver c v
   [[ $# -le 1 ]] || die "usage: freelunch fit [dir]"
   [[ -d "$dir" ]] || die "fit: $dir isn't a folder"
   for f in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do [[ -f "$dir/$f" ]] && { compose="$dir/$f"; break; }; done
@@ -4321,10 +4348,12 @@ cmd_fit() {
     verdict="$(fit_provider "$p" "$mem" "$vols" "$plats")"
     case "$verdict" in fits) rank=0 ;; unknown*) rank=1 ;; *) rank=2 ;; esac
     case "$(meta "$p" always_on)" in yes) awake="0 always on" ;; no) awake="2 $(sleeps_note "$p" "" | sed 's/^sleeps/sleeps/')" ;; *) awake="1 on or off isn't recorded" ;; esac
-    rows="$rows$rank|${awake%% *}|$p|$(meta "$p" layer)|$verdict|${awake#* }|$(meta "$p" card_required)|$(meta "$p" verified)"$'\n'
+    card="$(meta "$p" card_required)"; ver="$(meta "$p" verified)"
+    # among equals: no card needed first, then what has run live, then by name
+    rows="$rows$rank|${awake%% *}|$([[ "$card" == no ]] && echo 0 || echo 1)|$([[ -n "$ver" ]] && echo 0 || echo 1)|$p|$(meta "$p" layer)|$verdict|${awake#* }|$card|$ver"$'\n'
   done
   printf '  %-12s %-9s %-9s %-26s %-6s %-9s %s\n' provider layer fits "always on" card verified why
-  printf '%s' "$rows" | sort -t'|' -k1,1n -k2,2n -k3,3 | while IFS='|' read -r rank n name layer verdict awake card verified; do
+  printf '%s' "$rows" | sort -t'|' -k1,1n -k2,2n -k3,3n -k4,4n -k5,5 | while IFS='|' read -r rank n c v name layer verdict awake card verified; do
     printf '  %-12s %-9s %-9s %-26s %-6s %-9s %s\n' "$name" "$layer" "${verdict%%:*}" "$awake" "$card" "${verified:--}" "$([[ "$verdict" == *:* ]] && echo "${verdict#*: }" || true)"
   done
 }
@@ -4554,6 +4583,13 @@ cmd_watch() {
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   : > "$TMP/watch.lines"
   state="$PROJECT/watch.state"
+  # with a state store the last result lives there too, so a CI run (a fresh checkout) tells only what is new
+  local rec="" use_store=0
+  if [[ -n "$(state_config)" ]]; then
+    use_store=1
+    rec="$(record_pull watch-state 2>/dev/null || true)"
+    if [[ -n "$rec" ]] && jq -e '.lines' <<< "$rec" >/dev/null 2>&1; then jq -r '.lines[]' <<< "$rec" > "$state"; fi
+  fi
   [[ "$WATCH_JSON" -eq 1 ]] || { echo "freelunch watch ($(rel "$PROJECT"))"; echo; }
   watch_free_tier
   watch_expiry
@@ -4588,6 +4624,11 @@ cmd_watch() {
   fi
   grep -v '^ok|' "$TMP/watch.lines" > "$state.new" || true
   mv "$state.new" "$state"
+  if [[ $use_store -eq 1 ]]; then
+    [[ -n "$rec" ]] || rec='{}'
+    jq -c --slurpfile l <(jq -R -s -c 'split("\n") | map(select(. != ""))' "$state") '.lines = $l[0]' <<< "$rec" > "$TMP/watch.record"
+    record_push watch-state "$TMP/watch.record" >/dev/null 2>&1 || log "watch: couldn't copy the result to the state store (it stays in $(rel "$state"))"
+  fi
   total="$(grep -vc '^ok|' "$TMP/watch.lines" || true)"
   if [[ "$WATCH_JSON" -eq 1 ]]; then
     jq -R -s -c --argjson strict "$strict" 'split("\n") | map(select(. != "") | split("|") | {level: .[0], check: .[1], message: (.[2:] | join("|"))})' "$TMP/watch.lines" | jq .
@@ -13690,7 +13731,7 @@ main() {
     host)                 cmd_host "$@" ;;
     watch)                resolve_env_refs; cmd_watch "$@" ;;
     next)                 cmd_next "$@" ;;
-    graph)                resolve_state_refs; cmd_graph "$@" ;;
+    graph)                resolve_state_refs; case "${1:-}" in apply|check) ;; *) [[ " $* " == *" --config "* ]] || sync_start status ;; esac; cmd_graph "$@" ;;
     fit)                  cmd_fit "$@" ;;
     down)                 resolve_env_refs; resolve_state_refs; sync_start destroy; cmd_down "$@" ;;
     restore)              cmd_restore "$@" ;;

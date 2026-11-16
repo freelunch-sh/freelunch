@@ -34,3 +34,9 @@ names any secret it lacks. A run in CI starts without the last run's state, so i
 A budget alert (`budget_alert_emails` on OCI, the budgets of the other clouds) reports a charge after it happens; it does not
 stop one. `watch` finds a bill the same way, after the fact. Nothing in this list prevents a charge on a pay-as-you-go
 account, except quotas that forbid what is not free (see `doctor`, and the quota guard when it exists).
+
+## Where the last result is kept
+
+`.freelunch/watch.state` holds what the last run found, so that a run tells only what is new and what cleared. A project with a
+state store also keeps it there (the record `watch-state`): a CI run starts from a fresh checkout, reads the last result from the
+store, and pushes the new one when it is done.

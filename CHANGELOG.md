@@ -20,6 +20,7 @@ release can change commands and the project layout.
   compute family but the Always Free Arm and micro amounts (from the catalogue), so OCI refuses a launch outside them; `doctor` says
   whether it is on. Off by default, and not run against a tenancy yet. `ssh-add` no longer holds `doctor` up when an agent asks for
   a fingerprint.
+- **`watch` keeps its last result in the state store** when the project has one, so a CI run (a fresh checkout) tells only what is new. The live `graph` also holds mesh nodes, DNS records and what api and cli engines recorded; Oracle, AWS, Azure and GCP say they are always on; the OCI module tests run against the provider's current schema.
 - **`freelunch graph`** prints the whole project as one document (`"format": 1`): hosts, platforms, apps, databases,
   buckets, services, tunnels, routes and what connects them, with the ids `check` uses and each provider's secrets named
   (set or not) and never shown; `--live` adds each node's health, `--config` reads what `apps.tfvars` and the Cloudflare

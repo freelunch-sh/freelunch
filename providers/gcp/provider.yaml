@@ -5,6 +5,7 @@ display_name: "Google Cloud"
 category: hyperscalers
 status: ready
 layer: host
+always_on: "yes"                # a virtual machine stays on until stopped (it can be reclaimed: see the provider notes)
 free_memory_mb: 1024             # e2-micro has 1 GB RAM (this file's notes, last_verified)
 arch: amd64
 terraform_provider: "hashicorp/google"

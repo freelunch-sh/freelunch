@@ -5,6 +5,7 @@ display_name: "Microsoft Azure"
 category: hyperscalers
 status: ready
 layer: host
+always_on: "yes"                # a virtual machine stays on until stopped (it can be reclaimed: see the provider notes)
 free_memory_mb: 1024           # each free size has 1 GiB (limits.compute.free_sizes below)
 arch: amd64
 terraform_provider: "hashicorp/azurerm"
