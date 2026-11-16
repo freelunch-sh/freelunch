@@ -45,7 +45,7 @@ run "invalid_provider_yaml_is_rejected" {
     providers_dir = "tests/fixtures/invalid"
   }
 
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "one_recommended_provider_per_category" {
@@ -55,7 +55,7 @@ run "one_recommended_provider_per_category" {
     providers_dir = "tests/fixtures/two-recommended"
   }
 
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "unknown_behavior_is_rejected" {
@@ -65,7 +65,7 @@ run "unknown_behavior_is_rejected" {
     providers_dir = "tests/fixtures/bad-behavior"
   }
 
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "engine_jobs_and_verified_are_shown" {
@@ -89,49 +89,49 @@ run "engine_jobs_and_verified_are_shown" {
 run "unknown_engine_is_rejected" {
   command = plan
   variables { providers_dir = "tests/fixtures/bad-engine" }
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "unknown_job_is_rejected" {
   command = plan
   variables { providers_dir = "tests/fixtures/bad-jobs" }
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "unknown_verified_is_rejected" {
   command = plan
   variables { providers_dir = "tests/fixtures/bad-verified" }
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "tofu_engine_needs_a_stack" {
   command = plan
   variables { providers_dir = "tests/fixtures/no-stack" }
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "dns_engine_needs_a_dns_sh" {
   command = plan
   variables { providers_dir = "tests/fixtures/no-dns-sh" }
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "ci_engine_needs_a_pipeline_template" {
   command = plan
   variables { providers_dir = "tests/fixtures/no-pipeline-tpl" }
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "registry_engine_needs_a_registry" {
   command = plan
   variables { providers_dir = "tests/fixtures/no-registry" }
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "api_engine_needs_an_api_yaml" {
   command = plan
   variables { providers_dir = "tests/fixtures/no-api-yaml" }
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "api_and_guided_engines_render" {
@@ -167,25 +167,25 @@ run "always_on_is_shown" {
 run "always_on_is_yes_or_no" {
   command = plan
   variables { providers_dir = "tests/fixtures/bad-always-on" }
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "sleeps_after_minutes_goes_with_always_on_no" {
   command = plan
   variables { providers_dir = "tests/fixtures/bad-sleeps" }
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "sleeps_after_minutes_is_a_number" {
   command = plan
   variables { providers_dir = "tests/fixtures/bad-sleeps-text" }
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "an_idle_rule_has_a_percent_and_days" {
   command = plan
   variables { providers_dir = "tests/fixtures/bad-idle" }
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "free_memory_and_volumes_are_accepted" {
@@ -201,11 +201,42 @@ run "free_memory_and_volumes_are_accepted" {
 run "free_memory_is_a_number" {
   command = plan
   variables { providers_dir = "tests/fixtures/bad-free-memory" }
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }
 
 run "volumes_is_yes_or_no" {
   command = plan
   variables { providers_dir = "tests/fixtures/bad-volumes" }
-  expect_failures = [output.checklist, output.stub_readmes]
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
+}
+
+run "the_palette_says_what_each_provider_can_make" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/valid" }
+
+  assert {
+    condition     = length(output.palette) == 2 && output.palette[0].provider == "alpha" && output.palette[0].engine == "tofu" && output.palette[0].status == "ready"
+    error_message = "One entry per provider, with its engine and status."
+  }
+
+  assert {
+    condition     = output.palette[1].provider == "beta" && length(output.palette[1].node_types) == 1 && output.palette[1].node_types[0] == "database" && length(output.palette[0].node_types) == 1 && output.palette[0].node_types[0] == "host"
+    error_message = "A node type comes from the layer and category unless the provider says (a host makes a host, a database provider a database)."
+  }
+}
+
+run "the_palette_names_secrets_and_free_facts" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/sleepy" }
+
+  assert {
+    condition     = output.palette[0].always_on == "no" && output.palette[0].sleeps_after_minutes == 15 && length(output.palette[0].secrets) == 0
+    error_message = "always_on and sleeps_after_minutes are in the palette, and a provider with no secrets lists none."
+  }
+}
+
+run "a_node_type_is_one_the_graph_knows" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/bad-node-types" }
+  expect_failures = [output.checklist, output.stub_readmes, output.palette]
 }

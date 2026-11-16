@@ -20,6 +20,13 @@ release can change commands and the project layout.
   compute family but the Always Free Arm and micro amounts (from the catalogue), so OCI refuses a launch outside them; `doctor` says
   whether it is on. Off by default, and not run against a tenancy yet. `ssh-add` no longer holds `doctor` up when an agent asks for
   a fingerprint.
+- **`freelunch graph`** prints the whole project as one document (`"format": 1`): hosts, platforms, apps, databases,
+  buckets, services, tunnels, routes and what connects them, with the ids `check` uses and each provider's secrets named
+  (set or not) and never shown; `--live` adds each node's health, `--config` reads what `apps.tfvars` and the Cloudflare
+  routes declare. `graph apply <file|->` writes a document back as the same HCL (files only; it refuses an unknown format,
+  node type or provider, a secret value and an edge nothing connects; `--dry-run` shows a diff), `graph check` says the same
+  as JSON with what `fit` says of each app, and a canvas's layout stays in `.freelunch/canvas.json`. `catalog --json` is the
+  palette of providers, and `ci init --jobs=graph` publishes the live graph as an artifact and a summary table.
 - **`freelunch watch`** looks for what the free tier changes under a project: a provider's free tier that a newer release records
   differently, what expires within 30 days, a late or failed backup, a full disk, a bill, a machine Oracle may reclaim as idle,
   and tells `FREELUNCH_NOTIFY` only what is new. `ci init --jobs=watch` (and `--pipeline`) writes a weekly workflow. The catalogue

@@ -5,6 +5,7 @@ category: edge
 status: ready
 verified: live
 layer: glue
+node_types: [tunnel, route, zone, bucket]   # a tunnel per host, its routes, the zone, and R2 buckets
 terraform_provider: "cloudflare/cloudflare"
 iac: partner
 free_tier_type: always-free

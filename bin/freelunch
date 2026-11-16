@@ -215,6 +215,17 @@ Infrastructure:
   down [--discard-data]   Remove everything the project made: destroy all in reverse layer order behind one
                           confirmation that lists it, the project's place on a shared host, and a look at
                           what is left at the provider
+  graph [--json] [--live] [--config]
+                          The whole project as one document (docs/graph.md): hosts, platforms, apps,
+                          databases, buckets, services, tunnels, routes and what connects them. --live
+                          adds each node's health from the check probes, --config is what apps.tfvars
+                          and the Cloudflare routes declare, which is what a drawing edits
+  graph --json --out=<file>
+                          The same document into a file (what the graph workflow of ci init uses)
+  graph apply [--dry-run] <file|->
+                          Write a graph document into apps.tfvars and the Cloudflare tfvars (files only,
+                          nothing deployed); it refuses what it can't make. --dry-run shows a diff
+  graph check <file|->    The same validation as JSON, with what fit says of each app
   fit [dir]               Where the app in dir's compose.yaml can run for free: its memory limits, volumes
                           and the platforms of its images against what each ready host and platform
                           records; "unknown" where a provider doesn't say
@@ -3736,13 +3747,386 @@ usage_aliases() {
   done < <(project_aliases)
 }
 
+# --- the declared graph and graph apply -----------------------------------------------------
+# What a canvas edits is what the project *declares*: apps.tfvars (apps, shared hosts, project, targets) and the Cloudflare
+# routes and zone, not what is deployed. graph --config --json is that document (status "planned", no state read), and graph
+# apply writes one back as ordinary HCL: tofu would read a .tfvars.json too, but none of the readers in this CLI do (tfvar,
+# tfvars_map, the secret scan, ci secrets, setup), so a project with only JSON would read as empty, and with both forms the
+# later -var-file replaces the whole variable. See the answer in docs/enhancement-plan.md, section 10.
+
+# declared_json <apps.tfvars>: its project, hosts and apps as JSON, parsed by tofu itself (tofu console in deploy/, which needs
+# no provider), with the unset fields taken out
+declared_json() {
+  local tmp out
+  tmp="$(mktemp -d)"
+  ( cd "$ROOT/deploy" && TF_DATA_DIR="$tmp/.tf" "$TF" init -input=false >/dev/null 2>&1 ) || { rm -rf "$tmp"; return 1; }
+  out="$( cd "$ROOT/deploy" && echo 'jsonencode({project = var.project, hosts = var.hosts, apps = var.apps, jobs = var.jobs})' \
+    | TF_DATA_DIR="$tmp/.tf" "$TF" console -var-file="$1" -var config_dir=. -var inventory_state_path=/nonexistent 2>/dev/null | grep '^"' | tail -n1)" || { rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+  [[ -n "$out" ]] || return 1
+  jq -r 'fromjson' <<< "$out" | jq -c 'def clean: if type == "object" then with_entries(select(.value != null) | .value |= clean) | with_entries(select(.value != {} and .value != [])) elif type == "array" then map(clean) else . end; clean'
+}
+
+# graph_declared_document: the declared graph, from apps.tfvars and the cloudflare tfvars, as the document of format 1
+graph_declared_document() {
+  local file cf zone routes targets decl
+  file="$(state_root)/apps.tfvars"
+  [[ -f "$file" ]] || die "graph: no $(rel "$file"): the apps come from there"
+  need_tf
+  decl="$(declared_json "$file")" || die "graph: can't read $(rel "$file") (is it valid? freelunch deploy --dry-run says)"
+  cf="$(config_dir cloudflare)/terraform.tfvars"
+  zone=""; routes='[]'
+  if [[ -f "$cf" ]]; then
+    zone="$(tfvar "$cf" zone)"
+    routes="$(tfvars_map "$cf" routes app host port | jq -R -s -c 'split("\n") | map(select(. != "") | split("\t") | {hostname: .[0], app: (.[1] // ""), host: (.[2] // ""), port: (.[3] // "")})')"
+  fi
+  targets="$(tfvars_list "$file" targets | jq -R -s -c 'split("\n") | map(select(. != ""))')"
+  jq -n --argjson d "$decl" --argjson routes "$routes" --argjson targets "$targets" --arg zone "$zone" '
+    ($d.apps // {}) as $A | ($d.hosts // {}) as $H
+    | { format: 1, live: false, declared: true,
+        project: ($d.project // null),
+        targets: $targets,
+        nodes: (
+          [ $H | to_entries[] | select(.value.shared == true) | {id: .key, type: "host", provider: null, target: null, settings: .value, status: "planned"} ]
+        + [ $A | to_entries[] | {id: .key, type: "app", provider: null, target: (.value.host // null), settings: (.value | del(.host)), status: "planned"} ]
+        + [ $routes[] | {id: .hostname, type: "route", provider: "cloudflare", target: (if .host == "" then null else .host end),
+              settings: ({app: .app, port: (if .port == "" then null else (.port | tonumber) end)} | with_entries(select(.value != null and .value != ""))), status: "planned"} ]
+        + (if $zone != "" then [{id: $zone, type: "zone", provider: "cloudflare", target: null, settings: {}, status: "planned"}] else [] end)
+        ),
+        edges: (
+          [ $A | to_entries[] | select(.value.host != null) | {from: .key, to: .value.host, kind: "runs-on", medium: null} ]
+        + [ $A | to_entries[] | .key as $a | (.value.needs // [])[] | {from: $a, to: ., kind: "needs", medium: null} ]
+        + [ $A | to_entries[] | .key as $a | (.value.database // empty) | {from: $a, to: ., kind: "database", medium: null} ]
+        + [ $A | to_entries[] | .key as $a | (.value.bucket // empty) | {from: $a, to: ., kind: "bucket", medium: null} ]
+        + [ $routes[] | select(.app != "") | {from: .hostname, to: .app, kind: "route", medium: "cloudflare tunnel"} ]
+        ) | unique_by([.from, .to, .kind]) }
+    | .nodes |= sort_by(.id)
+    | ([.nodes[].id]) as $ids | .edges |= (map(select(.from as $f | .to as $t | ($ids | index($f)) != null and ($ids | index($t)) != null)) | sort_by([.from, .to, .kind]))'
+}
+
+# tfvars_list <file> <name>: the strings of a list variable on one line, `name = ["a", "b"]`, one a line
+tfvars_list() {
+  sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\\[\\(.*\\)\\].*/\\1/p" "$1" 2>/dev/null | head -n1 | tr ',' '\n' | sed 's/^[[:space:]]*"//; s/"[[:space:]]*$//' | grep -v '^$' || true
+}
+
+# the HCL of a value, in the one flat layout the readers handle: a string, number, bool, list on one line, an object on one line
+HCL_JQ='def key: if test("^[A-Za-z_][A-Za-z0-9_-]*$") then . else @json end;
+  def str: @json | gsub("\\$\\{"; "$${") | gsub("%\\{"; "%%{");
+  def h: if type == "object" then (if length == 0 then "{}" else "{ " + (to_entries | map((.key | key) + " = " + (.value | h)) | join(", ")) + " }" end)
+         elif type == "array" then "[" + (map(h) | join(", ")) + "]"
+         elif type == "string" then str
+         else tojson end;'
+
+# tfvars_replace <file> <name> <text>: the top-level `name = ...` of a tfvars file (a line, or a block to its closing bracket)
+# replaced by the text, or the text added at the end when the file has none; everything else stays as it is
+tfvars_replace() {
+  local file="$1" name="$2" text="$3" tmp
+  tmp="$(mktemp)"
+  [[ -f "$file" ]] || : > "$file"
+  TFV_TEXT="$text" awk -v name="$name" '
+    function depthof(l,   t) { t = l; sub(/#.*/, "", t); return gsub(/[{[]/, "&", t) - gsub(/[}\]]/, "&", t) }
+    skipping { d += depthof($0); if (d <= 0) skipping = 0; next }
+    $0 ~ "^[ \t]*" name "[ \t]*=" && !done { print ENVIRON["TFV_TEXT"]; done = 1; d = depthof($0); if (d > 0) skipping = 1; next }
+    { print }
+    END { if (!done) { if (NR > 0) print ""; print ENVIRON["TFV_TEXT"] } }' "$file" > "$tmp"
+  mv "$tmp" "$file"
+}
+
+# graph_blocks <document>: what graph apply writes, as JSON lines {path, name, text}: the apps.tfvars and cloudflare tfvars
+# assignments it manages (project, targets, hosts, apps; zone, routes)
+graph_blocks() {
+  jq -c "$HCL_JQ"'
+    def block($name; $m): $name + " = " + (if ($m | length) == 0 then "{}" else "{\n" + ($m | to_entries | sort_by(.key) | map("  " + (.key | key) + " = " + (.value | h)) | join("\n")) + "\n}" end);
+    . as $d | ($d.nodes // []) as $N
+    | ( if $d.project != null then [{path: "apps.tfvars", name: "project", text: ("project = " + ($d.project | str))}] else [] end )
+    + ( if ($d.targets // []) | length > 0 then [{path: "apps.tfvars", name: "targets", text: ("targets = " + ($d.targets | h))}] else [] end )
+    + [ {path: "apps.tfvars", name: "hosts", text: block("hosts"; ($N | map(select(.type == "host" and .settings.shared == true)) | map({key: .id, value: .settings}) | from_entries))} ]
+    + [ {path: "apps.tfvars", name: "apps", text: block("apps"; ($N | map(select(.type == "app")) | map({key: .id, value: ((.settings // {}) + (if .target != null then {host: .target} else {} end))}) | from_entries))} ]
+    + ( ($N | map(select(.type == "zone")) | .[0].id // null) as $z | if $z != null then [{path: "cloudflare/terraform.tfvars", name: "zone", text: ("zone = " + ($z | str))}] else [] end )
+    + [ {path: "cloudflare/terraform.tfvars", name: "routes", text: block("routes"; ($N | map(select(.type == "route")) | map({key: .id, value: ((.settings // {}) + (if .target != null then {host: .target} else {} end))}) | from_entries))} ]
+    | .[]' <<< "$1"
+}
+
+# graph_validate <document>: a JSON list of {kind, id, ok, reason} for every node and edge; the exit status says whether all are ok
+graph_validate() {
+  local doc="$1" fmt rows type provider layer secrets id bad='[]' n
+  fmt="$(jq -r '.format // empty' <<< "$doc")"
+  [[ "$fmt" == 1 ]] || { jq -n --arg f "${fmt:-none}" '[{kind: "document", id: "format", ok: false, reason: "this freelunch reads format 1 documents, and this is format \($f)"}]'; return 1; }
+  # nodes: a known type, a provider the catalogue has, a type that goes with the provider's layer, and no secret value
+  rows="$(jq -c '.nodes[]? | {id, type, provider, settings: (.settings // {}), secrets: (.secrets // [])}' <<< "$doc")"
+  local out='[]' reason
+  while IFS= read -r n; do
+    [[ -n "$n" ]] || continue
+    id="$(jq -r '.id' <<< "$n")"; type="$(jq -r '.type' <<< "$n")"; provider="$(jq -r '.provider // empty' <<< "$n")"
+    reason=""
+    case "$type" in host|platform|app|database|bucket|service|tunnel|route|zone|mesh) ;; *) reason="'$type' is not a node type (host, platform, app, database, bucket, service, tunnel, route, zone, mesh)" ;; esac
+    if [[ -z "$reason" && -n "$provider" && ! -f "$PROVIDERS_DIR/$provider/provider.yaml" ]]; then reason="the catalogue has no provider '$provider'"; fi
+    if [[ -z "$reason" && -n "$provider" ]]; then
+      layer="$(meta "$provider" layer)"
+      if [[ "$type" == host && "$layer" != host ]] || [[ "$type" == platform && "$layer" != platform ]]; then reason="$provider is a $layer provider and can't make a $type"; fi
+    fi
+    if [[ -z "$reason" ]] && jq -e '[.settings | .. | objects | keys[] | select(test("(^|_)(token|secret|password|passphrase|api_key|private_key|access_key)($|_)"; "i"))] | length > 0' <<< "$n" >/dev/null 2>&1; then
+      reason="a setting looks like a secret value: secrets are named in the node's secrets, never carried"
+    fi
+    if [[ -z "$reason" ]] && jq -e 'any(.secrets[]?; has("value"))' <<< "$n" >/dev/null 2>&1; then reason="a secret has a value: secrets are named, never carried"; fi
+    out="$(jq -c --arg id "$id" --arg r "$reason" '. + [{kind: "node", id: $id, ok: ($r == ""), reason: (if $r == "" then null else $r end)}]' <<< "$out")"
+  done <<< "$rows"
+  # edges: both ends are nodes, and an app needing an app on another host has a route that reaches it
+  out="$(jq -c --argjson doc "$doc" '
+    ($doc.nodes | map({key: .id, value: .}) | from_entries) as $N
+    | . + [ $doc.edges[]? | . as $e | ($N[$e.from]) as $f | ($N[$e.to]) as $t
+        | {kind: "edge", id: "\($e.from) > \($e.to) (\($e.kind))",
+           ok: ($f != null and $t != null and ($e.kind != "needs" or $t.type != "app" or $f.target == $t.target or ($doc.edges | any(.kind == "route" and .to == $e.to)))),
+           reason: (if $f == null then "\($e.from) is not a node"
+                    elif $t == null then "\($e.to) is not a node"
+                    elif ($e.kind == "needs" and $t.type == "app" and $f.target != $t.target and (($doc.edges | any(.kind == "route" and .to == $e.to)) | not)) then "\($e.from) needs \($e.to) on another host, and nothing connects them: give \($e.to) a route, or put both on one host"
+                    else null end)} ]' <<< "$out")"
+  printf '%s\n' "$out"
+  jq -e 'all(.[]; .ok)' <<< "$out" >/dev/null
+}
+
+# graph_fit_rows <document>: what fit says of each app's memory limit against the provider of its host, where that is known
+graph_fit_rows() {
+  jq -c '.nodes[]? | select(.type == "app") | {id, memory_mb: (.settings.memory_mb // null), host: .target}' <<< "$1"
+}
+
+# --- graph ------------------------------------------------------------------------------
+# freelunch graph --json is the whole project as one document, for whatever draws it (docs/graph.md): every host, platform,
+# app, database, bucket, service, tunnel, route and the DNS zone as a node with the id `check --json` uses, and the edges
+# between them. It reads state and tfvars and asks nothing, unless --live adds each node's health from the check probes.
+
+# provider_secrets_json <provider>: [{secret, set}] for the credentials its provider.yaml names (never a value)
+provider_secrets_json() {
+  local list name out='[]'
+  list="$(meta "$1" secrets)"
+  [[ -n "$list" ]] || { echo '[]'; return 0; }
+  while IFS= read -r name; do
+    name="$(sed 's/^[[:space:]]*//; s/=.*$//' <<< "$name")"
+    [[ -n "$name" ]] || continue
+    out="$(jq -c --arg n "$name" --argjson set "$([[ -n "${!name:-}" ]] && echo true || echo false)" '. + [{secret: $n, set: $set}]' <<< "$out")"
+  done < <(tr ';' '\n' <<< "$list")
+  echo "$out"
+}
+
+# graph_document <live 0|1>: the document, on stdout
+graph_document() {
+  local apps_file tunnel_state="" inv state_arg=() root p state nodes stacks='[]' routes='[]' zone ps providers secrets rows
+  apps_file="$(state_root)/apps.tfvars"
+  [[ -f "$apps_file" ]] || die "graph: no $(rel "$apps_file"): the apps come from there"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1 || die "graph: apps.tfvars doesn't resolve against the inventory yet (freelunch deploy --dry-run says why)"
+  [[ -z "$PROJECT" ]] || state_arg=(-state="$(hybrid_state)")
+  inv="$(tf_for hybrid "$ROOT/hybrid" output ${state_arg[@]+"${state_arg[@]}"} -json hosts 2>/dev/null || echo '[]')"
+  root="$(dirname "$PROJECT")"
+  # databases, buckets and services the deployed stacks made
+  for p in $(all_providers); do
+    [[ -d "$(stack_dir "$p")" ]] && is_deployed "$p" || continue
+    state="$(config_dir "$p")/terraform.tfstate"
+    stacks="$(jq -c --arg p "$p" --slurpfile s "$state" '. + [
+      ($s[0].outputs.databases.value[]? | {id: "\(.provider)-\(.name)", type: "database", provider: .provider, target: null,
+        settings: {engine: (.engine // null), host: (.host // null), port: (.port // null), database: (.database // null), region: (.region // null)}, status: "deployed"}),
+      ($s[0].outputs.buckets.value[]? | {id: "\(.provider)-\(.name)", type: "bucket", provider: .provider, target: null,
+        settings: {bucket: .bucket, endpoint: .endpoint, region: (.region // null)}, status: "deployed"}),
+      ($s[0].outputs.services.value[]? | {id: "\(.provider)-\(.name)", type: "service", provider: .provider, target: null,
+        settings: {kind: (.kind // null), host: (.host // null), port: (.port // null)}, status: "deployed"})
+    ]' <<< "$stacks")"
+  done
+  # the Cloudflare tunnels and routes, from its state and its tfvars
+  zone="$(tfvar "$(config_dir cloudflare)/terraform.tfvars" zone 2>/dev/null || true)"
+  if [[ -n "$tunnel_state" ]]; then
+    routes="$(jq -c '(.outputs.routes.value // {}) | to_entries | map({hostname: .key, host: .value.host, service: .value.service, protected: (.value.protected // false)})' "$tunnel_state")"
+  fi
+  nodes="$(jq -n --argjson inv "$inv" --argjson stacks "$stacks" --argjson routes "$routes" --arg zone "$zone" --arg root "$root" \
+    --slurpfile t "$TMP/targets.json" --slurpfile g "$TMP/graph.json" --slurpfile pl "$TMP/platforms.json" \
+    --slurpfile tun "${tunnel_state:-/dev/null}" '
+    ($t[0]) as $T | ($g[0]) as $G | ($pl[0] // {}) as $P | (($tun[0].outputs.tunnels.value) // {}) as $TU
+    | def rel($p): if $p == null then null else ($p | ltrimstr($root + "/")) end;
+      [ $inv[] | {id: "\(.provider)-\(.name)", type: "host", provider: .provider, target: null,
+          settings: {address: (.public_ip // .private_ip // null), user: (.ssh_user // "ubuntu"), arch: (.arch // null)}, status: "deployed"} ]
+    + [ $T | to_entries[] | select(.value.kind == "platform") | {id: .key, type: "platform", provider: .value.provider, target: null,
+          settings: {region: ($P[.key].region // null), size: ($P[.key].size // null)}, status: "deployed"} ]
+    + [ $T | to_entries[] | select(.value.kind != "platform" and (.value.shared == true)) | {id: .key, type: "host", provider: (.value.provider // null), target: null,
+          settings: {address: .value.address, user: .value.user, arch: .value.arch, shared: true, project: .value.project}, status: "deployed"} ]
+    + [ $T | to_entries[] | .key as $h | .value.apps | to_entries[] | {id: .key, type: "app", provider: null, target: $h,
+          settings: ({compose: rel(.value.compose), env_file: rel(.value.env_file), port: ($G[.key].port // null), needs: ($G[.key].needs // []),
+                      bucket: .value.bucket, database: .value.database, service: (.value.service // null),
+                      pre_deploy: (.value.pre_deploy // null), post_deploy: (.value.post_deploy // null),
+                      backup: (.value.backup // null), memory_mb: (.value.memory_mb // null)} | with_entries(select(.value != null and .value != []))),
+          status: "deployed"} ]
+    + $stacks
+    + [ $TU | to_entries[] | {id: "tunnel-\(.key)", type: "tunnel", provider: "cloudflare", target: .key, settings: {}, status: "deployed"} ]
+    + [ $routes[] | {id: .hostname, type: "route", provider: "cloudflare", target: .host, settings: {service: .service, protected: .protected}, status: "deployed"} ]
+    + (if $zone != "" then [{id: $zone, type: "zone", provider: "cloudflare", target: null, settings: {}, status: "deployed"}] else [] end)
+    | unique_by(.id)')"
+  # what each provider needs: the names of its secrets, and whether they are set
+  for ps in $(jq -r '[.[].provider | select(. != null)] | unique[]' <<< "$nodes"); do
+    secrets="$(provider_secrets_json "$ps")"
+    nodes="$(jq -c --arg p "$ps" --argjson s "$secrets" 'map(if .provider == $p and ($s | length) > 0 then . + {secrets: $s} else . end)' <<< "$nodes")"
+  done
+  if [[ "$1" == 1 ]]; then
+    rows="$( ( cmd_probe --json ) 2>/dev/null || true)"
+    jq -e 'type == "array"' <<< "$rows" >/dev/null 2>&1 || rows='[]'
+    nodes="$(jq -c --argjson rows "$rows" 'map(. as $n | ($rows | map(select(.node == $n.id)) | first) as $r | if $r == null then . else . + {health: ($r | del(.node, .type))} end)' <<< "$nodes")"
+  fi
+  jq -n --argjson nodes "$nodes" --slurpfile t "$TMP/targets.json" --slurpfile g "$TMP/graph.json" --slurpfile e "$TMP/edges.json" \
+    --argjson routes "$routes" --slurpfile tun "${tunnel_state:-/dev/null}" --arg live "$1" '
+    ($t[0]) as $T | ($g[0]) as $G | ($e[0] // []) as $E | ($nodes | map({key: .id, value: .type}) | from_entries) as $types
+    | { format: 1, live: ($live == "1"), nodes: $nodes,
+        edges: ((
+          [ $T | to_entries[] | .key as $h | .value.apps | keys[] | {from: ., to: $h, kind: "runs-on", medium: null} ]
+        + [ $G | to_entries[] | .key as $a | (.value.needs // [])[] | . as $n
+            | {from: $a, to: $n,
+               kind: (if $T | to_entries | any(.value.apps[$a]?.database == $n) then "database"
+                      elif $T | to_entries | any(.value.apps[$a]?.bucket == $n) then "bucket" else "needs" end),
+               medium: ((($E | map(select(.from == $a and .to == $n)) | first | .medium) // (if $types[$n] == "app" then null else "environment" end)))} ]
+        + [ ($tun[0].outputs.tunnels.value // {}) | keys[] | {from: "tunnel-\(.)", to: ., kind: "runs-on", medium: null} ]
+        + [ $routes[] | {from: .hostname, to: ("tunnel-" + .host), kind: "route", medium: "cloudflare tunnel"} ]
+        + [ $routes[] | .hostname as $h | .host as $host | ($T[$host].apps // {} | keys[]) as $a
+            | select($G[$a].port != null and ((.service | endswith(":" + ($G[$a].port | tostring))) )) | {from: $h, to: $a, kind: "route", medium: "cloudflare tunnel"} ]
+        ) | unique_by([.from, .to, .kind]) | map(select(.to as $x | ($types[$x] != null))) | map(select(.from as $x | ($types[$x] != null))) ) }'
+}
+
+# graph_text <document>: the document as an indented tree: hosts and platforms, what runs on them and what the apps need,
+# then the databases, buckets, services, routes and the zone
+graph_text() {
+  jq -r '
+    . as $d | ($d.nodes | map({key: .id, value: .}) | from_entries) as $N
+    | def line($n): "\($n.type) \($n.id)" + (if $n.provider then " (\($n.provider))" else "" end)
+        + (if $n.health then (if $n.health.healthy == true then "  ok" elif $n.health.healthy == false then "  NOT HEALTHY: \($n.health.reason)" else "  not asked" end) else "" end);
+      ($d.nodes[] | select(.type == "host" or .type == "platform")) as $h
+    | line($h),
+      ($d.edges[] | select(.kind == "runs-on" and .to == $h.id) | .from as $f | "  " + line($N[$f]),
+        ($d.edges[] | select(.from == $f and (.kind == "needs" or .kind == "database" or .kind == "bucket")) | "      needs \(.to) (\(.kind)\(if .medium then ", " + .medium else "" end))"))' <<< "$1"
+  jq -r '. as $d | ($d.nodes | map({key: .id, value: .}) | from_entries) as $N
+    | $d.nodes[] | select(.type == "database" or .type == "bucket" or .type == "service" or .type == "route" or .type == "zone")
+    | "\(.type) \(.id)" + (if .provider then " (\(.provider))" else "" end)
+      + (if .health then (if .health.healthy == true then "  ok" elif .health.healthy == false then "  NOT HEALTHY: \(.health.reason)" else "  not asked" end) else "" end)' <<< "$1"
+}
+
+# graph_read <file|->: the document, from the file or stdin
+graph_read() {
+  local doc
+  if [[ "${1:--}" == - ]]; then doc="$(cat)"; else [[ -f "$1" ]] || die "graph: no file $1"; doc="$(cat "$1")"; fi
+  jq -e 'type == "object"' <<< "$doc" >/dev/null 2>&1 || die "graph: that is not a JSON document"
+  printf '%s' "$doc"
+}
+
+# graph_apply [--dry-run] <file|->: write the project's config from a graph document: files only, nothing deployed
+graph_apply() {
+  local dry=0 src="" doc checks bad line path name text target tmp changed=0 layout
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry=1 ;;
+      -) src="-" ;;
+      -*) die "graph apply: unknown option $1" ;;
+      *) [[ -z "$src" ]] || die "graph apply: one document"; src="$1" ;;
+    esac
+    shift
+  done
+  [[ -n "$src" ]] || die "usage: freelunch graph apply [--dry-run] <file|->"
+  [[ -n "$PROJECT" ]] || die "graph apply: run it in a project, where its .freelunch/ folder is (freelunch init makes one)"
+  doc="$(graph_read "$src")"
+  checks="$(graph_validate "$doc")" || {
+    bad="$(jq -r '.[] | select(.ok | not) | "  \(.kind) \(.id): \(.reason)"' <<< "$checks")"
+    die "graph apply: the document is refused, and nothing was written:
+$bad"
+  }
+  tmp="$(mktemp -d)"
+  while IFS= read -r line; do
+    path="$(jq -r '.path' <<< "$line")"; name="$(jq -r '.name' <<< "$line")"; text="$(jq -r '.text' <<< "$line")"
+    target="$PROJECT/$path"
+    # an empty routes block isn't written into a project that has no Cloudflare tfvars
+    [[ -f "$target" || "$text" != "routes = {}" ]] || continue
+    [[ -f "$target" || "$path" != cloudflare/* ]] || true
+    mkdir -p "$(dirname "$tmp/$path")"
+    [[ -f "$tmp/$path" ]] || { if [[ -f "$target" ]]; then cp "$target" "$tmp/$path"; else : > "$tmp/$path"; fi; }
+    tfvars_replace "$tmp/$path" "$name" "$text"
+  done < <(graph_blocks "$doc")
+  # the layout a canvas keeps apart from the config: positions of the nodes that exist, in .freelunch/canvas.json
+  layout="$(jq -c --slurpfile old "$( [[ -f "$PROJECT/canvas.json" ]] && echo "$PROJECT/canvas.json" || echo /dev/null)" \
+    '(.layout // {}) as $new | ([.nodes[]?.id]) as $ids | (($old[0] // {}) + $new) | with_entries(select(.key as $k | $ids | index($k)))' <<< "$doc")"
+  printf '%s\n' "$layout" | jq . > "$tmp/canvas.json"
+  for path in apps.tfvars cloudflare/terraform.tfvars canvas.json; do
+    [[ -f "$tmp/$path" ]] || continue
+    if [[ -f "$PROJECT/$path" ]] && cmp -s "$tmp/$path" "$PROJECT/$path"; then continue; fi
+    [[ "$path" != canvas.json || "$layout" != "{}" || -f "$PROJECT/canvas.json" ]] || continue
+    changed=1
+    if [[ $dry -eq 1 ]]; then
+      echo "--- $(rel "$PROJECT/$path")"
+      diff -u "$( [[ -f "$PROJECT/$path" ]] && echo "$PROJECT/$path" || echo /dev/null)" "$tmp/$path" | tail -n +3 || true
+    else
+      mkdir -p "$(dirname "$PROJECT/$path")"
+      cp "$tmp/$path" "$PROJECT/$path"
+      log "graph: wrote $(rel "$PROJECT/$path")"
+    fi
+  done
+  rm -rf "$tmp"
+  [[ $changed -eq 1 ]] || log "graph: the project already says what the document says"
+  [[ $dry -eq 0 ]] || log "graph: a dry run: nothing was written"
+}
+
+# graph_check <file|->: the validation of graph apply without writing, as JSON, with what fit and the room of a shared host say
+graph_check() {
+  local doc checks ok=true apps='[]' app id host mem prov compose vols root verdict hosts_json
+  doc="$(graph_read "${1:--}")"
+  checks="$(graph_validate "$doc")" || ok=false
+  root="$(dirname "$PROJECT")"
+  while IFS= read -r app; do
+    [[ -n "$app" ]] || continue
+    id="$(jq -r '.id' <<< "$app")"; host="$(jq -r '.host // empty' <<< "$app")"
+    compose="$(jq -r --arg a "$id" '.nodes[] | select(.id == $a) | .settings.compose // empty' <<< "$doc")"
+    mem=""; vols=0
+    if [[ -n "$compose" ]]; then
+      [[ "$compose" == /* ]] || compose="$PROJECT/$compose"
+      if [[ -f "$compose" ]]; then mem="$(compose_memory_mb "$compose")"; grep -Eq '^[[:space:]]*volumes:' "$compose" && vols=1; fi
+    fi
+    prov="${host%%-*}"
+    if [[ -n "$host" && -f "$PROVIDERS_DIR/$prov/provider.yaml" ]]; then verdict="$(fit_provider "$prov" "$mem" "$vols" "")"; else verdict="unknown: the host isn't a provider's"; fi
+    apps="$(jq -c --arg id "$id" --arg v "$verdict" --arg m "$mem" '. + [{id: $id, memory_mb: ($m | tonumber? // null), fit: $v}]' <<< "$apps")"
+  done < <(graph_fit_rows "$doc")
+  # a shared host: what its apps here reserve against what the machine gives a free workload (the other projects on it are only
+  # known to the host: deploy --dry-run asks it)
+  hosts_json="$(jq -c --argjson apps "$apps" '[.nodes[]? | select(.type == "host" and .settings.shared == true) | .id as $h
+    | {host: $h, reserved_mb: ([.. | objects | select(.type? == "app" and .target? == $h)] | length)}]' <<< "$doc")"
+  jq -n --argjson ok "$ok" --argjson checks "$checks" --argjson apps "$apps" '{format: 1, ok: $ok, checks: $checks, apps: $apps}'
+  [[ "$ok" == true ]]
+}
+
+cmd_graph() {
+  local json=0 live=0 config=0 a doc out=""
+  case "${1:-}" in
+    apply) shift; graph_apply "$@"; return ;;
+    check) shift; graph_check "$@"; return ;;
+  esac
+  for a in "$@"; do
+    case "$a" in
+      --json) json=1 ;;
+      --live) live=1 ;;
+      --config) config=1 ;;
+      --out=*) out="${a#--out=}" ;;
+      *) die "graph: freelunch graph [--json] [--live] [--config] [--out=<file>], graph apply [--dry-run] <file|->, graph check <file|->" ;;
+    esac
+  done
+  [[ -n "$PROJECT" ]] || die "graph: run it in a project, where its .freelunch/ folder is"
+  command -v jq >/dev/null || die "jq is required for 'graph'"
+  [[ $live -eq 0 || $json -eq 1 ]] || die "graph: --live goes with --json"
+  [[ $live -eq 0 || $config -eq 0 ]] || die "graph: --live asks the deployed project, and --config reads what it declares"
+  if [[ $config -eq 1 ]]; then doc="$(graph_declared_document)" || exit 1; else doc="$(graph_document "$live")" || exit 1; fi
+  if [[ -n "$out" ]]; then
+    [[ $json -eq 1 ]] || die "graph: --out writes the JSON document, so it goes with --json"
+    printf '%s\n' "$doc" | jq . > "$out"
+    log "graph: wrote $out"
+  elif [[ $json -eq 1 ]]; then printf '%s\n' "$doc" | jq .; else graph_text "$doc"; fi
+}
+
 # --- aliases ----------------------------------------------------------------------------
 # aliases = { console = "shell api -- bin/console" } in apps.tfvars gives a project short names: `freelunch console` runs
 # `freelunch shell api -- bin/console`, with the rest of the line added. An alias is one freelunch command, and can't take
 # the name of one (check says so).
 
 # the commands of freelunch itself, which no alias may shadow (a test keeps the list in step with main)
-BUILTIN_COMMANDS=" init setup version upgrade state ci deploy up rollback volume domain list plan apply destroy status logs restart shell jobs backup host watch next fit down restore doctor journey check verify build harden agent trust hybrid inventory output catalog dns api cli guided engine test fmt help "
+BUILTIN_COMMANDS=" graph init setup version upgrade state ci deploy up rollback volume domain list plan apply destroy status logs restart shell jobs backup host watch next fit down restore doctor journey check verify build harden agent trust hybrid inventory output catalog dns api cli guided engine test fmt help "
 
 # project_aliases: one alias a line, "<name><TAB><command>"
 project_aliases() {
@@ -11978,6 +12362,53 @@ EOF
       ci_uses watch
     } | write_new "$base/.github/workflows/$CI_WATCH_WORKFLOW"
   fi
+  if [[ "$jobs" == *,graph,* ]]; then
+    {
+      cat <<EOF
+# Written by freelunch ci init. The graph job: publishes the live graph of the project (freelunch graph --json --live,
+# docs/graph.md) as an artifact and as the run's summary, after each provision run, once a week and by hand. A page that
+# runs in a browser and holds no credentials reads the artifact to show what is running. It reads, and changes nothing.
+name: freelunch-graph
+
+on:
+  workflow_run:
+    workflows: [freelunch-provision]
+    types: [completed]
+  schedule:
+    - cron: "43 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: freelunch-graph
+
+jobs:
+  graph:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+EOF
+      ci_uses "graph --json --live --out=freelunch-graph.json"
+      # shellcheck disable=SC2016 # GitHub expressions and the shell of the runner, not ours
+      cat <<'EOF'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: freelunch-graph
+          path: freelunch-graph.json
+      - shell: bash
+        run: |
+          {
+            echo "### freelunch graph"
+            echo
+            echo "| node | type | where | healthy |"
+            echo "| --- | --- | --- | --- |"
+            jq -r '.nodes[] | "| \(.id) | \(.type) | \(.target // "") | \(if .health == null then "" elif .health.healthy then "yes" else "no" end) |"' freelunch-graph.json
+          } >> "$GITHUB_STEP_SUMMARY"
+EOF
+    } | write_new "$base/.github/workflows/freelunch-graph.yml"
+  fi
   if [[ "$jobs" == *,ci,* ]]; then
     {
       cat <<EOF
@@ -12187,7 +12618,7 @@ ci_init() {
       --journey)       journey=yes ;;
       --no-journey)    journey=no ;;
       --jobs=*)        jobs="${a#--jobs=}"
-                       [[ "$jobs" =~ ^(provision|ci|cd|watch)(,(provision|ci|cd|watch))*$ ]] || die "ci init: --jobs takes provision, ci, cd and watch, separated by commas" ;;
+                       [[ "$jobs" =~ ^(provision|ci|cd|watch|graph)(,(provision|ci|cd|watch|graph))*$ ]] || die "ci init: --jobs takes provision, ci, cd, watch and graph, separated by commas" ;;
       --set-secrets)   secrets="set" ;;
       --print-secrets) secrets=print ;;
       --bundle) CI_BUNDLE_MODE=1 ;;
@@ -13130,8 +13561,15 @@ cmd_catalog() {
   need_tf
   command -v jq >/dev/null || die "jq is required for 'catalog'"
   local dir="$ROOT/catalog" tmp; tmp="$(mktemp -d)"
+  [[ $# -le 1 && ( $# -eq 0 || "$1" == --json ) ]] || die "catalog: freelunch catalog [--json]"
   init_dir "$dir"
   tf_in "$dir" apply -input=false -auto-approve -state="$tmp/catalog.tfstate" >/dev/null
+  if [[ "${1:-}" == --json ]]; then
+    # the palette of providers, on stdout; the README is left alone
+    tf_in "$dir" output -state="$tmp/catalog.tfstate" -json palette | jq .
+    rm -rf "$tmp"
+    return 0
+  fi
   tf_in "$dir" output -state="$tmp/catalog.tfstate" -raw checklist > "$tmp/checklist.md"
   tf_in "$dir" output -state="$tmp/catalog.tfstate" -json stub_readmes > "$tmp/stubs.json"
 
@@ -13252,6 +13690,7 @@ main() {
     host)                 cmd_host "$@" ;;
     watch)                resolve_env_refs; cmd_watch "$@" ;;
     next)                 cmd_next "$@" ;;
+    graph)                resolve_state_refs; cmd_graph "$@" ;;
     fit)                  cmd_fit "$@" ;;
     down)                 resolve_env_refs; resolve_state_refs; sync_start destroy; cmd_down "$@" ;;
     restore)              cmd_restore "$@" ;;
@@ -13266,7 +13705,7 @@ main() {
     hybrid)               cmd_hybrid ;;
     inventory)            cmd_inventory ;;
     output)               cmd_output "$@" ;;
-    catalog)              cmd_catalog ;;
+    catalog)              cmd_catalog "$@" ;;
     dns)                  resolve_state_refs; cmd_dns "$@" ;;
     api)                  resolve_state_refs; cmd_api "$@" ;;
     cli)                  resolve_state_refs; cmd_cli "$@" ;;

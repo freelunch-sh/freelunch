@@ -207,3 +207,88 @@ Built against the contract: [Axiom](../providers/axiom/README.md) and
 [Healthchecks.io](../providers/healthchecks-io/README.md) (observability),
 [CloudAMQP](../providers/cloudamqp/README.md) (messaging), [Doppler](../providers/doppler/README.md)
 (secrets). A service (or a database, or a bucket) from an `api` or `cli` engine reaches an app through that provider's record in the state store; `check` asks it there too.
+
+## The whole graph as one document
+
+`freelunch graph --json` prints the project as one JSON document, for a canvas or any tool that draws it; without `--json` it
+is an indented tree. It reads state and tfvars and asks nothing. `--live` adds each node's health from the `check` probes.
+
+```json
+{
+  "format": 1,
+  "live": false,
+  "nodes": [
+    { "id": "oci-main", "type": "host", "provider": "oci", "target": null, "status": "deployed",
+      "settings": { "address": "203.0.113.10", "user": "ubuntu", "arch": "arm64" },
+      "secrets": [] },
+    { "id": "api", "type": "app", "provider": null, "target": "oci-main", "status": "deployed",
+      "settings": { "compose": "compose.yaml", "env_file": ".freelunch/api.env", "port": 8080, "needs": ["neon-main"], "database": "neon-main" } },
+    { "id": "tunnel-oci-main", "type": "tunnel", "provider": "cloudflare", "target": "oci-main", "status": "deployed", "settings": {},
+      "secrets": [{ "secret": "CLOUDFLARE_API_TOKEN", "set": true }] }
+  ],
+  "edges": [
+    { "from": "api", "to": "oci-main", "kind": "runs-on", "medium": null },
+    { "from": "api", "to": "neon-main", "kind": "database", "medium": "environment" },
+    { "from": "web", "to": "api", "kind": "needs", "medium": "compose network" },
+    { "from": "api.example.com", "to": "tunnel-oci-main", "kind": "route", "medium": "cloudflare tunnel" }
+  ]
+}
+```
+
+- **`format`** is the version of this document (`1`); a reader that doesn't know it should stop.
+- **Node `type`s** are `host`, `platform`, `app`, `database`, `bucket`, `service`, `tunnel`, `route` and `zone`. The `id` of a node
+  is the one `freelunch check --json` uses (`oci-main`, `api`, `neon-main`, `tunnel-oci-main`); a route's id is its hostname and
+  the zone's is its name. `target` is where it runs (an app's host, a tunnel's host, a route's host).
+- **`settings`** are what the tfvars and the state say, never a secret. A provider's credentials are named in **`secrets`**, each
+  `{ "secret": "NAME", "set": true|false }`, `set` being whether that variable has a value now; the value is never in the document.
+- **`status`** is `deployed` for what the state holds. (A drawing that is not applied yet carries `planned` in a document a canvas
+  writes: see `graph apply`.)
+- **Edges**: `runs-on` (an app on its host or platform, a tunnel on its host), `needs`, `database` and `bucket` (an app on what
+  it uses), `route` (a hostname to its tunnel and to the app it serves). `medium` is what the resolver picked for an app that
+  needs another app (`compose network`, `platform service`, `mesh`, `cloudflare route`), `environment` for a database, bucket or
+  service (its settings arrive as environment variables), and `cloudflare tunnel` for a route.
+- **`--live`** adds `health` to a node that `check` asks: `exists`, `reachable`, `healthy`, `reason`, and for a host its
+  `disk_percent` and memory numbers, and for an app `backup_age_hours`. A canvas polls this to colour its blocks.
+
+Not in the document yet: DNS records of a `dns` provider, mesh nodes, and databases, buckets and services that an `api` or
+`cli` engine made (they live in the state store's records, not in a state file).
+
+### What the project declares, and writing a drawing back
+
+`freelunch graph --config --json` is the same document read from what the project *declares*, not what is deployed:
+`apps.tfvars` (the project, its `targets`, shared hosts and apps, parsed by `tofu` itself) and the Cloudflare zone and routes.
+Its nodes have `"status": "planned"`, it carries `"declared": true`, and its edges join the declared nodes only (a `needs` that
+names a database in the state stays in the app's `settings.needs`).
+
+`freelunch graph apply [--dry-run] <file|->` takes a document and writes it into `.freelunch/apps.tfvars` and
+`.freelunch/cloudflare/terraform.tfvars`: files only, nothing deployed. It replaces the `project`, `targets`, `hosts`, `apps`, `zone` and
+`routes` assignments and leaves everything else in the files (registries, aliases, comments) as it was. It refuses, and
+writes nothing, a document with a `format` it doesn't know, a node of a type it doesn't have or a provider the catalogue
+lacks or that is of the wrong layer, a setting that looks like a secret value, and an `needs` edge between apps on different
+hosts that no route connects. `--dry-run` prints the diff. `graph --config --json`, `graph apply` into another project and
+`graph --config --json` again give the same document.
+
+`freelunch graph check <file|->` runs the same validation and prints it as JSON: `ok`, one row per node and edge with `ok` or
+the reason, and for each app what `freelunch fit` says of its memory against the provider of its host.
+
+**Layout.** A document may carry `"layout": {"<node id>": {"x": 10, "y": 20}}`. `graph apply` keeps it in
+`.freelunch/canvas.json`, apart from the config, and drops the entries of nodes that are gone. No other command reads it.
+
+**Why HCL and not `*.tfvars.json`.** `tofu` reads both, and two forms are never mixed safely: with both, the later
+`-var-file` replaces a whole variable, not a key. Nothing in freelunch's own readers (`tfvar`, `tfvars_map`, the secret
+scan, `ci secrets`, `setup`) reads JSON, so a project written as JSON would read as empty to them. `graph apply` writes
+HCL in the layout those readers handle, one entry a line.
+
+### The palette
+
+`freelunch catalog --json` prints every provider as one entry: `provider`, `display_name`, `category`, `layer`,
+`node_types` (what it can make: from the layer and category, or `node_types:` in its `provider.yaml`), `engine`, `status`,
+`verified`, `free_tier`, `free_tier_type`, `card_required`, `always_on`, `sleeps_after_minutes`, `free_memory_mb`, `volumes`,
+`limits`, `secrets` (`{name, description}`), `jobs`, `url`, and `settings_from`: the stack's `variables.tf`, where its
+settings are. `freelunch catalog` alone still writes the README checklist.
+
+### Publishing the live graph from CI
+
+`freelunch ci init --jobs=graph` writes `.github/workflows/freelunch-graph.yml`: after each provision run, once a week and by
+hand it runs `graph --json --live --out=freelunch-graph.json`, uploads the file as the `freelunch-graph` artifact and adds a
+table of the nodes to the run's summary. A page that runs in a browser and holds no credentials reads the artifact for live status.

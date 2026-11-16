@@ -240,6 +240,7 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 | `freelunch restart <app> [--host h]` | Restart an app on its VM host and wait until it is healthy; if it is not, the last 50 log lines say why |
 | `freelunch shell <app> [--service s] [--host h] [-- command...]` | Run a command in an app's container on its VM host and return its exit code, or open a shell in it |
 | `freelunch host [name] [--json]` | Who is on a VM host: the projects on it, their apps with what they reserve and use, the disk, and the week's heavy jobs. A second project can move onto a host another project made ([docs/shared-host.md](docs/shared-host.md)) |
+| `freelunch graph [--json] [--live] [--config]`, `graph apply`, `graph check`, `catalog --json` | The whole project as one document (nodes, edges, secrets named and never shown, `--live` adds health), what the project declares, writing a document back into the tfvars, validating one, and the palette of providers: the data a canvas draws and edits ([docs/graph.md](docs/graph.md)). `ci init --jobs=graph` publishes the live graph from Actions |
 | `freelunch watch [--strict] [--json]` | What the free tier changes under the project: a provider's free tier that a newer release records differently, what expires within 30 days, a late backup, a full disk, a bill, a machine Oracle may reclaim as idle. `ci init --jobs=watch` runs it every week ([docs/watch.md](docs/watch.md)) |
 | `freelunch next [--run]` | The one command to run now, and why, from what `status` and `doctor` know; `--run` runs it after asking |
 | `freelunch fit [dir]` | Where the app in `dir`'s Compose file can run for free: its memory limits, volumes and image platforms against what each ready host and platform records, `unknown` where a provider doesn't say |
@@ -306,6 +307,9 @@ doesn't break your project.
   Northflank's free plan when Oracle has no capacity), reach it at
   `https://api.example.com` through a Cloudflare Tunnel and DNS, and ship new versions with
   `freelunch deploy` without replacing the VM.
+- **Next after that: a canvas.** Drag hosts, apps, databases and domains onto a page and get the architecture
+  deployed and shown live. The groundwork is on main: `freelunch graph`, `graph apply` and `catalog --json`
+  ([docs/graph.md](docs/graph.md)); the canvas itself has its own plan.
 - **On main since:**
   - run the project from CI and other machines: an encrypted copy of the state in a store, a GitHub
     Action, and a wait for capacity in GitHub Actions ([docs/ci.md](docs/ci.md));

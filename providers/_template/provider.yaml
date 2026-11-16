@@ -12,6 +12,7 @@ engine: tofu                      # optional: tofu | api | cli | guided. Default
 # sleeps_after_minutes: 15        # optional, only with always_on: "no": minutes without requests before it sleeps
 # free_memory_mb: 1024            # optional: the most memory a free workload gets there, in MB (freelunch fit compares an app's limits with it)
 # volumes: "no"                   # optional: "no" when freelunch makes no Docker volumes there (a platform without them); default yes
+# node_types: [database]         # optional: what it can make, for a canvas's palette: host, platform, app, database, bucket, service, tunnel, route, zone, mesh. Default: from layer and category
 # jobs: [provision, ci, cd]       # optional: what the provider supports in a workflow
 # verified: fake-api              # optional, once implemented: fake-api (a test double) | live (a real account has run it)
 free_tier_type: always-free       # always-free | monthly-credit | trial | startup-credits | none

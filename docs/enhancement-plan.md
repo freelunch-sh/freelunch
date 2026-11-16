@@ -582,7 +582,7 @@ the palette of blocks, and a way to write a drawing back into the project.
 - Build the canvas from a diagram library, or use draw.io itself with a custom shape
   library and read its file.
 
-- [ ] `freelunch graph --json`: the whole project as one document. `nodes`: every host,
+- [x] `freelunch graph --json`: the whole project as one document. `nodes`: every host,
   platform, app, database, bucket, service, DNS zone, mesh, tunnel and route, each with
   `id`, `type`, `provider`, `target` (where it runs), its settings from the tfvars (no
   secret values: a secret is `{"secret": "<NAME>", "set": true|false}`) and `status`
@@ -594,10 +594,10 @@ the palette of blocks, and a way to write a drawing back into the project.
   tree. Write the format in `docs/graph.md` with a version field (`"format": 1`). Tests: a
   project with a host, two apps, a database and a route; ids equal those of `check --json`;
   no secret in the output
-- [ ] `freelunch graph --json --live` adds each node's health from the `check` probes
+- [x] `freelunch graph --json --live` adds each node's health from the `check` probes
   (`exists`, `reachable`, `healthy`, `reason`) and, for hosts, the numbers of section 2.
   This is what a canvas polls to colour its blocks
-- [ ] `freelunch catalog --json`: the palette. One entry per provider and node type it can
+- [x] `freelunch catalog --json`: the palette. One entry per provider and node type it can
   make: `provider`, `display_name`, `category`, `node_types`, `engine`, `status`,
   `verified`, `free_tier`, `free_tier_type`, `card_required`, `always_on`,
   `sleeps_after_minutes`, `limits`, the secrets it needs (`secrets:` in `provider.yaml`),
@@ -607,31 +607,35 @@ the palette of blocks, and a way to write a drawing back into the project.
   HCL). Written to stdout; `bin/freelunch catalog` keeps generating the README. Tests in
   `catalog/tests/` and one CLI test that the output is valid JSON with every `ready`
   provider in it
-- [ ] 🔬 Writing a drawing back. A canvas produces a graph document; the project is tfvars.
+- [x] 🔬 Writing a drawing back. A canvas produces a graph document; the project is tfvars.
   Find the smallest safe way to go from one to the other: tofu and terraform both read
   `*.tfvars.json`, so a document could become `apps.tfvars.json` and
   `<stack>/terraform.tfvars.json` with no HCL writer at all. Check: does every place that
   reads tfvars today (`tfvar`, `tfvars_map`, the secret scan in `check`, `ci secrets`,
   `setup`) cope with the JSON form, and what happens when both forms exist. Write the
   answer and the chosen file layout here before the next box
-- [ ] `freelunch graph apply <file|->`: take a graph document (the format above) and write
+  **Answer (done):** not `*.tfvars.json`. tofu reads it, and a JSON file loaded after the HCL one replaces a whole variable
+  (checked: `apps` from the later file wins in full), but none of `tfvar`, `tfvars_map`, the secret scan, `ci secrets` and `setup`
+  reads JSON. So `graph apply` writes HCL in the one-entry-a-line layout those readers handle, replacing only the assignments it
+  manages, and reads the declared side back with `tofu console` (which parses apps.tfvars itself). Layout goes to `canvas.json`.
+- [x] `freelunch graph apply <file|->`: take a graph document (the format above) and write
   the project's config from it, in the form the spike chose. It writes files only, never
   deploys. It refuses a document whose `format` it doesn't know, a node of a type or
   provider the catalogue lacks, an edge the resolver has no medium for, and any secret
   value in the document (secrets are named, never carried). `--dry-run` prints the files it
   would write as a diff. Round trip, as the main test: `graph --json` of a project, `graph
   apply` into an empty folder, `graph --json` again gives the same document
-- [ ] `freelunch graph check <file|->`: the same validation without writing, as JSON:
+- [x] `freelunch graph check <file|->`: the same validation without writing, as JSON:
   per node and edge `ok` or the reason, plus what `fit` (section 9) and the room check
   (section 6) say for each app. A canvas calls this while the user drags
-- [ ] Layout is the canvas's business, kept apart from the config: positions live in
+- [x] Layout is the canvas's business, kept apart from the config: positions live in
   `.freelunch/canvas.json` (node id to x, y), ignored by every command, never required.
   `graph apply` keeps the entries of nodes that still exist. Test
-- [ ] The workflow from `ci init` can publish the live graph: an optional step that runs
+- [x] The workflow from `ci init` can publish the live graph: an optional step that runs
   `freelunch graph --json --live` after a deploy and on the watch schedule, and uploads it
   as an artifact (and as the job summary's table). This is how a browser-only canvas gets
   live status without credentials of its own. Test the generated workflow
-- [ ] Docs: the document format, the palette format and the round trip in `docs/graph.md`;
+- [x] Docs: the document format, the palette format and the round trip in `docs/graph.md`;
   a line in the README roadmap naming the canvas as what follows
 
 ## 11. Later, not in this pass
@@ -743,6 +747,22 @@ Found while building sections 1 to 6. `[x]` means closed, with how; `[ ]` is ope
   so `next --run` refuses it; `freelunch doctor` lists what is still empty after.
 - [ ] shellcheck is not installed on this machine (the home folder moved), so the lint of everything since the commit of
   section 8 is unchecked: run `shellcheck bin/freelunch` and `tests/cli.sh shellcheck_findings` where it is.
+
+**Section 10**
+
+- [ ] The palette gives `settings_from` (the path of a stack's `variables.tf`), not the variables with type, default and
+  description: `tofu` has no command that lists a module's variables (`terraform-config-inspect` is a separate tool), and the plan
+  rules out regular expressions over HCL. A canvas's settings form needs it: decide on bundling a parser, or have each stack
+  publish its variables as an output.
+- [ ] `graph check`'s room check for a shared host reads only the document; the other projects on the machine are known to the
+  host, which `deploy --dry-run` asks.
+- [ ] The answer of the writing-back spike (section 10): `*.tfvars.json` is not used, see docs/graph.md ("Why HCL").
+
+- [ ] `graph --json` leaves out DNS records, mesh nodes and what `api` and `cli` engines made (records in the state store); the ids
+  of those nodes are `check`'s, so adding them is reading what `probe_dns` and `probe_record_nodes` already know, without the
+  network.
+- [ ] A node's settings come from the deploy plan and the stacks' outputs, not from every stack's tfvars: a stack's own settings
+  (a region, a size) aren't in the document except for platforms.
 
 **Housekeeping**
 

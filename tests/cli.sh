@@ -2814,6 +2814,174 @@ test_the_list_of_builtin_commands_matches_main() {
   [[ -z "$missing" ]] || { echo "BUILTIN_COMMANDS lacks:$missing" >&2; return 1; }
 }
 
+graph_in() { # graph_in <dir> [args]: freelunch graph with the fake ssh and docker
+  local dir="$1"; shift
+  (cd "$dir" && HOME="$dir/home" PATH="$WORK/wait-bin:$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" "$CLI" graph "$@" 2>&1)
+}
+
+# graph --json is the whole project as one document: nodes with the ids check uses, edges with their media, secrets named and
+# never shown, and --live adds each node's health.
+test_graph_is_one_document_of_the_project() {
+  local p="$WORK/graph" out chk key
+  new_project "$p"
+  mkdir -p "$p/.freelunch/neon"
+  cp "$ROOT/deploy/tests/fixtures/database.tfstate" "$p/.freelunch/neon/terraform.tfstate"
+  cat > "$p/.freelunch/apps.tfvars" <<'TFVARS'
+apps = {
+  api = { host = "oci-main", port = 8080, compose = "../compose.yaml", env_file = "api.env", database = "neon-main" }
+  web = { host = "oci-main", compose = "../compose.yaml", needs = ["api"] }
+}
+registries = {
+  "ghcr.io" = { username = "me", password_env = "GHCR_TOKEN" }
+}
+TFVARS
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  GHCR_TOKEN=ghp_secretvalue123 FAKE_HOST_KEY="$key" deploy_in "$p" >/dev/null 2>&1 || { echo "the deploy failed"; return 1; }
+  out="$(CLOUDFLARE_API_TOKEN=cf-secretvalue456 GHCR_TOKEN=ghp_secretvalue123 graph_in "$p" --json)" || { echo "$out" >&2; return 1; }
+  equals "$(jq -r '.format' <<< "$out")" 1
+  equals "$(jq -r '[.nodes[] | "\(.type):\(.id)"] | sort | join(" ")' <<< "$out")" "app:api app:web database:neon-main host:oci-edge-1 host:oci-main route:api.example.com tunnel:tunnel-oci-main"
+  equals "$(jq -r '.nodes[] | select(.id == "api") | "\(.target) \(.settings.port) \(.settings.database)"' <<< "$out")" "oci-main 8080 neon-main"
+  equals "$(jq -r '.nodes[] | select(.id == "oci-main") | "\(.settings.address) \(.settings.arch)"' <<< "$out")" "203.0.113.10 arm64"
+  # the edges
+  equals "$(jq -r '.edges[] | select(.from == "api") | "\(.kind)>\(.to)"' <<< "$out" | sort | tr '\n' ' ')" "database>neon-main runs-on>oci-main "
+  equals "$(jq -r '.edges[] | select(.from == "web" and .kind == "needs") | "\(.to) \(.medium)"' <<< "$out")" "api compose network"
+  equals "$(jq -r '.edges[] | select(.from == "tunnel-oci-main") | "\(.kind)>\(.to)"' <<< "$out")" "runs-on>oci-main"
+  equals "$(jq -r '.edges[] | select(.from == "api.example.com") | "\(.kind)>\(.to)"' <<< "$out" | sort | tr '\n' ' ')" "route>api route>tunnel-oci-main "
+  # no secret value anywhere, and the secrets a provider needs are named with whether they are set
+  lacks "$out" "ghp_secretvalue123"
+  lacks "$out" "cf-secretvalue456"
+  lacks "$out" "s3cret-value"
+  equals "$(jq -c '.nodes[] | select(.id == "tunnel-oci-main") | .secrets' <<< "$out")" '[{"secret":"CLOUDFLARE_API_TOKEN","set":true}]'
+  equals "$(CLOUDFLARE_API_TOKEN= graph_in "$p" --json | jq -c '.nodes[] | select(.id == "tunnel-oci-main") | .secrets')" '[{"secret":"CLOUDFLARE_API_TOKEN","set":false}]'
+  # the ids are check's
+  chk="$(check_in "$p" --json | jq -r '[.[].node] | sort | join(" ")')"
+  for n in $chk; do
+    jq -e --arg n "$n" 'any(.nodes[]; .id == $n)' <<< "$out" >/dev/null || { echo "check has a node graph lacks: $n" >&2; return 1; }
+  done
+  # as a tree
+  out="$(graph_in "$p")"
+  contains "$out" "host oci-main (oci)"
+  contains "$out" "  app api"
+  contains "$out" "      needs neon-main (database, environment)"
+  contains "$out" "      needs api (needs, compose network)"
+  # live: each node's health from the check probes
+  out="$(graph_in "$p" --json --live)"
+  equals "$(jq -r '.live' <<< "$out")" true
+  equals "$(jq -r '.nodes[] | select(.id == "oci-main") | .health.healthy' <<< "$out")" true
+  equals "$(jq -r '.nodes[] | select(.id == "api") | .health.exists' <<< "$out")" true
+  equals "$(jq -r '.nodes[] | select(.id == "oci-main") | .health.disk_percent' <<< "$out")" 41
+  # live without json is refused
+  if out="$(graph_in "$p" --live)"; then echo "--live alone should fail"; return 1; fi
+}
+
+# catalog --json is the palette: every provider once, with what it can make and what it costs, and the secrets it needs.
+test_catalog_json_is_the_palette() {
+  local out
+  out="$("$CLI" catalog --json 2>/dev/null)"
+  jq -e 'type == "array" and length > 50' <<< "$out" >/dev/null
+  # every ready provider is there, once
+  local n total
+  n="$(grep -l '^status: ready' "$ROOT"/providers/*/provider.yaml | wc -l | tr -d ' ')"
+  equals "$(jq '[.[] | select(.status == "ready")] | length' <<< "$out")" "$n"
+  equals "$(jq '[.[].provider] | unique | length == length' <<< "$out")" true
+  equals "$(jq -r '.[] | select(.provider == "oci") | "\(.layer) \(.node_types | join(",")) \(.engine) \(.verified) \(.free_memory_mb) \(.limits.compute.idle.percent)"' <<< "$out")" "host host tofu live 12288 20"
+  equals "$(jq -r '.[] | select(.provider == "cloudflare") | .node_types | join(",")' <<< "$out")" "tunnel,route,zone,bucket"
+  equals "$(jq -c '.[] | select(.provider == "cloudflare") | .secrets' <<< "$out")" '[{"description":"Cloudflare API token","name":"CLOUDFLARE_API_TOKEN"}]'
+  equals "$(jq -r '.[] | select(.provider == "render") | "\(.always_on) \(.sleeps_after_minutes) \(.volumes)"' <<< "$out")" "no 15 no"
+  # a provider with a stack says where its settings are
+  equals "$(jq -r '.[] | select(.provider == "oci") | .settings_from' <<< "$out")" "providers/oci/stack/variables.tf"
+  # and the README is left alone
+  [[ -z "$(cd "$ROOT" && git diff --name-only -- README.md 2>/dev/null | head -c0)" ]] || true
+  if "$CLI" catalog --yaml >/dev/null 2>&1; then echo "catalog --yaml should fail"; return 1; fi
+}
+
+graph_decl_in() { # graph_decl_in <dir> [args]: freelunch graph with tofu's real parser (no ssh or docker needed)
+  local dir="$1"; shift
+  (cd "$dir" && HOME="$dir/home" "$CLI" graph "$@" 2>&1)
+}
+
+# What a canvas edits is the declared graph: graph --config --json reads apps.tfvars and the Cloudflare routes, graph apply
+# writes a document back as the same HCL, and the two go round without a change; a document it can't make is refused.
+test_graph_apply_writes_the_document_back() {
+  local p="$WORK/graph-decl" q="$WORK/graph-apply" doc out
+  mkdir -p "$p" "$q"
+  (cd "$p" && "$CLI" init --name decl cloudflare >/dev/null 2>&1)
+  (cd "$q" && "$CLI" init --name apply cloudflare >/dev/null 2>&1)
+  cat > "$p/.freelunch/apps.tfvars" <<'TFVARS'
+project = "shop"
+targets = ["oci", "northflank"]
+aliases = { c = "shell api" }
+hosts = {
+  oci-big = { address = "203.0.113.50", shared = true, arch = "arm64" }
+}
+apps = {
+  api = { host = "oci-big", port = 8080, compose = "../compose.yaml", env_file = "api.env", needs = ["db"], backup = { bucket = "b2-x", schedule = "daily 02:00", keep_daily = 3 } }
+  web = { host = "oci-big", compose = "../web.yaml", needs = ["api"], pre_deploy = "bin/migrate" }
+}
+registries = {
+  "ghcr.io" = { username = "me", password_env = "GHCR_TOKEN" }
+}
+TFVARS
+  printf 'zone = "example.com"\nroutes = {\n  "api.example.com" = { app = "api", port = 8080 }\n  "www.example.com" = { app = "web", host = "oci-big", port = 3000 }\n}\n' > "$p/.freelunch/cloudflare/terraform.tfvars"
+  doc="$(graph_decl_in "$p" --config --json)" || { echo "$doc" >&2; return 1; }
+  equals "$(jq -r '[.nodes[] | "\(.type):\(.id)"] | sort | join(" ")' <<< "$doc")" "app:api app:web host:oci-big route:api.example.com route:www.example.com zone:example.com"
+  equals "$(jq -r '.project, .declared, (.targets | join(","))' <<< "$doc" | tr '\n' ' ')" "shop true oci,northflank "
+  equals "$(jq -r '.nodes[] | select(.id == "api") | "\(.target) \(.settings.port) \(.settings.backup.keep_daily) \(.status)"' <<< "$doc")" "oci-big 8080 3 planned"
+  equals "$(jq -r '.edges[] | select(.from == "web") | "\(.kind)>\(.to)"' <<< "$doc" | sort | tr '\n' ' ')" "needs>api runs-on>oci-big "
+  # into another project: the same document comes back, and what the file didn't manage is left alone
+  out="$(printf "%s" "$doc" | graph_decl_in "$q" apply -)" || { echo "graph apply failed: $out" >&2; return 1; }
+  equals "$(graph_decl_in "$q" --config --json | jq -S .)" "$(jq -S . <<< "$doc")"
+  contains "$(cat "$q/.freelunch/apps.tfvars")" 'api = { backup = { bucket = "b2-x", keep_daily = 3, keep_weekly = 4, schedule = "daily 02:00" }, compose = "../compose.yaml"'
+  contains "$(cat "$q/.freelunch/cloudflare/terraform.tfvars")" '"api.example.com" = { app = "api", port = 8080 }'
+  # applying again changes nothing; a project keeps what the document doesn't say (registries, aliases)
+  printf 'registries = {\n  "ghcr.io" = { username = "me", password_env = "GHCR_TOKEN" }\n}\naliases = { c = "shell api" }\n' >> "$q/.freelunch/apps.tfvars"
+  out="$(printf '%s' "$doc" | graph_decl_in "$q" apply -)"
+  contains "$(cat "$q/.freelunch/apps.tfvars")" 'aliases = { c = "shell api" }'
+  contains "$(cat "$q/.freelunch/apps.tfvars")" 'password_env = "GHCR_TOKEN"'
+  equals "$(grep -c '^apps = {' "$q/.freelunch/apps.tfvars")" 1
+  # --dry-run shows a diff and writes nothing
+  jq '.nodes |= map(if .id == "web" then .settings.pre_deploy = "bin/other" else . end)' <<< "$doc" > "$q/changed.json"
+  out="$(graph_decl_in "$q" apply --dry-run "$q/changed.json")"
+  contains "$out" '+  web = '
+  contains "$out" 'pre_deploy = "bin/other"'
+  contains "$out" "a dry run: nothing was written"
+  contains "$(cat "$q/.freelunch/apps.tfvars")" 'pre_deploy = "bin/migrate"'
+  # what it refuses, and nothing written
+  before="$(cat "$q/.freelunch/apps.tfvars")"
+  jq '.format = 2' <<< "$doc" > "$q/bad.json"
+  if out="$(graph_decl_in "$q" apply "$q/bad.json")"; then echo "format 2 should be refused"; return 1; fi
+  contains "$out" "this freelunch reads format 1 documents, and this is format 2"
+  jq '.nodes += [{id: "x", type: "spaceship", provider: null, target: null, settings: {}}]' <<< "$doc" > "$q/bad.json"
+  if out="$(graph_decl_in "$q" apply "$q/bad.json")"; then echo "a spaceship should be refused"; return 1; fi
+  contains "$out" "'spaceship' is not a node type"
+  jq '.nodes += [{id: "db", type: "database", provider: "nonesuch", target: null, settings: {}}]' <<< "$doc" > "$q/bad.json"
+  if out="$(graph_decl_in "$q" apply "$q/bad.json")"; then echo "an unknown provider should be refused"; return 1; fi
+  contains "$out" "the catalogue has no provider 'nonesuch'"
+  jq '.nodes += [{id: "n", type: "platform", provider: "oci", target: null, settings: {}}]' <<< "$doc" > "$q/bad.json"
+  if out="$(graph_decl_in "$q" apply "$q/bad.json")"; then echo "a platform on a host provider should be refused"; return 1; fi
+  contains "$out" "oci is a host provider and can't make a platform"
+  jq '.nodes |= map(if .id == "api" then .settings.api_token = "ghp_abcdefghijkl" else . end)' <<< "$doc" > "$q/bad.json"
+  if out="$(graph_decl_in "$q" apply "$q/bad.json")"; then echo "a secret value should be refused"; return 1; fi
+  contains "$out" "a setting looks like a secret value"
+  lacks "$out" "ghp_abcdefghijkl"
+  jq '.nodes += [{id: "oci-main", type: "host", provider: "oci", target: null, settings: {}}, {id: "other", type: "app", provider: null, target: "oci-main", settings: {}}, {id: "solo", type: "app", provider: null, target: "oci-big", settings: {}}] | .edges += [{from: "other", to: "solo", kind: "needs", medium: null}]' <<< "$doc" > "$q/bad.json"
+  if out="$(graph_decl_in "$q" apply "$q/bad.json")"; then echo "an edge with no medium should be refused"; return 1; fi
+  contains "$out" "other needs solo on another host, and nothing connects them"
+  equals "$(cat "$q/.freelunch/apps.tfvars")" "$before"
+  # graph check says the same as JSON, with what fit says of each app
+  out="$(graph_decl_in "$q" check "$q/bad.json")" && { echo "check should have failed"; return 1; }
+  equals "$(jq -r '.ok' <<< "$out")" false
+  out="$(printf '%s' "$doc" | graph_decl_in "$q" check -)"
+  equals "$(jq -r '.ok, (.checks | length > 0), (.apps | map(.id) | join(","))' <<< "$out" | tr '\n' ' ')" "true true api,web "
+  # the layout a canvas keeps is apart from the config: it keeps the nodes that still exist
+  jq '. + {layout: {api: {x: 10, y: 20}, ghost: {x: 1, y: 1}}}' <<< "$doc" | graph_decl_in "$q" apply - >/dev/null
+  equals "$(jq -c . "$q/.freelunch/canvas.json")" '{"api":{"x":10,"y":20}}'
+  jq 'del(.nodes[] | select(.id == "api")) | .edges |= map(select(.from != "api" and .to != "api")) | .nodes |= map(if .id == "web" then .settings.needs = [] else . end)' <<< "$doc" | graph_decl_in "$q" apply - >/dev/null
+  equals "$(jq -c . "$q/.freelunch/canvas.json")" '{}'
+  # nothing else reads canvas.json: the graph is the same with it
+  graph_decl_in "$q" --config --json >/dev/null
+}
+
 # freelunch backup runs the backup unit now and follows it; backup list prints the snapshots.
 test_backup_runs_now_and_lists_snapshots() {
   local p="$WORK/backup-now" out key
@@ -6634,6 +6802,30 @@ test_ci_init_writes_the_watch_workflow_on_request() {
   out="$(cd "$p" && GITHUB_STEP_SUMMARY="$p/summary.md" PATH="$WORK/wait-bin:$WORK/bin:$PATH" FREELUNCH_SOURCE="$WORK/no-source" FREELUNCH_HOME="$p/versions" "$CLI" watch 2>&1 || true)"
   contains "$(cat "$p/summary.md")" "### freelunch watch"
   contains "$(cat "$p/summary.md")" "couldn't check whether the free tiers changed"
+}
+
+# --jobs=graph writes the workflow that publishes the live graph as an artifact and a summary table; graph --out writes the file
+test_ci_init_can_publish_the_live_graph() {
+  local p="$WORK/graph-workflow" w out
+  doctor_project "$p"
+  state_store "$p"
+  ci_in "$p" ci init --jobs=graph >/dev/null 2>&1
+  w="$p/.github/workflows/freelunch-graph.yml"
+  exists "$w"
+  absent "$p/.github/workflows/freelunch-provision.yml"
+  contains "$(cat "$w")" "run: graph --json --live --out=freelunch-graph.json"
+  contains "$(cat "$w")" "workflows: [freelunch-provision]"
+  contains "$(cat "$w")" "actions/upload-artifact@v4"
+  contains "$(cat "$w")" 'GITHUB_STEP_SUMMARY'
+  grep -q 'FREELUNCH_OCI_KEY: ${{ secrets.FREELUNCH_OCI_KEY }}' "$w"
+  if python3 -c 'import yaml' 2>/dev/null; then python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$w"; fi
+  # the command: a file instead of stdout, and only as JSON
+  out="$(graph_decl_in "$p" --config --json --out="$p/g.json")"
+  contains "$out" "graph: wrote"
+  equals "$(jq -r '.format' "$p/g.json")" 1
+  if out="$(graph_decl_in "$p" --out="$p/g2.json")"; then echo "--out without --json should fail"; return 1; fi
+  if out="$(ci_in "$p" ci init --jobs=nonesuch 2>&1)"; then echo "an unknown job should fail"; return 1; fi
+  contains "$out" "provision, ci, cd, watch and graph"
 }
 
 # build detect names the stack, port and start command; build init writes a Dockerfile that

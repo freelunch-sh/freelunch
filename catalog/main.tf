@@ -64,6 +64,7 @@ locals {
     # free_memory_mb is a number; volumes is "yes" or "no"
     bad_free_memory = [for k, p in local.providers : k if try(p.free_memory_mb, null) != null && !can(tonumber(p.free_memory_mb))]
     bad_volumes     = [for k, p in local.providers : k if try(p.volumes, null) != null && !contains(["yes", "no"], tostring(p.volumes))]
+    bad_node_types  = [for k, p in local.providers : k if try(p.node_types, null) != null && !alltrue([for t in p.node_types : contains(local.node_types_known, tostring(t))])]
     bad_idle        = [for k, p in local.providers : k if try(p.limits.compute.idle, null) != null && !(can(tonumber(p.limits.compute.idle.percent)) && can(tonumber(p.limits.compute.idle.days)))]
     bad_engine      = [for k, p in local.providers : k if !alltrue([for f, v in p : contains(local.engines, tostring(v)) if f == "engine" || startswith(f, "engine_")])]
     bad_jobs        = [for k, p in local.providers : k if try(p.jobs, null) != null && !alltrue([for j in p.jobs : contains(local.jobs, tostring(j))])]
@@ -99,6 +100,29 @@ locals {
       glue     = "consumes the hybrid inventory (DNS, mesh, tunnels)"
     }
     status = { ready = "✅ Implemented", planned = "🚧 Planned", excluded = "⛔ Excluded" }
+  }
+
+  # The node types a provider can make, for a canvas's palette: provider.yaml's node_types, else what its layer and category say.
+  node_types_known = ["host", "platform", "app", "database", "bucket", "service", "tunnel", "route", "zone", "mesh"]
+  default_node_types = {
+    host     = ["host"]
+    platform = ["platform"]
+  }
+  category_node_types = {
+    databases     = ["database"]
+    storage       = ["bucket"]
+    observability = ["service"]
+    secrets       = ["service"]
+    messaging     = ["service"]
+    dns           = ["zone"]
+    networking    = ["mesh"]
+    edge          = ["tunnel", "route", "zone"]
+  }
+  node_types = {
+    for k, p in local.providers : k => try(
+      [for t in p.node_types : tostring(t)],
+      try(local.default_node_types[p.layer], try(local.category_node_types[p.category], []))
+    )
   }
 
   # Alphabetical by display name within each category.

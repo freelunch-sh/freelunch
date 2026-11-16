@@ -1,0 +1,16 @@
+name: nodey
+display_name: "Nodey"
+category: vps
+status: planned
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "something"
+card_required: "no"
+url: "https://nodey.example"
+last_verified: "2026-11-16"
+notes: null
+sources: []
+inspire: []
+node_types: [spaceship]
