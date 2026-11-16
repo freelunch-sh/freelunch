@@ -206,6 +206,9 @@ Infrastructure:
   restore <app> [--snapshot id] [--host h] [--overwrite]
                           Stop the app, put its volumes back from its backup (the latest snapshot, or one),
                           and start it. It works on any host that has the app deployed
+  monitors [sync|status|destroy] [--dry-run]
+                          An HTTP monitor from your uptime provider (UptimeRobot, StatusCake) for each
+                          Cloudflare route; a route says monitor = false to go without (docs/monitors.md)
   watch [--strict] [--json]
                           (ci init --jobs=...,watch writes a weekly workflow for it)
                           What the free tier changes under the project: a provider's free tier that a
@@ -1195,7 +1198,8 @@ tfvars_map() {
       out = key
       for (i = 1; i <= n; i++) {
         v = ""
-        if (match(text, "(^|[^A-Za-z0-9_])" f[i] "[ \t]*=[ \t]*(\"[^\"]*\"|[0-9.]+)")) {
+        if (f[i] ~ /^has:/) { if (match(text, "(^|[^A-Za-z0-9_])" substr(f[i], 5) "[ \t]*=")) v = "yes" }
+        else if (match(text, "(^|[^A-Za-z0-9_])" f[i] "[ \t]*=[ \t]*(\"[^\"]*\"|[0-9.]+|true|false)")) {
           v = substr(text, RSTART, RLENGTH)
           sub(/^[^=]*=[ \t]*/, "", v)
           gsub(/"/, "", v)
@@ -2342,7 +2346,7 @@ cmd_lifecycle() { # plan|apply|destroy
       [[ ${#hosts[@]} -eq 0 && ${#platforms[@]} -eq 0 ]] || cmd_hybrid
       for a in ${glue[@]+"${glue[@]}"}; do apply_once "$a" "$plan_file" ${extra[@]+"${extra[@]}"}; done
       # apply all also keeps the project's DNS records (after the hosts have their addresses)
-      if [[ " ${names[*]-} " == *" all "* ]]; then dns_all apply; fi
+      if [[ " ${names[*]-} " == *" all "* ]]; then dns_all apply; monitors_all apply; fi
       [[ " ${hosts[*]-} " != *" oci "* ]] || { echo "Billing"; billing_line_oci; }
       next_steps ${hosts[@]+"${hosts[@]}"} ${platforms[@]+"${platforms[@]}"} ;;
     destroy)
@@ -2351,7 +2355,7 @@ cmd_lifecycle() { # plan|apply|destroy
       # ... and a host other projects share keeps them
       [[ ${#hosts[@]} -eq 0 ]] || destroy_tenant_guard "${hosts[@]}"
       # destroy all first removes the records the project made, while it still knows the hosts
-      if [[ " ${names[*]-} " == *" all "* ]]; then dns_all destroy; fi
+      if [[ " ${names[*]-} " == *" all "* ]]; then monitors_all destroy; dns_all destroy; fi
       for a in ${hosts[@]+"${hosts[@]}"}; do ci_wait_guard "$a" ""; done
       for a in ${glue[@]+"${glue[@]}"} ${services[@]+"${services[@]}"}; do run_stack destroy "$a" ${extra[@]+"${extra[@]}"}; done
       for a in ${platforms[@]+"${platforms[@]}"} ${hosts[@]+"${hosts[@]}"}; do engine_destroy "$a" ${extra[@]+"${extra[@]}"}; done
@@ -2688,6 +2692,7 @@ cmd_status() {
   fi
   [[ $found -ne 0 ]] || status_apps
   status_tunnels "$found"
+  status_monitors
   status_tokens
   status_billing
   status_money
@@ -4153,7 +4158,7 @@ cmd_graph() {
 # the name of one (check says so).
 
 # the commands of freelunch itself, which no alias may shadow (a test keeps the list in step with main)
-BUILTIN_COMMANDS=" graph init setup version upgrade state ci deploy up rollback volume domain list plan apply destroy status logs restart shell jobs backup host watch next fit down restore doctor journey check verify build harden agent trust hybrid inventory output catalog dns api cli guided engine test fmt help "
+BUILTIN_COMMANDS=" graph init setup version upgrade state ci deploy up rollback volume domain list plan apply destroy status logs restart shell jobs backup host watch next fit down restore doctor journey check verify build harden agent trust hybrid inventory output catalog dns monitors api cli guided engine test fmt help "
 
 # project_aliases: one alias a line, "<name><TAB><command>"
 project_aliases() {
@@ -6943,7 +6948,7 @@ api_render() {
     src="$TMP/api/$p.redacted.vars"
     jq -c '.env |= (. // {} | map_values("<redacted>"))' "$vars" > "$src"
   fi
-  prelude='. as $v | $v.prefix as $prefix | $v.app as $app | $v.name as $name | $v.id as $id | $v.image as $image | $v.port as $port | ($v.env // {}) as $env | ($v.settings // {}) as $settings | $v.deploy_id as $deploy_id | '
+  prelude='. as $v | $v.prefix as $prefix | $v.app as $app | $v.name as $name | $v.id as $id | $v.image as $image | $v.port as $port | ($v.env // {}) as $env | ($v.settings // {}) as $settings | $v.deploy_id as $deploy_id | $v.url as $url | '
   jq -c "$prelude$template" "$src" > "$out" 2> "$out.err" || die "api: the $section body in providers/$p/api.yaml doesn't render: $(head -c 300 "$out.err")"
 }
 
@@ -10934,6 +10939,172 @@ dns_providers() {
   return 0
 }
 
+# --- route monitors ---------------------------------------------------------------------
+# A project with an uptime provider that can watch a URL (UptimeRobot, StatusCake: a `monitor:` block in its api.yaml, and a
+# folder for it in .freelunch/) gets an HTTP monitor for each Cloudflare route, named <prefix>-<hostname> and tagged <prefix>.
+# A route sets `monitor = false` to go without one (or `monitor = true` for a route behind Access, which has none by default:
+# the monitor would only see the login page). Removed routes lose theirs. Requests are read from each provider's docs and
+# have not run against a live account.
+
+# monitor_providers: the uptime providers the project has a folder for
+monitor_providers() {
+  local f p
+  for f in "$PROVIDERS_DIR"/*/api.yaml; do
+    p="$(basename "$(dirname "$f")")"
+    grep -q '^monitor:' "$f" 2>/dev/null && [[ -d "$PROJECT/$p" ]] && echo "$p"
+  done
+  return 0
+}
+
+# monitor_wanted: "hostname<TAB>url" for each route that gets a monitor
+monitor_wanted() {
+  local cf host mon access
+  cf="$(config_dir cloudflare)/terraform.tfvars"
+  [[ -f "$cf" ]] || return 0
+  while IFS=$'\x1f' read -r host mon access; do
+    [[ -n "$host" ]] || continue
+    [[ "$mon" != false ]] || continue
+    [[ "$mon" == true || -z "$access" ]] || continue
+    printf '%s\thttps://%s\n' "$host" "$host"
+  done < <(tfvars_map "$cf" routes monitor has:access | tr '\t' '\037')
+}
+
+# monitor_ok <provider> <section> <code> [default ok list]
+monitor_ok() {
+  jq -e --argjson c "$3" --argjson d "${4:-[200,201,202,204]}" --arg s "$2" '(.monitor[$s].ok // $d) | index($c) != null' "$TMP/api/$1.json" >/dev/null 2>&1
+}
+
+# monitor_prepare <provider>: load api.yaml, the vars and the secrets to keep out of messages
+monitor_prepare() {
+  local p="$1" vars="$TMP/api/$1.vars"
+  api_load "$p"
+  api_base "$p" > "$vars"; api_secrets "$p" "$vars"
+}
+
+# monitor_list <provider>: the account's monitors as [{id, name, url, marker, status}] in $TMP/api/<provider>.monitors.json
+monitor_list() {
+  local p="$1" vars="$TMP/api/$1.vars" code url status
+  code="$(api_do "$p" monitor.list "$vars")"
+  monitor_ok "$p" list "$code" || die "monitors: can't list what $p has ($code): $(api_error "$p")"
+  url="$(api_cfg "$p" .monitor.list.fields.url)"; status="$(api_cfg "$p" .monitor.list.fields.status)"
+  jq -c "[ ($(api_cfg "$p" .monitor.list.items)) | {id: ($(api_cfg "$p" .monitor.list.fields.id)), name: ($(api_cfg "$p" .monitor.list.fields.name)), url: (${url:-null}), marker: ($(api_cfg "$p" .monitor.list.fields.marker)), status: (${status:-null})} ]" \
+    "$TMP/api/$p.out" > "$TMP/api/$p.monitors.json" 2> "$TMP/api/$p.monitors.err" \
+    || die "monitors: the list fields in providers/$p/api.yaml don't read what $p answered: $(head -c 300 "$TMP/api/$p.monitors.err")"
+}
+
+# monitor_ours <provider>: the listed monitors freelunch made for a route: <prefix>-<hostname>, tagged <prefix>
+monitor_ours() {
+  jq -c --arg pre "$(jq -r .prefix "$TMP/api/$1.vars")" '.[] | select((.name | startswith($pre + "-")) and (.name | contains(".")) and .marker == $pre)' "$TMP/api/$1.monitors.json"
+}
+
+# monitors_sync <provider> [dry]: make a monitor for each wanted route and remove the ones whose route is gone
+monitors_sync() {
+  local p="$1" dry="${2:-0}" prefix host url name code id item vars="$TMP/api/$1.vars" want='' made=0 gone=0
+  monitor_prepare "$p"
+  prefix="$(jq -r .prefix "$vars")"
+  monitor_list "$p"
+  while IFS=$'\t' read -r host url; do
+    [[ -n "$host" ]] || continue
+    name="$prefix-$host"
+    want="$want$name"$'\n'
+    if jq -e --arg n "$name" 'any(.[]; .name == $n)' "$TMP/api/$p.monitors.json" >/dev/null; then continue; fi
+    jq -c --arg name "$name" --arg url "$url" '. + {name: $name, url: $url}' "$vars" > "$vars.mon"
+    if [[ "$dry" == 1 ]]; then
+      api_render "$p" monitor.create "$vars.mon" "$TMP/api/$p.dry"
+      echo "  $p: would create $name: $(api_cfg "$p" .monitor.create.request)  $(cat "$TMP/api/$p.dry")"; continue
+    fi
+    code="$(api_do "$p" monitor.create "$vars.mon")"
+    monitor_ok "$p" create "$code" || die "monitors: can't make the monitor $name on $p ($code): $(api_error "$p")"
+    log "$p: made the monitor $name for $url"
+    made=$((made + 1))
+  done < <(monitor_wanted)
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    name="$(jq -r .name <<< "$item")"; id="$(jq -r .id <<< "$item")"
+    [[ "$want" != *"$name"$'\n'* ]] || continue
+    if [[ "$dry" == 1 ]]; then echo "  $p: would delete $name"; continue; fi
+    jq -c --arg id "$id" --arg name "$name" '. + {id: $id, name: $name}' "$vars" > "$vars.del"
+    code="$(api_do "$p" monitor.delete "$vars.del")"
+    monitor_ok "$p" delete "$code" '[200,202,204,404]' || die "monitors: can't delete $name on $p ($code): $(api_error "$p")"
+    log "$p: deleted the monitor $name (its route is gone)"
+    gone=$((gone + 1))
+  done < <(monitor_ours "$p")
+  [[ "$dry" == 1 || $((made + gone)) -gt 0 ]] || log "$p: the monitors are as the routes want them"
+}
+
+# monitors_destroy <provider>: remove every monitor freelunch made there
+monitors_destroy() {
+  local p="$1" item id name code vars="$TMP/api/$1.vars"
+  monitor_prepare "$p"; monitor_list "$p"
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    name="$(jq -r .name <<< "$item")"; id="$(jq -r .id <<< "$item")"
+    jq -c --arg id "$id" --arg name "$name" '. + {id: $id, name: $name}' "$vars" > "$vars.del"
+    code="$(api_do "$p" monitor.delete "$vars.del")"
+    monitor_ok "$p" delete "$code" '[200,202,204,404]' || die "monitors: can't delete $name on $p ($code): $(api_error "$p")"
+    log "$p: deleted the monitor $name"
+  done < <(monitor_ours "$p")
+}
+
+# monitors_status_lines <provider>: a line per wanted route: its monitor's state
+monitors_status_lines() {
+  local p="$1" host url name state raw prefix
+  monitor_prepare "$p"; monitor_list "$p"
+  prefix="$(jq -r .prefix "$TMP/api/$p.vars")"
+  while IFS=$'\t' read -r host url; do
+    [[ -n "$host" ]] || continue
+    name="$prefix-$host"
+    raw="$(jq -r --arg n "$name" 'map(select(.name == $n)) | first | if . == null then "none" else (.status // "unknown") end' "$TMP/api/$p.monitors.json")"
+    if [[ "$raw" == none ]]; then state="no monitor (freelunch monitors sync)"
+    elif jq -e --arg s "$raw" '.monitor.up | index($s) != null' "$TMP/api/$p.json" >/dev/null 2>&1; then state="up"
+    elif jq -e --arg s "$raw" '.monitor.down | index($s) != null' "$TMP/api/$p.json" >/dev/null 2>&1; then state="DOWN"
+    else state="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"; fi
+    printf '  %-34s %-8s %s\n' "$host" "$state" "$p"
+  done < <(monitor_wanted)
+}
+
+# monitors_all apply|destroy: the action for each uptime provider the project has; a failure is said, not fatal
+monitors_all() {
+  local p
+  for p in $(monitor_providers); do
+    if [[ "$1" == apply ]]; then ( monitors_sync "$p" ) || log "monitors: $p could not be brought up to date (freelunch monitors sync says why)"
+    else ( monitors_destroy "$p" ) || log "monitors: $p's monitors could not be removed (freelunch monitors destroy says why)"; fi
+  done
+}
+
+# status_monitors: the monitor of each public address, when there is an uptime provider with its token set
+status_monitors() {
+  local p var out
+  for p in $(monitor_providers); do
+    [[ -n "$(monitor_wanted)" ]] || return 0
+    api_load "$p" 2>/dev/null || continue
+    var="$(api_cfg "$p" .auth.env)"
+    [[ -n "${!var:-}" ]] || { echo "Monitors: $var isn't set, so $p isn't asked"; continue; }
+    echo "Monitors ($p)"
+    if out="$( ( monitors_status_lines "$p" ) 2>&1)"; then printf '%s\n' "$out"; else echo "  couldn't ask $p: $(printf '%s' "$out" | tail -n1)"; fi
+  done
+  return 0
+}
+
+# cmd_monitors [sync|status|destroy] [--dry-run]
+cmd_monitors() {
+  local sub="${1:-sync}" dry=0 p found=0 a
+  [[ $# -eq 0 ]] || shift
+  for a in "$@"; do case "$a" in --dry-run) dry=1 ;; *) die "monitors: freelunch monitors [sync|status|destroy] [--dry-run]" ;; esac; done
+  [[ -n "$PROJECT" ]] || die "monitors: run it in a project, where its .freelunch/ folder is"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  for p in $(monitor_providers); do
+    found=1
+    case "$sub" in
+      sync)    monitors_sync "$p" "$dry" ;;
+      status)  echo "Monitors ($p)"; monitors_status_lines "$p" ;;
+      destroy) monitors_destroy "$p" ;;
+      *) die "monitors: sync, status or destroy" ;;
+    esac
+  done
+  [[ $found -eq 1 ]] || die "monitors: no uptime provider here. Make a folder for one in .freelunch/ (uptimerobot or statuscake) with its token set; see docs/monitors.md"
+}
+
 # dns_all apply|destroy: the action for each DNS provider the project has a config for
 dns_all() {
   local p
@@ -12084,6 +12255,11 @@ ci_secret_names() {
     [[ "$(meta "$s" layer)" != "host" ]] || emit FREELUNCH_SSH_PRIVATE_KEY "the private SSH key deploy signs in to the hosts with (without a passphrase)"
   done
   for s in $(dns_providers); do
+    while IFS= read -r entry; do
+      [[ -z "$entry" ]] || emit "${entry%%=*}" "${entry#*=}"
+    done < <(meta "$s" secrets | tr ';' '\n' | sed -e 's/^ *//' -e 's/ *$//')
+  done
+  for s in $(monitor_providers); do
     while IFS= read -r entry; do
       [[ -z "$entry" ]] || emit "${entry%%=*}" "${entry#*=}"
     done < <(meta "$s" secrets | tr ';' '\n' | sed -e 's/^ *//' -e 's/ *$//')
@@ -13748,6 +13924,7 @@ main() {
     output)               cmd_output "$@" ;;
     catalog)              cmd_catalog "$@" ;;
     dns)                  resolve_state_refs; cmd_dns "$@" ;;
+    monitors)             resolve_state_refs; cmd_monitors "$@" ;;
     api)                  resolve_state_refs; cmd_api "$@" ;;
     cli)                  resolve_state_refs; cmd_cli "$@" ;;
     guided)               resolve_state_refs; cmd_guided "$@" ;;

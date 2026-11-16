@@ -32,3 +32,7 @@ apps = { api = { host = "oci-main", compose = "../compose.yaml", needs = ["uptim
 - It uses the v3 API (`api.uptimerobot.com/v3`, bearer token). The free plan allows 10 requests a minute, which a deploy stays under.
 - The interval is 3600 seconds with a grace period of 300; change them in `providers/uptimerobot/api.yaml`.
 - The list call reads up to 200 monitors.
+
+## Monitors for your addresses
+
+With a folder for this provider in `.freelunch/` and its token set, `freelunch monitors sync` makes an HTTP monitor for each Cloudflare route (`<prefix>-<hostname>`, tagged `<prefix>`), `status` shows them and `destroy` removes them. The requests are read from the provider's reference and have not run against a live account. See [docs/monitors.md](../../docs/monitors.md).

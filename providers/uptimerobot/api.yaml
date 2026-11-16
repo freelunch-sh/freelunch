@@ -28,3 +28,23 @@ outputs:
     { kind: "observability", host: "heartbeat.uptimerobot.com", port: 443 }
   credentials: |
     { env: { UPTIMEROBOT_HEARTBEAT_URL: ($item.heartbeatUrl // error("UptimeRobot gave no heartbeatUrl for " + $name)) } }
+
+# HTTP monitors for the project's public addresses (freelunch monitors), read from the same OpenAPI spec (CreateHttpMonitorDto:
+# type HTTP, friendlyName, url, interval, timeout, tagNames; a monitor's status is PAUSED, STARTED, UP, LOOKS_DOWN or DOWN) and
+# not yet run against a live account. One monitor per Cloudflare route, named <name_prefix>-<hostname> and tagged <name_prefix>.
+# interval 300 is the free plan's shortest. The list asks for 200 monitors; a longer account isn't paged yet.
+monitor:
+  list:
+    request: GET /monitors?limit=200
+    items: ".data[]"
+    fields: { id: ".id", name: ".friendlyName", url: ".url", marker: ".tags[0].name", status: ".status" }
+  create:
+    request: POST /monitors
+    body: |
+      { type: "HTTP", friendlyName: $name, url: $url, interval: 300, timeout: 30, tagNames: [$prefix] }
+    id: ".id"
+  delete:
+    request: DELETE /monitors/{id}
+    ok: [200, 204, 404]
+  up: ["UP"]
+  down: ["DOWN", "LOOKS_DOWN"]

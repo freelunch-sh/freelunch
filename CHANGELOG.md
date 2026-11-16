@@ -20,6 +20,7 @@ release can change commands and the project layout.
   compute family but the Always Free Arm and micro amounts (from the catalogue), so OCI refuses a launch outside them; `doctor` says
   whether it is on. Off by default, and not run against a tenancy yet. `ssh-add` no longer holds `doctor` up when an agent asks for
   a fingerprint.
+- **`freelunch monitors`** makes an HTTP monitor for each Cloudflare route at UptimeRobot or StatusCake (`<prefix>-<hostname>`, tagged), removes the ones whose route is gone and never touches one it didn't make; a route says `monitor = false` to go without, and one behind Access has none unless `monitor = true`. `apply all` and `destroy all` keep them, `status` shows them. The requests are read from the providers' references and have not run live.
 - **`watch` keeps its last result in the state store** when the project has one, so a CI run (a fresh checkout) tells only what is new. The live `graph` also holds mesh nodes, DNS records and what api and cli engines recorded; Oracle, AWS, Azure and GCP say they are always on; the OCI module tests run against the provider's current schema.
 - **`freelunch graph`** prints the whole project as one document (`"format": 1`): hosts, platforms, apps, databases,
   buckets, services, tunnels, routes and what connects them, with the ids `check` uses and each provider's secrets named

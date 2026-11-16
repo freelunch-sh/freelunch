@@ -30,3 +30,24 @@ outputs:
     { kind: "observability", host: "push.statuscake.com", port: 443 }
   credentials: |
     { env: { STATUSCAKE_PUSH_URL: $item.data.url } }
+
+# Uptime checks for the project's public addresses (freelunch monitors), read from the API reference (POST /uptime: form
+# fields name, test_type HTTP, website_url, check_rate in seconds, tags[]; GET /uptime?tags= lists, a check's status is up or
+# down; DELETE /uptime/{id} answers 204) and not yet run against a live account. One check per Cloudflare route, named
+# <name_prefix>-<hostname> and tagged <name_prefix>. check_rate 300 is the free plan's shortest. The list asks for 100.
+monitor:
+  list:
+    request: GET /uptime?limit=100&tags={prefix}
+    items: ".data[]"
+    fields: { id: ".id", name: ".name", url: ".website_url", marker: ".tags[0]", status: ".status" }
+  create:
+    request: POST /uptime
+    body: |
+      { name: $name, test_type: "HTTP", website_url: $url, check_rate: 300, tags: [$prefix] }
+    id: ".data.new_id"
+    ok: [201]
+  delete:
+    request: DELETE /uptime/{id}
+    ok: [204, 404]
+  up: ["up"]
+  down: ["down"]

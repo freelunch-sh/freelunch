@@ -461,7 +461,7 @@ for capacity the account no longer has.
   by one (service tokens, `credit_expires_*`, the OCI session) and adds free domains:
   `domain_expires_<name with dots as underscores> = "YYYY-MM-DD"` in `billing.tfvars`, shown
   like the credits. `status` and `doctor` print from it unchanged; section 8 sends it
-- [ ] A monitor for every public address, when the project has an uptime provider. Read
+- [x] A monitor for every public address, when the project has an uptime provider. Read
   first how the UptimeRobot, StatusCake and Healthchecks.io providers create a check
   (`providers/*/api.yaml` or their stacks) and what the service contract gives. Then: when
   one of them is configured, each Cloudflare route gets an HTTP monitor named
@@ -657,6 +657,8 @@ Kept here so they are not lost. Do not build them without being asked.
 Each needs the user's accounts. Record every run in the provider's README "Live runs"
 section (date, commit, what ran, what failed) and only then set or keep `verified: live`.
 
+- [ ] ⛔ `freelunch monitors sync`, `status` and `destroy` against a real UptimeRobot and a real StatusCake account (the create body,
+  the list fields and the status words); then set `verified: live` for the monitor part in their READMEs
 - [ ] ⛔ The fixes made after 2026-11-09, on the real VM: `trust` after a restart, `up --move`
   with a volume between two hosts, `rollback`
 - [ ] ⛔ One deploy from GitHub Actions after an image build, with per-secret passing and no
@@ -715,12 +717,7 @@ Found while building sections 1 to 6. `[x]` means closed, with how; `[ ]` is ope
 
 **Section 7**
 
-- [ ] Monitors for every public address (the one unticked box of section 7) are not built. The UptimeRobot, StatusCake and
-  Healthchecks.io providers make heartbeat monitors (the app pings out), not HTTP monitors that fetch a URL. It needs an HTTP
-  `monitor:` request in each provider's `api.yaml` (UptimeRobot v3's `type: HTTP` with a url; StatusCake's uptime test, a form
-  body), a `monitor = false` option on Cloudflare routes, a sync of routes against the provider's list (names
-  `<project>-<hostname>`, removal of the ones whose route is gone) and a line per URL in `status`. Each request has to be read
-  from the provider's own schema, and none can be run here.
+- [x] Monitors for every public address: built (`freelunch monitors`, docs/monitors.md) for UptimeRobot (v3 `type: HTTP`) and StatusCake (`POST /uptime`), read from their references and tested with fixtures only; Healthchecks.io has heartbeats only. Open: the two providers' real answers (section 12 below), and paging past 200 and 100 monitors.
 - [ ] The expiry sentence list (`expiry_lines`) is tested with stubs, and the watch job (section 8) is what sends it.
 
 **Section 8**

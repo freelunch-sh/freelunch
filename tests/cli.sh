@@ -3019,6 +3019,84 @@ test_settings_yaml_matches_each_stacks_variables() {
   done
 }
 
+# monitors_run <checkout> <name> <project> <phase> <args...>: freelunch monitors against the fake API of an uptime provider
+monitors_run() {
+  local dir="$1" name="$2" proj="$3" phase="$4" var; shift 4
+  rm -rf "$dir/fake"; mkdir -p "$dir/fake"
+  cp "$ROOT/tests/fixtures/$name/scenario.json" "$dir/fake/scenario.json"
+  var="$(sed -n 's/^  env: *//p' "$dir/providers/$name/api.yaml" | head -1)"
+  (cd "$proj" && env "$var=$(jq -r .token "$ROOT/tests/fixtures/$name/scenario.json")" PATH="$WORK/api-bin:$PATH" \
+    FAKE_API_DIR="$dir/fake" FAKE_API_PHASE="$phase" "$dir/bin/freelunch" monitors "$@" 2>&1)
+}
+
+# Every public address gets an HTTP monitor from an uptime provider: one per Cloudflare route (not the ones that say
+# monitor = false, nor, unless they say monitor = true, the ones behind Access), named <prefix>-<hostname>; a route that is gone
+# loses its monitor; a monitor someone else made is left alone; status shows each address; the token is never printed.
+test_monitors_follow_the_routes_of_each_uptime_provider() {
+  local name dir p out
+  for name in statuscake uptimerobot; do
+    dir="$WORK/mon-$name"; p="$WORK/mon-$name-proj"
+    api_checkout "$dir" "$name"
+    mkdir -p "$p/.freelunch/$name" "$p/.freelunch/cloudflare"
+    cat > "$p/.freelunch/cloudflare/terraform.tfvars" <<'TFVARS'
+zone = "example.com"
+routes = {
+  "api.example.com"   = { host = "oci-main", port = 8080 }
+  "admin.example.com" = { host = "oci-main", port = 9000, access = { emails = ["me@example.com"] } }
+  "www.example.com"   = { host = "oci-main", port = 3000, monitor = false }
+  "vip.example.com"   = { host = "oci-main", port = 3001, monitor = true, access = { emails = ["me@example.com"] } }
+}
+TFVARS
+    # a dry run says what it would do and calls nothing that changes anything
+    out="$(monitors_run "$dir" "$name" "$p" monitors-sync sync --dry-run)" || { echo "$out"; return 1; }
+    contains "$out" "would create freelunch-api.example.com"
+    contains "$out" "would create freelunch-vip.example.com"
+    lacks "$out" "admin.example.com"
+    lacks "$out" "www.example.com"
+    lacks "$(cat "$dir/fake/log")" "POST"
+    # sync makes the two
+    out="$(monitors_run "$dir" "$name" "$p" monitors-sync sync)" || { echo "$out"; return 1; }
+    contains "$out" "made the monitor freelunch-api.example.com for https://api.example.com"
+    contains "$out" "made the monitor freelunch-vip.example.com for https://vip.example.com"
+    equals "$(grep -c '^POST' "$dir/fake/log")" 2
+    lacks "$out" "$(jq -r .token "$ROOT/tests/fixtures/$name/scenario.json")"
+    lacks "$(cat "$dir/fake/argv")" "$(jq -r .token "$ROOT/tests/fixtures/$name/scenario.json")"
+    # the request is what the provider's reference says
+    case "$name" in
+      statuscake) contains "$(cat "$dir/fake/bodies")" "name=freelunch-api.example.com&test_type=HTTP&website_url=https%3A%2F%2Fapi.example.com&check_rate=300&tags%5B%5D=freelunch" ;;
+      uptimerobot) contains "$(jq -c . "$dir/fake/bodies" | head -1)" '{"type":"HTTP","friendlyName":"freelunch-api.example.com","url":"https://api.example.com","interval":300,"timeout":30,"tagNames":["freelunch"]}' ;;
+    esac
+    # a second run: api has its monitor, vip doesn't; the old route's monitor goes; another project's and a heartbeat stay
+    out="$(monitors_run "$dir" "$name" "$p" monitors-resync sync)" || { echo "$out"; return 1; }
+    contains "$out" "deleted the monitor freelunch-old.example.com (its route is gone)"
+    contains "$out" "made the monitor freelunch-vip.example.com"
+    lacks "$out" "other-x"
+    lacks "$(cat "$dir/fake/log")" "DELETE /v1/uptime/23"
+    lacks "$(cat "$dir/fake/log")" "DELETE /v3/monitors/33"
+    lacks "$(cat "$dir/fake/log")" "DELETE /v3/monitors/34"
+    # status: a line per address
+    out="$(monitors_run "$dir" "$name" "$p" monitors-status status)" || { echo "$out"; return 1; }
+    contains "$out" "Monitors ($name)"
+    contains "$(grep 'api.example.com' <<< "$out")" "DOWN"
+    contains "$(grep 'vip.example.com' <<< "$out")" "no monitor (freelunch monitors sync)"
+    lacks "$out" "www.example.com"
+    # destroy removes the ones it made
+    out="$(monitors_run "$dir" "$name" "$p" monitors-resync destroy)" || { echo "$out"; return 1; }
+    contains "$out" "deleted the monitor freelunch-api.example.com"
+    contains "$out" "deleted the monitor freelunch-old.example.com"
+  done
+  # freelunch status shows them too, and says so when the token isn't set
+  new_project "$WORK/mon-status"
+  mkdir -p "$WORK/mon-status/.freelunch/statuscake" "$WORK/mon-status/.freelunch/cloudflare"
+  cp "$p/.freelunch/cloudflare/terraform.tfvars" "$WORK/mon-status/.freelunch/cloudflare/terraform.tfvars"
+  out="$( (unset STATUSCAKE_API_TOKEN; status_in "$WORK/mon-status") 2>&1 || true)"
+  contains "$out" "STATUSCAKE_API_TOKEN isn't set, so statuscake isn't asked"
+  # no uptime provider: it says how to get one
+  mkdir -p "$WORK/mon-none/.freelunch"
+  if out="$(cd "$WORK/mon-none" && "$CLI" monitors 2>&1)"; then echo "monitors should fail with no uptime provider"; return 1; fi
+  contains "$out" "no uptime provider here"
+}
+
 # freelunch backup runs the backup unit now and follows it; backup list prints the snapshots.
 test_backup_runs_now_and_lists_snapshots() {
   local p="$WORK/backup-now" out key

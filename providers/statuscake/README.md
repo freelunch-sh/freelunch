@@ -32,3 +32,7 @@ apps = { api = { host = "oci-main", compose = "../compose.yaml", needs = ["statu
 - The API takes **form-encoded** requests (`body_format: form` in `api.yaml`), and its answer to creating a monitor holds only the id, so freelunch reads the monitor once to get the push URL (`outputs.fetch`).
 - The period is 3600 seconds (the monitor is down when no call comes for an hour); change `period` in `providers/statuscake/api.yaml` for another.
 - The list call reads up to 100 monitors.
+
+## Monitors for your addresses
+
+With a folder for this provider in `.freelunch/` and its token set, `freelunch monitors sync` makes an HTTP monitor for each Cloudflare route (`<prefix>-<hostname>`, tagged `<prefix>`), `status` shows them and `destroy` removes them. The requests are read from the provider's reference and have not run against a live account. See [docs/monitors.md](../../docs/monitors.md).

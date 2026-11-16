@@ -2,15 +2,218 @@
   "generic": false,
   "token": "ur-key-5432",
   "check": [
-    {"match": "GET /v3/user/me", "status": 200, "body": {"email": "me@example.com"}}
+    {
+      "match": "GET /v3/user/me",
+      "status": 200,
+      "body": {
+        "email": "me@example.com"
+      }
+    }
   ],
   "create": [
-    {"match": "GET /v3/monitors", "status": 200, "body": {"data": [], "nextLink": null}},
-    {"match": "POST /v3/monitors", "status": 201, "body": {"id": 4711, "friendlyName": "freelunch-hb", "type": "HEARTBEAT", "heartbeatUrl": "https://heartbeat.uptimerobot.com/m4711-mock-key", "tags": [{"id": 1, "name": "freelunch", "color": "#fff", "monitors": []}]}},
-    {"match": "GET /v3/monitors", "status": 200, "body": {"data": [{"id": 4711, "friendlyName": "freelunch-hb", "type": "HEARTBEAT", "heartbeatUrl": "https://heartbeat.uptimerobot.com/m4711-mock-key", "tags": [{"id": 1, "name": "freelunch", "color": "#fff", "monitors": []}]}], "nextLink": null}}
+    {
+      "match": "GET /v3/monitors",
+      "status": 200,
+      "body": {
+        "data": [],
+        "nextLink": null
+      }
+    },
+    {
+      "match": "POST /v3/monitors",
+      "status": 201,
+      "body": {
+        "id": 4711,
+        "friendlyName": "freelunch-hb",
+        "type": "HEARTBEAT",
+        "heartbeatUrl": "https://heartbeat.uptimerobot.com/m4711-mock-key",
+        "tags": [
+          {
+            "id": 1,
+            "name": "freelunch",
+            "color": "#fff",
+            "monitors": []
+          }
+        ]
+      }
+    },
+    {
+      "match": "GET /v3/monitors",
+      "status": 200,
+      "body": {
+        "data": [
+          {
+            "id": 4711,
+            "friendlyName": "freelunch-hb",
+            "type": "HEARTBEAT",
+            "heartbeatUrl": "https://heartbeat.uptimerobot.com/m4711-mock-key",
+            "tags": [
+              {
+                "id": 1,
+                "name": "freelunch",
+                "color": "#fff",
+                "monitors": []
+              }
+            ]
+          }
+        ],
+        "nextLink": null
+      }
+    }
   ],
   "destroy": [
-    {"match": "GET /v3/monitors", "status": 200, "body": {"data": [{"id": 4711, "friendlyName": "freelunch-hb", "tags": [{"id": 1, "name": "freelunch"}]}, {"id": 4712, "friendlyName": "freelunch-mine", "tags": []}], "nextLink": null}},
-    {"match": "DELETE /v3/monitors/4711", "status": 200, "body": null}
+    {
+      "match": "GET /v3/monitors",
+      "status": 200,
+      "body": {
+        "data": [
+          {
+            "id": 4711,
+            "friendlyName": "freelunch-hb",
+            "tags": [
+              {
+                "id": 1,
+                "name": "freelunch"
+              }
+            ]
+          },
+          {
+            "id": 4712,
+            "friendlyName": "freelunch-mine",
+            "tags": []
+          }
+        ],
+        "nextLink": null
+      }
+    },
+    {
+      "match": "DELETE /v3/monitors/4711",
+      "status": 200,
+      "body": null
+    }
+  ],
+  "monitors-sync": [
+    {
+      "match": "GET /v3/monitors",
+      "status": 200,
+      "body": {
+        "data": [],
+        "nextLink": null
+      }
+    },
+    {
+      "match": "POST /v3/monitors",
+      "status": 201,
+      "times": 2,
+      "body": {
+        "id": 31,
+        "friendlyName": "freelunch-api.example.com",
+        "type": "HTTP"
+      }
+    }
+  ],
+  "monitors-resync": [
+    {
+      "match": "GET /v3/monitors",
+      "status": 200,
+      "body": {
+        "data": [
+          {
+            "id": 31,
+            "friendlyName": "freelunch-api.example.com",
+            "type": "HTTP",
+            "url": "https://api.example.com",
+            "status": "UP",
+            "tags": [
+              {
+                "id": 1,
+                "name": "freelunch"
+              }
+            ]
+          },
+          {
+            "id": 32,
+            "friendlyName": "freelunch-old.example.com",
+            "type": "HTTP",
+            "url": "https://old.example.com",
+            "status": "DOWN",
+            "tags": [
+              {
+                "id": 1,
+                "name": "freelunch"
+              }
+            ]
+          },
+          {
+            "id": 33,
+            "friendlyName": "freelunch-hb",
+            "type": "HEARTBEAT",
+            "tags": [
+              {
+                "id": 1,
+                "name": "freelunch"
+              }
+            ]
+          },
+          {
+            "id": 34,
+            "friendlyName": "other-x.example.com",
+            "type": "HTTP",
+            "url": "https://x.example.com",
+            "status": "UP",
+            "tags": [
+              {
+                "id": 2,
+                "name": "other"
+              }
+            ]
+          }
+        ],
+        "nextLink": null
+      }
+    },
+    {
+      "match": "DELETE /v3/monitors/32",
+      "status": 204,
+      "body": null
+    },
+    {
+      "match": "POST /v3/monitors",
+      "status": 201,
+      "body": {
+        "id": 35,
+        "friendlyName": "freelunch-vip.example.com",
+        "type": "HTTP"
+      }
+    },
+    {
+      "match": "DELETE /v3/monitors/31",
+      "status": 204,
+      "body": null
+    }
+  ],
+  "monitors-status": [
+    {
+      "match": "GET /v3/monitors",
+      "status": 200,
+      "body": {
+        "data": [
+          {
+            "id": 31,
+            "friendlyName": "freelunch-api.example.com",
+            "type": "HTTP",
+            "url": "https://api.example.com",
+            "status": "LOOKS_DOWN",
+            "tags": [
+              {
+                "id": 1,
+                "name": "freelunch"
+              }
+            ]
+          }
+        ],
+        "nextLink": null
+      }
+    }
   ]
 }

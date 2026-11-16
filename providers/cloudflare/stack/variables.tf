@@ -31,13 +31,16 @@ variable "routes" {
     that serves the hostname, and port is the port its container listens on. Add
     access = { emails = ["you@example.com"] } to require an email login, or
     access = { service_tokens = ["backend"] } to let only clients with that
-    token through.
+    token through. monitor = false leaves the address out of the uptime monitors
+    (freelunch monitors); monitor = true adds a route behind access to them.
   EOT
   type = map(object({
     host   = optional(string)
     port   = number
     app    = optional(string)
     scheme = optional(string, "http")
+    # Whether freelunch monitors the address with an uptime provider (freelunch monitors). Default: yes, unless it has access
+    monitor = optional(bool)
     access = optional(object({
       emails         = optional(list(string), [])
       email_domains  = optional(list(string), [])
