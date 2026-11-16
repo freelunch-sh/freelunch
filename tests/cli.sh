@@ -8611,7 +8611,7 @@ free_mb() { # memory this process can still use, in MB; empty when it can't tell
   echo "$m"
 }
 default_jobs() {
-  local n mem load idle
+  local n mem load
   n="$(ncpu)"
   mem="$(free_mb)"
   if [[ "$mem" =~ ^[0-9]+$ ]]; then [[ $((mem / 300)) -ge $n ]] || n=$((mem / 300)); fi
