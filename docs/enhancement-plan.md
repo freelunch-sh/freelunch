@@ -754,10 +754,11 @@ Found while building sections 1 to 6. `[x]` means closed, with how; `[ ]` is ope
 
 **Section 10**
 
-- [ ] The palette gives `settings_from` (the path of a stack's `variables.tf`), not the variables with type, default and
+- [x] The palette gives `settings_from` (the path of a stack's `variables.tf`), not the variables with type, default and
   description: `tofu` has no command that lists a module's variables (`terraform-config-inspect` is a separate tool), and the plan
   rules out regular expressions over HCL. A canvas's settings form needs it: decide on bundling a parser, or have each stack
   publish its variables as an output.
+  **Done:** `providers/<p>/settings.yaml` lists each stack's variables; the palette reads it with the catalogue's own `yamldecode`. A stack's tofu output was the first idea, but an output can't be read before the stack is applied. A test checks the names against `variables.tf`; types and defaults are generated text, so a changed default needs the file updated by hand.
 - [ ] `graph check`'s room check for a shared host reads only the document; the other projects on the machine are known to the
   host, which `deploy --dry-run` asks.
 - [x] The answer of the writing-back spike (section 10): `*.tfvars.json` is not used, see docs/graph.md ("Why HCL").

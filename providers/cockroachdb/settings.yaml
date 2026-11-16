@@ -1,0 +1,18 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix of every cluster: <name_prefix>-<name>. freelunch init sets it to the project's name."
+  - name: databases
+    required: false
+    type: "map(object({ cloud_provider = optional(string, \"AWS\") region = optional(string, \"us-east-1\") database_name = optional(string, \"defaultdb\") user = optional(string, \"app\") request_unit_limit = optional(number, 50000000) storage_mib_limit = optional(number, 10240) }))"
+    default: "{}"
+    description: "Basic (serverless) clusters to make, keyed by name, e.g. { main = {} }. Each one is a cluster <name_prefix>-<name> in region (us-east-1 on AWS, us-central1 on GCP ...) with a SQL user and the default database. request_unit_limit and storage_mib_limit cap what the cluster may use in a month; the defaults are the free monthly allowance (50M request units, 10 GiB), shared by all clusters in the organisation."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow limits above the free monthly allowance (usage above it is billed)."

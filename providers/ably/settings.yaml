@@ -1,0 +1,13 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "The names of everything this stack creates start with the project name."
+  - name: apps
+    required: false
+    type: "map(object({ capabilities = optional(map(set(string)), { \"*\" = [\"publish\", \"subscribe\"] }) }))"
+    default: "{ main = {} }"
+    description: "Ably apps to make, keyed by name. Each gets an API key of its own, limited to the capabilities given: a map from a channel name (or * for all) to what it may do (publish, subscribe, presence, history...)."

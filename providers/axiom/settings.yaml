@@ -1,0 +1,18 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: api_token
+    required: false
+    type: "string"
+    default: "null"
+    description: "An Axiom API token that can create datasets and tokens. Set it with TF_VAR_api_token, never in a tfvars file."
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "The names of everything this stack creates start with the project name."
+  - name: datasets
+    required: false
+    type: "map(object({ description = optional(string) retention_days = optional(number, 30) }))"
+    default: "{ logs = {} }"
+    description: "Datasets to make, keyed by name. Each gets a token that can only ingest into it."

@@ -1,0 +1,66 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: zone
+    required: true
+    type: "string"
+    description: "Domain on Cloudflare, e.g. example.com. The zone and its account are looked up by name."
+  - name: shared_hosts
+    required: false
+    type: "list(string)"
+    default: "[]"
+    description: "Hosts another project made, which this project's apps run on (hosts with shared = true in apps.tfvars). Routes may point at them though the inventory doesn't list them; freelunch fills this in."
+  - name: account_id
+    required: false
+    type: "string"
+    default: "null"
+    description: "Account that owns the tunnels. null uses the zone's account."
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix for tunnel names."
+  - name: routes
+    required: true
+    type: "map(object({ host = optional(string) port = number app = optional(string) scheme = optional(string, \"http\") access = optional(object({ emails = optional(list(string), []) email_domains = optional(list(string), []) service_tokens = optional(list(string), []) })) }))"
+    description: "Public hostname -> inventory host and local port, e.g. { \"api.example.com\" = { host = \"oci-main\", port = 8080 } }. host is <provider>-<instance> from `freelunch inventory`, or default_host when left out (freelunch sets it to the target freelunch up chose). On a container platform such as northflank-main, add app = \"<name>\", the app in apps.tfvars that serves the hostname, and port is the port its container listens on. Add access = { emails = [\"you@example.com\"] } to require an email login, or access = { service_tokens = [\"backend\"] } to let only clients with that token through."
+  - name: default_host
+    required: false
+    type: "string"
+    default: "null"
+    description: "Host of the routes that name none: <provider>-<instance>. bin/freelunch sets it to the first deployed target of the project."
+  - name: service_token_duration
+    required: false
+    type: "string"
+    default: "\"8760h\""
+    description: "How long a service token is valid: 8760h (a year, Cloudflare's default) or forever."
+  - name: inventory_state_path
+    required: false
+    type: "string"
+    default: "null"
+    description: "State file of hybrid/, used to check that every route's host exists. bin/freelunch sets it in project mode."
+  - name: buckets
+    required: false
+    type: "map(object({ location = optional(string) }))"
+    default: "{}"
+    description: "R2 buckets to make, keyed by name, e.g. { results = {} }. Each one is <name_prefix>-<name> in the account, with an R2 key of its own that can only reach it. An app takes one with bucket = \"cloudflare-<name>\" in apps.tfvars. location is a hint, such as weur or enam; Cloudflare picks one near you without it."
+  - name: r2_permission_group_id
+    required: false
+    type: "string"
+    default: "null"
+    description: "ID of Cloudflare's permission group Workers R2 Storage Bucket Item Write, which each bucket's key gets. null looks it up by name."
+  - name: workers
+    required: false
+    type: "map(object({ script_file = string hostname = optional(string) compatibility_date = optional(string, \"2025-09-01\") }))"
+    default: "{}"
+    description: "Workers to deploy, keyed by name, e.g. { api = { script_file = \"../apps/api/worker.js\", hostname = \"api.example.com\" } }. One ES module per Worker, named <name_prefix>-<name>. hostname puts it on a custom domain in the zone. The free plan runs 100 Workers and 100,000 requests a day."
+  - name: pages
+    required: false
+    type: "map(object({ production_branch = optional(string, \"main\") hostname = optional(string) }))"
+    default: "{}"
+    description: "Pages projects to create, keyed by name, e.g. { site = { hostname = \\\"www.example.com\\\" } }. Upload the files with `wrangler pages deploy` or a Git connection."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow more Workers or Pages projects than the free plan includes."

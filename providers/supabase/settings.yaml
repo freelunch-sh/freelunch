@@ -1,0 +1,22 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix of every project: <name_prefix>-<name>. freelunch init sets it to the project's name."
+  - name: organization_id
+    required: true
+    type: "string"
+    description: "Slug of the Supabase organisation that owns the projects (the dashboard's organisation settings show it)."
+  - name: databases
+    required: false
+    type: "map(object({ region = optional(string, \"us-east-1\") }))"
+    default: "{}"
+    description: "Projects to make, keyed by name, e.g. { main = {} }. Each one is <name_prefix>-<name>, a Postgres database with auth, storage and the API. region is a Supabase region such as us-east-1, eu-central-1 or ap-southeast-1. The free plan has 2 active projects, which pause after a week without use."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow more projects than the free plan includes."

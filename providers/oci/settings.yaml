@@ -1,0 +1,100 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: region
+    required: true
+    type: "string"
+    description: "Your tenancy's home region, e.g. eu-frankfurt-1. Always Free resources exist only there."
+  - name: tenancy_ocid
+    required: true
+    type: "string"
+    description: "Tenancy OCID (the `tenancy=` line in ~/.oci/config)."
+  - name: compartment_ocid
+    required: false
+    type: "string"
+    default: "null"
+    description: "Compartment to deploy into. null uses the root compartment."
+  - name: oci_auth
+    required: false
+    type: "string"
+    default: "\"ApiKey\""
+    description: "OCI provider auth method: ApiKey (default) or SecurityToken (after `oci session authenticate`)."
+  - name: oci_config_profile
+    required: false
+    type: "string"
+    default: "\"DEFAULT\""
+    description: "Profile in ~/.oci/config to use."
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix for all resource names."
+  - name: ssh_public_keys
+    required: true
+    type: "list(string)"
+    description: "SSH public keys authorized on every instance."
+  - name: ssh_source_cidrs
+    required: false
+    type: "list(string)"
+    default: "[\"0.0.0.0/0\"]"
+    description: "CIDRs allowed to reach SSH. Use your own IP (x.x.x.x/32), or [] with Tailscale."
+  - name: ingress_tcp_ports
+    required: false
+    type: "list(number)"
+    default: "[80, 443]"
+    description: "TCP ports open to the internet."
+  - name: ingress_udp_ports
+    required: false
+    type: "list(number)"
+    default: "[]"
+    description: "UDP ports open to the internet."
+  - name: instances
+    required: false
+    type: "map(object({ shape = optional(string, \"VM.Standard.A1.Flex\") ocpus = optional(number, 2) memory_in_gbs = optional(number, 12) boot_volume_gb = optional(number, 50) availability_domain_index = optional(number) swap_size_gb = optional(number, 0) apps = optional(map(object({ compose = string env = optional(map(string), {}) })), {}) }))"
+    default: "{ main = { shape = \"VM.Standard.A1.Flex\" ocpus = 2 memory_in_gbs = 12 boot_volume_gb = 100 } }"
+    description: "Docker hosts to create. See providers/oci/README.md for free-tier layouts."
+  - name: availability_domain_offset
+    required: false
+    type: "number"
+    default: "0"
+    description: "Set by freelunch apply --wait-for-capacity, which tries the next availability domain that offers the shape on each retry. Leave it at 0; pin a domain with availability_domain_index instead."
+  - name: capacity_fallbacks
+    required: false
+    type: "list(object({ ocpus = number memory_in_gbs = number }))"
+    default: "[]"
+    description: "Smaller A1 sizes to settle for while freelunch apply --wait-for-capacity waits, e.g. [{ ocpus = 1, memory_in_gbs = 6 }]. After every availability domain has been tried with the size in instances, the wait tries the first of these, then the next, then starts over. An instance never gets more than instances asks for; after a smaller one is made, set instances to its size, or the next plan resizes it."
+  - name: tailscale_auth_key
+    required: false
+    type: "string"
+    default: "null"
+    description: "Optional Tailscale auth key; hosts join your tailnet on first boot."
+  - name: netbird_setup_key
+    required: false
+    type: "string"
+    default: "null"
+    description: "Optional NetBird setup key; hosts join your NetBird network on first boot."
+  - name: reserved_block_storage_gb
+    required: false
+    type: "number"
+    default: "0"
+    description: "Block storage already used elsewhere in the tenancy, counted against the 200 GB cap."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow configurations above the Always Free caps or outside the home region."
+  - name: quota_guard
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Make a compartment quota in the tenancy that zeroes every compute family but the Always Free shapes (the Arm A1 and AMD micro amounts in the catalogue). OCI then refuses a launch outside them, even on a pay-as-you-go account. Off by default: it also stops you launching a machine you meant to pay for. It can't be on with acknowledge_billable_resources."
+  - name: budget_alert_emails
+    required: false
+    type: "list(string)"
+    default: "[]"
+    description: "Emailed when the tenancy's spend reaches budget_amount, or is forecast to. freelunch creates a budget with these before the first VM. [] creates none, and freelunch doctor warns."
+  - name: budget_amount
+    required: false
+    type: "number"
+    default: "1"
+    description: "Monthly budget that triggers the alert. Always Free costs nothing, so 1 means something is billed."

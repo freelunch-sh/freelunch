@@ -1,0 +1,18 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix of every cluster: <name_prefix>-<name>. freelunch init sets it to the project's name."
+  - name: databases
+    required: false
+    type: "map(object({ cloud = optional(string, \"AWS\") region = optional(string, \"us-west-2\") username = optional(string, \"admin\") allow_cidrs = optional(list(string), []) }))"
+    default: "{}"
+    description: "YugabyteDB Aeon Sandbox clusters to make, keyed by name, e.g. { main = {} }. A Sandbox is one node (up to 2 vCPUs, 10 GB), on aws or gcp, in region. username is the admin login; its password is generated and kept in the state. allow_cidrs are the IP ranges allowed to connect: a Sandbox is reachable only through an allow list, so leave it empty and nothing can connect."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow more clusters than the free plan includes. Only the Sandbox tier is made here, and Yugabyte allows one per account, so this just lifts the check."

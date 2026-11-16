@@ -1,0 +1,18 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix of every database: <name_prefix>-<name>. freelunch init sets it to the project's name."
+  - name: databases
+    required: false
+    type: "map(object({ primary_region = optional(string, \"us-east-1\") eviction = optional(bool, false) }))"
+    default: "{}"
+    description: "Redis databases to make, keyed by name, e.g. { cache = {} }. Each one is a global Upstash database <name_prefix>-<name> whose primary lives in primary_region (us-east-1, eu-west-1, ap-southeast-1 ...). eviction drops old keys when the 250 MB are full instead of refusing writes."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow more databases than the free plan includes (extra ones are billed pay-as-you-go)."

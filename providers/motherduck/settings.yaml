@@ -1,0 +1,18 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix of every database: <name_prefix>_<name>. freelunch init sets it to the project's name."
+  - name: databases
+    required: false
+    type: "map(object({ service_account = optional(bool, true) token_ttl_seconds = optional(number, 31536000) }))"
+    default: "{}"
+    description: "MotherDuck (DuckDB) databases to make, keyed by name, e.g. { main = {} }. Each is a database <name_prefix>_<name> in your account. With service_account = true (the default) it also gets a service account <name_prefix>_<name>_svc and a read_write access token for it, which is the credential in database_credentials. The Lite plan has 2 service accounts. token_ttl_seconds is the token's lifetime (300 to 31536000)."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow more service accounts than the Lite plan includes."

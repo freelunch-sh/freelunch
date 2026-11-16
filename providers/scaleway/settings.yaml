@@ -1,0 +1,37 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Name of the container namespace freelunch makes. freelunch init sets it to the project's name."
+  - name: project_id
+    required: true
+    type: "string"
+    description: "ID of the Scaleway project that holds the namespace (the console's project settings show it)."
+  - name: region
+    required: false
+    type: "string"
+    default: "\"fr-par\""
+    description: "Scaleway region: fr-par, nl-ams or pl-waw."
+  - name: memory_mb
+    required: false
+    type: "number"
+    default: "128"
+    description: "Memory of each container, in MB: 128, 256, 512, 1024, 2048, 3072 or 4096. Scaleway pairs each size with a CPU share. The free grant is 400,000 GB-s and 200,000 vCPU-s a month, which keeps one 128 MB container on all month."
+  - name: min_scale
+    required: false
+    type: "number"
+    default: "0"
+    description: "Instances each container keeps running. 0 scales to zero between requests; 1 keeps it always on, which only a 128 MB container does within the free grant."
+  - name: max_scale
+    required: false
+    type: "number"
+    default: "1"
+    description: "Most instances each container scales out to."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow a size and scale that would use more than the free grant."

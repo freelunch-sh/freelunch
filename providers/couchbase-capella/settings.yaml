@@ -1,0 +1,27 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix of every project and cluster: <name_prefix>-<name>. freelunch init sets it to the project's name."
+  - name: organization_id
+    required: true
+    type: "string"
+    description: "Id of the Capella organisation (a UUID, shown in the console under Settings)."
+  - name: databases
+    required: false
+    type: "map(object({ cloud = optional(string, \"aws\") region = optional(string, \"us-east-2\") cidr = optional(string, \"10.0.0.0/20\") bucket = optional(string, \"app\") }))"
+    default: "{}"
+    description: "Free clusters to make, keyed by name, e.g. { main = {} }. Each one is a Capella project and a free-tier cluster with one bucket and one database user. cloud is aws, azure or gcp, region the region the free tier is offered in and cidr the cluster's private network range."
+  - name: allowed_cidrs
+    required: false
+    type: "list(string)"
+    default: "[\"0.0.0.0/0\"]"
+    description: "IP ranges allowed to connect to every cluster. The default allows any address; narrow it to yours."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow more clusters than the free tier includes."

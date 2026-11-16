@@ -1,0 +1,27 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix of every service freelunch makes on Render: <name_prefix>-<app>. freelunch init sets it to the project's name."
+  - name: owner_id
+    required: true
+    type: "string"
+    description: "ID of the Render workspace that owns the services (usr-... for a personal one, tea-... for a team): the dashboard's workspace settings show it."
+  - name: region
+    required: false
+    type: "string"
+    default: "\"oregon\""
+    description: "Render region: oregon, ohio, virginia, frankfurt or singapore. A workspace's services in one region can reach each other privately."
+  - name: plan
+    required: false
+    type: "string"
+    default: "\"free\""
+    description: "Plan of every service. Only free is free: 512 MB, 0.1 CPU, asleep after 15 minutes without a request."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow a paid plan (starter and up)."

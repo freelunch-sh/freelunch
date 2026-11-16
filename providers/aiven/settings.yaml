@@ -1,0 +1,22 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix of every service: <name_prefix>-<name>. freelunch init sets it to the project's name."
+  - name: project
+    required: true
+    type: "string"
+    description: "Name of the Aiven project that holds the services (made in the Aiven console)."
+  - name: databases
+    required: false
+    type: "map(object({ engine = optional(string, \"pg\") cloud_name = optional(string, \"aws-eu-west-1\") plan = optional(string) }))"
+    default: "{}"
+    description: "Free services to make, keyed by name, e.g. { main = {} }. engine is \"pg\" (PostgreSQL) or \"valkey\". cloud_name is where it runs (aws-eu-west-1, google-europe-west1 ...); the free plan is only offered in some regions. plan defaults to the free plan."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow more services, or a paid plan, than the free plan includes."

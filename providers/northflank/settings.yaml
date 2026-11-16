@@ -1,0 +1,28 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Name of the Northflank project, which is also its ID. freelunch init sets it to the project's name."
+  - name: region
+    required: false
+    type: "string"
+    default: "\"europe-west\""
+    description: "Northflank region of the project, e.g. europe-west or us-central. curl https://api.northflank.com/v1/regions lists them."
+  - name: plan
+    required: false
+    type: "string"
+    default: "\"nf-compute-20\""
+    description: "Compute plan of each app's service. The free Sandbox runs nf-compute-10 (0.1 vCPU, 256 MB) and nf-compute-20 (0.2 vCPU, 512 MB)."
+  - name: volume_size
+    required: false
+    type: "number"
+    default: "6144"
+    description: "Size in MB of each volume freelunch deploy makes for an app's named volumes. Northflank's default nvme storage class takes 6144 or more; volumes can grow later but never shrink."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow plans outside the free Sandbox, and more services than it has."

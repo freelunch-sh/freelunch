@@ -1,0 +1,23 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix of every database: <name_prefix>-<name>. freelunch init sets it to the project's name."
+  - name: databases
+    required: false
+    type: "map(object({ cloud_provider = optional(string, \"gcp\") region = optional(string, \"us-east1\") keyspace = optional(string, \"app\") }))"
+    default: "{}"
+    description: "Serverless databases to make, keyed by name, e.g. { main = {} }. cloud_provider is aws, gcp or azure and region is a region the free plan is offered in; keyspace is the first keyspace."
+  - name: token_role_ids
+    required: false
+    type: "list(string)"
+    default: "[]"
+    description: "Role ids for an application token made per database and put in database_credentials. Empty makes no token; use one from the console instead."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow more databases than the free plan includes."

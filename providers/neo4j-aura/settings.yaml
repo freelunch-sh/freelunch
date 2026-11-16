@@ -1,0 +1,22 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix of every instance: <name_prefix>-<name>. freelunch init sets it to the project's name."
+  - name: project_id
+    required: true
+    type: "string"
+    description: "Aura project (tenant) id the instances belong to. Shown in the Aura console under the project's settings, or in `GET /v1/tenants`."
+  - name: databases
+    required: false
+    type: "map(object({ cloud_provider = optional(string, \"gcp\") region = optional(string, \"us-central1\") }))"
+    default: "{}"
+    description: "AuraDB Free instances to make, keyed by name, e.g. { main = {} }. Each is a graph database <name_prefix>-<name> of type free-db (1 GB, 200k nodes, 400k relationships). cloud_provider is gcp, aws or azure and region its region name; which of them Free offers is unverified."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow more instances than the free plan includes. Only free-db instances are made here, so this just lifts the count check."

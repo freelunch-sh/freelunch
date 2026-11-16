@@ -1,0 +1,13 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "The names of everything this stack creates start with the project name."
+  - name: heartbeats
+    required: false
+    type: "map(object({ period = optional(number, 3600) grace = optional(number, 300) }))"
+    default: "{ main = {} }"
+    description: "Heartbeats to make, keyed by name. An app requests the heartbeat's URL when its job has run; Better Stack alerts when a request is missing. period and grace are seconds."

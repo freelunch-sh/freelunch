@@ -1,0 +1,23 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix of every project: <name_prefix>-<name>. freelunch init sets it to the project's name."
+  - name: org_id
+    required: false
+    type: "string"
+    default: "null"
+    description: "Neon organisation that owns the projects. null uses the account's personal organisation."
+  - name: databases
+    required: false
+    type: "map(object({ region_id = optional(string, \"aws-us-east-2\") pg_version = optional(number, 17) database_name = optional(string, \"app\") role_name = optional(string, \"app\") max_cu = optional(number, 2) }))"
+    default: "{}"
+    description: "Postgres projects to make, keyed by name, e.g. { main = {} }. Each one is a Neon project <name_prefix>-<name> with its default branch, a role and a database. region_id is where it runs (aws-us-east-2, aws-eu-central-1, azure-eastus2 ...); pg_version is 14 to 17. max_cu caps the autoscaling compute; the free plan allows 2."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow more projects, or more compute, than the free plan includes."

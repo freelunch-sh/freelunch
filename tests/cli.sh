@@ -2891,6 +2891,9 @@ test_catalog_json_is_the_palette() {
   equals "$(jq -r '.[] | select(.provider == "render") | "\(.always_on) \(.sleeps_after_minutes) \(.volumes)"' <<< "$out")" "no 15 no"
   # a provider with a stack says where its settings are
   equals "$(jq -r '.[] | select(.provider == "oci") | .settings_from' <<< "$out")" "providers/oci/stack/variables.tf"
+  # a stack's settings: name, type, default, description and whether it is required
+  equals "$(jq -r '.[] | select(.provider == "neon") | .settings | map(select(.required | not) | .name) | join(",")' <<< "$out")" "name_prefix,org_id,databases,acknowledge_billable_resources"
+  equals "$(jq -r '.[] | select(.provider == "oci") | .settings[] | select(.name == "tenancy_ocid") | "\(.type) \(.required)"' <<< "$out")" "string true"
   # and the README is left alone
   [[ -z "$(cd "$ROOT" && git diff --name-only -- README.md 2>/dev/null | head -c0)" ]] || true
   if "$CLI" catalog --yaml >/dev/null 2>&1; then echo "catalog --yaml should fail"; return 1; fi
@@ -3002,6 +3005,18 @@ test_graph_holds_records_mesh_and_dns() {
   equals "$(jq -r '.edges[] | select(.to == "mesh-oci") | "\(.from) \(.kind)"' <<< "$out")" "oci-main member-of"
   equals "$(jq -r '.nodes[] | select(.id == "turso-app") | "\(.provider) \(.settings.engine) \(.settings.port)"' <<< "$out")" "turso libsql 443"
   contains "$(dns_in "$p" graph 2>&1)" "record dns-desec-api (desec)"
+}
+
+# providers/<p>/settings.yaml says what a stack's variables are, for the palette; it has to keep step with stack/variables.tf
+test_settings_yaml_matches_each_stacks_variables() {
+  local f p have want
+  for f in "$ROOT"/providers/*/stack/variables.tf; do
+    p="$(basename "$(dirname "$(dirname "$f")")")"
+    [[ -f "$ROOT/providers/$p/settings.yaml" ]] || { echo "providers/$p has a stack and no settings.yaml"; return 1; }
+    want="$(sed -n 's/^variable "\([^"]*\)".*/\1/p' "$f" | tr '\n' ' ')"
+    have="$(sed -n 's/^  - name: //p' "$ROOT/providers/$p/settings.yaml" | tr '\n' ' ')"
+    [[ "$want" == "$have" ]] || { echo "providers/$p/settings.yaml lists: $have; variables.tf has: $want"; return 1; }
+  done
 }
 
 # freelunch backup runs the backup unit now and follows it; backup list prints the snapshots.

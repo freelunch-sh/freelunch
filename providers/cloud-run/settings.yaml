@@ -1,0 +1,32 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Labels the services freelunch makes, so status and destroy touch only those. freelunch init sets it to the project's name."
+  - name: project_id
+    required: true
+    type: "string"
+    description: "Google Cloud project that runs the services. It needs a billing account, which the free tier requires too."
+  - name: region
+    required: false
+    type: "string"
+    default: "\"us-central1\""
+    description: "Cloud Run region, e.g. us-central1 or europe-west1. gcloud run regions list shows them."
+  - name: cpu
+    required: false
+    type: "string"
+    default: "\"1\""
+    description: "vCPUs of each service's instance. The free grant is counted in vCPU-seconds while a request is served, so 1 stretches it furthest per request."
+  - name: memory
+    required: false
+    type: "string"
+    default: "\"512Mi\""
+    description: "Memory of each service's instance, e.g. 512Mi. The free grant is counted in GiB-seconds."
+  - name: max_instances
+    required: false
+    type: "number"
+    default: "1"
+    description: "Most instances each service scales out to. Instances beyond the free grant are billed, so the default keeps one."

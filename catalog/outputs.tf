@@ -61,6 +61,7 @@ output "palette" {
       url           = local.providers[k].url
       recommended   = try(local.providers[k].recommended, false) == true
       settings_from = contains(local.stack_dirs, k) ? "providers/${k}/stack/variables.tf" : null
+      settings      = try(yamldecode(file("${local.providers_dir}/${k}/settings.yaml")).variables, null)
     }
   ]
 

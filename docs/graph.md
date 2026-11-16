@@ -286,8 +286,9 @@ HCL in the layout those readers handle, one entry a line.
 `freelunch catalog --json` prints every provider as one entry: `provider`, `display_name`, `category`, `layer`,
 `node_types` (what it can make: from the layer and category, or `node_types:` in its `provider.yaml`), `engine`, `status`,
 `verified`, `free_tier`, `free_tier_type`, `card_required`, `always_on`, `sleeps_after_minutes`, `free_memory_mb`, `volumes`,
-`limits`, `secrets` (`{name, description}`), `jobs`, `url`, and `settings_from`: the stack's `variables.tf`, where its
-settings are. `freelunch catalog` alone still writes the README checklist.
+`limits`, `secrets` (`{name, description}`), `jobs`, `url`, and `settings_from` (the stack's `variables.tf`) and `settings`: the stack's variables, each
+`{name, required, type, default, description}` with the type and default as HCL text, read from `providers/<p>/settings.yaml`.
+A test keeps that file's variable names in step with `variables.tf`. `freelunch catalog` alone still writes the README checklist.
 
 ### Publishing the live graph from CI
 

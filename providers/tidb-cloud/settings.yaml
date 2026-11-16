@@ -1,0 +1,23 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix of every cluster: <name_prefix>-<name>. freelunch init sets it to the project's name."
+  - name: project_id
+    required: false
+    type: "string"
+    default: "null"
+    description: "TiDB Cloud project that owns the clusters. null uses the organisation's default project."
+  - name: databases
+    required: false
+    type: "map(object({ region = optional(string, \"regions/aws-us-east-1\") monthly_spending_limit = optional(number, 0) }))"
+    default: "{}"
+    description: "TiDB Starter clusters to make, keyed by name, e.g. { main = {} }. Each one is a cluster <name_prefix>-<name> in region (regions/aws-us-east-1, regions/aws-eu-central-1, regions/aws-ap-southeast-1 ...). monthly_spending_limit is in US cents; 0 keeps it free, and a cluster that uses up its free quota then refuses new connections until the month resets."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow more clusters, or a spending limit above 0, than the free quota includes."

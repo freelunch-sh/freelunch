@@ -1,0 +1,22 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "The names of everything this stack creates start with the project name."
+  - name: account_id
+    required: true
+    type: "number"
+    description: "Your New Relic account ID (a number)."
+  - name: region
+    required: false
+    type: "string"
+    default: "\"US\""
+    description: "The data centre your account is in: US or EU."
+  - name: ingest_keys
+    required: false
+    type: "set(string)"
+    default: "[\"main\"]"
+    description: "Ingest keys to make, keyed by name. Each is a licence key: it lets an app (or an OpenTelemetry collector) send data to the account, and read nothing."

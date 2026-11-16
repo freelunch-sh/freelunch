@@ -1,0 +1,22 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix of every project and cluster: <name_prefix>-<name>. freelunch init sets it to the project's name."
+  - name: org_id
+    required: true
+    type: "string"
+    description: "Atlas organisation that owns the projects (organisation settings > Organization ID)."
+  - name: databases
+    required: false
+    type: "map(object({ provider_name = optional(string, \"AWS\") region_name = optional(string, \"US_EAST_1\") database_name = optional(string, \"app\") user = optional(string, \"app\") allowed_cidr = optional(string, \"0.0.0.0/0\") }))"
+    default: "{}"
+    description: "Free (M0) clusters to make, keyed by name, e.g. { main = {} }. Atlas allows one free cluster per project, so each entry gets its own project <name_prefix>-<name>, a cluster, a database user and an IP access-list entry. provider_name is AWS, GCP or AZURE and region_name an Atlas region of that cloud (US_EAST_1, EU_WEST_1 ... for AWS). allowed_cidr is who may connect; the default allows anyone with the password."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow more free clusters than the limits in provider.yaml (Atlas may refuse or bill them)."

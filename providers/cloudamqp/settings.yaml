@@ -1,0 +1,13 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "The names of everything this stack creates start with the project name."
+  - name: brokers
+    required: false
+    type: "map(object({ region = optional(string, \"amazon-web-services::eu-west-1\") plan = optional(string, \"lemur\") tags = optional(list(string), []) }))"
+    default: "{ main = {} }"
+    description: "RabbitMQ instances to make, keyed by name. Only the free plan, Little Lemur, is made."

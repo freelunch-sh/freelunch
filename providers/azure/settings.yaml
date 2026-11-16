@@ -1,0 +1,66 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: subscription_id
+    required: false
+    type: "string"
+    default: "null"
+    description: "Subscription to deploy into (az account show --query id). null uses ARM_SUBSCRIPTION_ID."
+  - name: location
+    required: true
+    type: "string"
+    description: "Azure region, e.g. eastus or westeurope. Check that it offers the sizes you pick."
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix for all resource names, including the resource group (<name_prefix>-rg)."
+  - name: admin_username
+    required: false
+    type: "string"
+    default: "\"azureuser\""
+    description: "Login user created on every VM."
+  - name: ssh_public_keys
+    required: true
+    type: "list(string)"
+    description: "SSH public keys (RSA >= 2048 bits or Ed25519) authorized on every VM."
+  - name: ssh_source_cidrs
+    required: false
+    type: "list(string)"
+    default: "[\"0.0.0.0/0\"]"
+    description: "CIDRs allowed to reach SSH. Use your own IP (x.x.x.x/32), or [] with Tailscale."
+  - name: ingress_tcp_ports
+    required: false
+    type: "list(number)"
+    default: "[80, 443]"
+    description: "TCP ports open to the internet."
+  - name: ingress_udp_ports
+    required: false
+    type: "list(number)"
+    default: "[]"
+    description: "UDP ports open to the internet."
+  - name: instances
+    required: false
+    type: "map(object({ size = optional(string, \"Standard_B2ats_v2\") os_disk_gb = optional(number, 64) os_disk_type = optional(string, \"Premium_LRS\") assign_public_ip = optional(bool, true) zone = optional(string) swap_size_gb = optional(number, 2) apps = optional(map(object({ compose = string env = optional(map(string), {}) })), {}) }))"
+    default: "{ main = {} }"
+    description: "Docker hosts to create. See providers/azure/README.md for free-tier layouts."
+  - name: tailscale_auth_key
+    required: false
+    type: "string"
+    default: "null"
+    description: "Optional Tailscale auth key; hosts join your tailnet on first boot."
+  - name: netbird_setup_key
+    required: false
+    type: "string"
+    default: "null"
+    description: "Optional NetBird setup key; hosts join your NetBird network on first boot."
+  - name: acknowledge_public_ipv4_charge
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Accept the Standard public IPv4 charge (about $3.65/month per address), which the free tier does not cover."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow sizes, disks or VM counts outside the 12-month free services."

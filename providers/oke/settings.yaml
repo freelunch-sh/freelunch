@@ -1,0 +1,80 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: region
+    required: true
+    type: "string"
+    description: "Your tenancy's home region, e.g. eu-frankfurt-1. Always Free resources exist only there."
+  - name: tenancy_ocid
+    required: true
+    type: "string"
+    description: "Tenancy OCID (the `tenancy=` line in ~/.oci/config)."
+  - name: compartment_ocid
+    required: false
+    type: "string"
+    default: "null"
+    description: "Compartment to deploy into. null uses the root compartment."
+  - name: oci_auth
+    required: false
+    type: "string"
+    default: "\"ApiKey\""
+    description: "OCI provider auth method: ApiKey (default) or SecurityToken (after `oci session authenticate`)."
+  - name: oci_config_profile
+    required: false
+    type: "string"
+    default: "\"DEFAULT\""
+    description: "Profile in ~/.oci/config to use."
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix for all resource names."
+  - name: ssh_public_key
+    required: true
+    type: "string"
+    description: "SSH public key authorized on the worker nodes."
+  - name: api_source_cidrs
+    required: false
+    type: "list(string)"
+    default: "[\"0.0.0.0/0\"]"
+    description: "CIDRs allowed to reach the Kubernetes API (6443/tcp). Use your own IP (x.x.x.x/32)."
+  - name: node_count
+    required: false
+    type: "number"
+    default: "1"
+    description: "Worker nodes. They share the tenancy's Always Free Arm cores with every VM of the oci stack."
+  - name: node_ocpus
+    required: false
+    type: "number"
+    default: "2"
+    description: "Arm OCPUs of each worker node."
+  - name: node_memory_gbs
+    required: false
+    type: "number"
+    default: "12"
+    description: "Memory in GB of each worker node (Always Free gives 6 GB per Arm OCPU)."
+  - name: node_boot_volume_gb
+    required: false
+    type: "number"
+    default: "50"
+    description: "Boot volume of each worker node, in GB. The 200 GB of Always Free block storage is shared with every other volume."
+  - name: free_a1_ocpus
+    required: false
+    type: "number"
+    default: "2"
+    description: "Always Free Arm OCPUs of the tenancy: 2 since June 2026 on new accounts, 4 on older ones (check Limits and quotas in the console)."
+  - name: free_a1_memory_gbs
+    required: false
+    type: "number"
+    default: "12"
+    description: "Always Free Arm memory of the tenancy, in GB."
+  - name: acknowledge_billable_resources
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Allow worker nodes beyond the Always Free Arm cores. The rest is billed."
+  - name: kubernetes_version
+    required: false
+    type: "string"
+    default: "null"
+    description: "Kubernetes version of the cluster and its nodes, e.g. v1.33.1. null takes the newest OKE offers."

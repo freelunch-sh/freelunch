@@ -1,0 +1,13 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "The names of everything this stack creates start with the project name."
+  - name: checks
+    required: false
+    type: "map(object({ timeout = optional(number, 86400) grace = optional(number, 3600) schedule = optional(string) timezone = optional(string) tags = optional(list(string), []) }))"
+    default: "{ heartbeat = {} }"
+    description: "Checks to make, keyed by name. An app pings its check's URL when its job runs; the check alerts when a ping is missing. timeout and grace are seconds; schedule (a cron expression) replaces timeout for cron-style jobs."

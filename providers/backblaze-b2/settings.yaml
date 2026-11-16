@@ -1,0 +1,18 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "Prefix of the bucket names. Bucket names are unique across all of Backblaze, so freelunch init sets it to the project's name."
+  - name: buckets
+    required: false
+    type: "map(object({ name = optional(string) }))"
+    default: "{}"
+    description: "Private buckets to make, keyed by name, e.g. { results = {} }. Each one is <name_prefix>-<name> at Backblaze, unless name gives the whole name, and gets a key of its own that can only reach it. An app takes one with bucket = \"backblaze-b2-<name>\" in apps.tfvars."
+  - name: keep_old_versions_days
+    required: false
+    type: "number"
+    default: "1"
+    description: "Days B2 keeps a file's older versions after it is overwritten or deleted. B2 keeps them forever by default, and they count against the free 10 GB."

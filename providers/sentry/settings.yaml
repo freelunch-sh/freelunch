@@ -1,0 +1,21 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "The names of everything this stack creates start with the project name."
+  - name: organization
+    required: true
+    type: "string"
+    description: "The slug of your Sentry organisation (the part after sentry.io/organizations/)."
+  - name: team
+    required: true
+    type: "string"
+    description: "The slug of an existing team in the organisation that owns the projects."
+  - name: projects
+    required: false
+    type: "map(object({ platform = optional(string, \"other\") }))"
+    default: "{ main = {} }"
+    description: "Sentry projects to make, keyed by name. Each gets a client key (DSN) of its own, which an app uses to send errors."

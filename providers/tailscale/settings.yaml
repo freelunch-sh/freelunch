@@ -1,0 +1,33 @@
+# Generated from stack/variables.tf by a one-off script and kept in step by a test (tests/cli.sh settings_match).
+# What a canvas shows as a stack's settings: type and default are the HCL text.
+variables:
+  - name: tailnet
+    required: false
+    type: "string"
+    default: "\"-\""
+    description: "The tailnet to join. \\\"-\\\" is the tailnet the API key belongs to."
+  - name: name_prefix
+    required: false
+    type: "string"
+    default: "\"freelunch\""
+    description: "The prefix the host stacks give their hosts' tailnet names (<prefix>-<provider>-<name>, e.g. shop-oci-main). Use the project's name_prefix."
+  - name: tags
+    required: false
+    type: "list(string)"
+    default: "[\"tag:freelunch\"]"
+    description: "ACL tags the join key puts on hosts that use it. They have to exist in the tailnet's policy (tagOwners)."
+  - name: key_expiry_days
+    required: false
+    type: "number"
+    default: "90"
+    description: "Days the join key works for. A host only uses it on its first boot."
+  - name: ssh
+    required: false
+    type: "bool"
+    default: "false"
+    description: "Reach hosts over the mesh for deploy (SSH to their tailnet address). Needs this machine, and CI, on the tailnet."
+  - name: inventory_state_path
+    required: false
+    type: "string"
+    default: "null"
+    description: "State file of hybrid/. null means ../../../hybrid/terraform.tfstate in this checkout; bin/freelunch passes the project's."
