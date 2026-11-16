@@ -12690,6 +12690,7 @@ ci_provider_pipeline() {
   [[ -n "$tag" ]] || tag="$(release_version)"
   [[ "$tag" == v* ]] || tag=""
   tag="${tag#v}"
+  [[ -n "$tag" ]] || log "$p: no release to pin the runner image to yet, so the pipeline names ghcr.io/freelunch-sh/freelunch:1, which exists from freelunch 1.0; pin the project to a release with freelunch upgrade, then run ci init again"
   mkdir -p "$base/$(dirname "$file")"
   sed "s|@IMAGE@|ghcr.io/freelunch-sh/freelunch:${tag:-1}|" "$PROVIDERS_DIR/$p/pipeline.tpl" | write_new "$base/$file"
 }
