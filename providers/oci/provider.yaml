@@ -27,6 +27,8 @@ inspire:
 
 limits:
   compute:
+    # Idle instances (under 20% CPU, network and memory at p95 over 7 days) can be reclaimed: Oracle Always Free docs, as of last_verified (2026-10-18)
+    idle: { percent: 20, days: 7 }
     a1_flex:
       shape: VM.Standard.A1.Flex
       max_ocpus: 2          # halved from 4 on 2026-06-15

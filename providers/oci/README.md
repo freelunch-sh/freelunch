@@ -287,6 +287,11 @@ Always Free costs $0, so any bill is a mistake. freelunch puts several nets unde
 - **Cost in `plan`.** `plan oci` prints `cost: $0, within Always Free`, or what falls outside it.
 - **Billed this month.** `status` and the end of `apply` show `billing this month: $0.00` from
   OCI's usage API (needs `oci` and a user allowed to read usage).
+- **A cap that prevents.** A budget alert reports a charge after it happened. `quota_guard = true` makes a
+  compartment quota in the tenancy that zeroes every compute family and allows only the Always Free amounts of Arm
+  and micro VMs (from the catalogue), so OCI refuses the rest, even on a pay-as-you-go account
+  ([modules/quota-guard](modules/quota-guard/README.md)). Off by default, it can't be on with
+  `acknowledge_billable_resources`, and `doctor` reports whether it is. Not run against a tenancy yet.
 - **Across targets.** `.freelunch/billing.tfvars` sets one `spend_cap_usd` for the month, a
   `paid_fallback` target that `freelunch up` uses only after the free targets had no room for
   `paid_fallback_after_days` and its `paid_fallback_monthly_usd` fits under the cap, and

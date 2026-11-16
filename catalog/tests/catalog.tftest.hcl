@@ -143,3 +143,47 @@ run "api_and_guided_engines_render" {
     error_message = "Implemented providers should show their engines, api with an api.yaml and guided with neither file."
   }
 }
+
+run "always_on_and_sleeping_are_shown" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/sleepy" }
+
+  assert {
+    condition     = strcontains(output.checklist, "💤 sleeps after 15 min")
+    error_message = "A provider that sleeps says after how many minutes."
+  }
+}
+
+run "always_on_is_shown" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/awake" }
+
+  assert {
+    condition     = strcontains(output.checklist, "🟢 always on") && !strcontains(output.checklist, "sleeps")
+    error_message = "A provider that never sleeps says it is always on."
+  }
+}
+
+run "always_on_is_yes_or_no" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/bad-always-on" }
+  expect_failures = [output.checklist, output.stub_readmes]
+}
+
+run "sleeps_after_minutes_goes_with_always_on_no" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/bad-sleeps" }
+  expect_failures = [output.checklist, output.stub_readmes]
+}
+
+run "sleeps_after_minutes_is_a_number" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/bad-sleeps-text" }
+  expect_failures = [output.checklist, output.stub_readmes]
+}
+
+run "an_idle_rule_has_a_percent_and_days" {
+  command = plan
+  variables { providers_dir = "tests/fixtures/bad-idle" }
+  expect_failures = [output.checklist, output.stub_readmes]
+}

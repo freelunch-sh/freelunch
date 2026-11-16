@@ -475,49 +475,58 @@ Oracle halved its free Arm allowance in mid-2026 with little notice. The catalog
 it; nothing told a project that was affected. Budget alerts do not stop a charge, and several
 free platforms put apps to sleep.
 
-- [ ] Catalogue fields, optional, in `providers/_template/provider.yaml` and validated in
+- [x] Catalogue fields, optional, in `providers/_template/provider.yaml` and validated in
   `catalog/`: `always_on: "yes" | "no"`, `sleeps_after_minutes: <number>` (only with
   `always_on: "no"`), and for hosts `limits.compute.idle: { percent, days }`. Shown in the
   generated README checklist as "always on" or "sleeps after N min". Tests in
   `catalog/tests/`
-- [ ] Fill those fields for every `status: ready` provider in the container, static and
+- [x] Fill those fields for every `status: ready` provider in the container, static and
   host categories, only from that provider's `notes`, its `sources` or a page you can cite
   with a date; leave a field out when you can't. OCI gets the idle rule its `notes` already
   state, with the source and the date
-- [ ] `up` and `setup` use it: a target that sleeps is listed after always-on ones in the
+- [x] `up` and `setup` use it: a target that sleeps is listed after always-on ones in the
   wizard and marked; `up --dry-run` says "<target> sleeps after N minutes without requests
   (the first request then waits)". Tests
-- [ ] `freelunch watch [--strict] [--json]`: the checks below, printed as `check` lines; it
+- [x] `freelunch watch [--strict] [--json]`: the checks below, printed as `check` lines; it
   sends one `watch` notification listing only what changed since the last run (the last
   result is kept in `.freelunch/watch.state`, and in the state store when there is one);
   exit 0 unless `--strict` and something failed
-  - [ ] Free tier changed: for each configured provider, compare `free_tier`,
+  - [x] Free tier changed: for each configured provider, compare `free_tier`,
     `free_tier_type`, `card_required`, `limits`, `status` and `notes` in this version's
     `provider.yaml` with the newest release's (downloaded the way `upgrade` does it; read
     `switch_version` and `cmd_upgrade`). Report each difference in one line, and for
     `limits` whether the project's tfvars are now over the new value. Offline: say it
     could not check, and go on
-  - [ ] Everything from `expiry_lines` (section 7) within 30 days
-  - [ ] Backups older than twice their schedule, or failed (section 5)
-  - [ ] Idle risk: for an OCI host, when the tenancy is Always Free only
+  - [x] Everything from `expiry_lines` (section 7) within 30 days
+  - [x] Backups older than twice their schedule, or failed (section 5)
+  - [x] Idle risk: for an OCI host, when the tenancy is Always Free only
     (`oci_billing_state`) and the week's p95 CPU (section 6) is under the catalogue's
     `idle.percent`: "Oracle may reclaim <host> as idle". A warning with no remedy offered:
     freelunch does not help keep a machine busy to dodge the rule
-  - [ ] The month's bill above zero (`oci_month_cost`), and the spend cap when set
-  - [ ] Disk at 85% or more on a host (section 2)
-- [ ] `ci init`: a `watch` job (`--jobs=...,watch`, on by default with `--pipeline`): a
+  - [x] The month's bill above zero (`oci_month_cost`), and the spend cap when set
+  - [x] Disk at 85% or more on a host (section 2)
+- [x] `ci init`: a `watch` job (`--jobs=...,watch`, on by default with `--pipeline`): a
   weekly scheduled workflow that runs `freelunch watch`, writes the lines to the job
   summary, and needs only the secrets the checks use. Test the generated workflow, and
   that `ci needs` names what it lacks
-- [ ] Docs: `docs/watch.md`, and one honest paragraph in the README's guardrails text: a
+- [x] Docs: `docs/watch.md`, and one honest paragraph in the README's guardrails text: a
   budget alert reports a charge, it does not prevent one
-- [ ] 🔬 A cap that prevents. OCI has compartment quotas (`oci_limits_quota` in the provider:
+- [x] 🔬 A cap that prevents. OCI has compartment quotas (`oci_limits_quota` in the provider:
   policy statements that set a service's limits to zero or to a number). Find out from
   Oracle's quota documentation and the provider schema whether a pay-as-you-go tenancy can
   be held to the Always Free shapes with them (zero every compute family, then allow A1 up
   to the catalogue's `max_ocpus` and the micro shape), and what a refused launch looks like.
   Write the statements here. Then build `quota_guard = true` in the OCI stack as a module
   beside `budget`, mock-tested, off by default, with `doctor` reporting whether it is on
+  **Answer (2026-11-16, from Oracle's Compute Quotas, Quota Policy Syntax and Sample Quotas pages, and the `oracle/oci` 9.13.0
+  schema):** yes in principle. A quota is `oci_limits_quota` (`compartment_id`, `name`, `description`, `statements`), made in the
+  root compartment, and its statements are `zero compute-core quotas in tenancy`, `zero compute-memory quotas in tenancy`, then
+  `set compute-core quota standard-a1-core-count to 2 in tenancy`, `set compute-memory quota standard-a1-memory-count to 12 in tenancy`
+  and `set compute-core quota standard-e2-micro-core-count to 2 in tenancy`: a later statement supersedes an earlier one in the
+  same policy, the most restrictive of several policies wins, and service limits still apply on top. Not documented: the error a
+  launch over a quota returns, whether Always Free resources are exempt, and whether the micro shape is gated by
+  `standard-e2-micro-core-count` or the deprecated shape-based `vm-standard-e2-1-micro-count`. Built as
+  `providers/oci/modules/quota-guard` (off by default, `quota_guard = true` in the stack, mock-tested, reported by `doctor`).
 - [ ] ⛔ Live: the quota guard on the real pay-as-you-go tenancy; a launch outside it refused
 
 ## 9. Small commands that save a search
@@ -709,6 +718,19 @@ Found while building sections 1 to 6. `[x]` means closed, with how; `[ ]` is ope
   `<project>-<hostname>`, removal of the ones whose route is gone) and a line per URL in `status`. Each request has to be read
   from the provider's own schema, and none can be run here.
 - [ ] The expiry sentence list (`expiry_lines`) is tested with stubs, and the watch job (section 8) is what sends it.
+
+**Section 8**
+
+- [ ] The tests of `providers/oci` (the compute module's and the stack's plan tests) fail on `Invalid mock/override field shapes`:
+  the mocked `oci_core_shapes` data no longer matches the `oracle/oci` provider the tests download. They fail the same without
+  any change of this plan's; fix the mocks against the provider's current schema.
+- [ ] Only what the notes and sources state was filled in: Northflank (always on), Render (sleeps after 15 min), Cloud Run (scales
+  to zero, no minutes stated), OCI's idle rule. Scaleway, Deno Deploy, the other hyperscalers and the edge providers say nothing
+  precise enough; fill them when a dated page does.
+
+- [ ] `freelunch watch` keeps its last result in `.freelunch/watch.state` only. The plan also asks for it in the state store when
+  there is one; without that, a CI run (a fresh checkout every time) tells everything it finds each week, not what is new.
+  The state store has no place for a file that is not a stack's state yet.
 
 **Housekeeping**
 

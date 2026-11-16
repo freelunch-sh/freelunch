@@ -1,0 +1,18 @@
+name: kappa5
+display_name: "Kappa5"
+category: vps
+status: planned
+layer: service
+terraform_provider: null
+iac: none
+free_tier_type: always-free
+free_tier: "something"
+card_required: "no"
+url: "https://kappa5.example"
+last_verified: "2026-11-14"
+notes: null
+sources: []
+inspire: []
+limits:
+  compute:
+    idle: { percent: 20 }

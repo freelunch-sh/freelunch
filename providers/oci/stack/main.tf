@@ -9,6 +9,17 @@ module "budget" {
   alert_emails = var.budget_alert_emails
 }
 
+# A quota that lets only the Always Free compute shapes be launched, so OCI itself refuses the rest (a budget alert only
+# reports a charge). Off unless quota_guard = true.
+module "quota_guard" {
+  source = "../modules/quota-guard"
+
+  tenancy_id     = var.tenancy_ocid
+  name           = var.name_prefix
+  enabled        = var.quota_guard
+  allow_billable = var.acknowledge_billable_resources
+}
+
 module "docker_host" {
   source = "../modules/docker-host"
 

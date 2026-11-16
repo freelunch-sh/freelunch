@@ -12,6 +12,8 @@ CLI="$ROOT/bin/freelunch"
 unset CI GITHUB_ACTIONS GITHUB_WORKFLOW_REF GITHUB_RUN_NUMBER GITHUB_STEP_SUMMARY GITLAB_CI CI_PIPELINE_IID \
   FREELUNCH_BUNDLE FREELUNCH_WAIT_ATTEMPT FREELUNCH_SSH_STRICT
 for v in $(compgen -v FREELUNCH_STATE_); do unset "$v"; done
+# and none of your ssh agent: one that asks for a fingerprint would hold the tests up
+unset SSH_AUTH_SOCK
 # The tofu/terraform the CLI would use, for the state store runs the fake one hands on
 REAL_TF="${FREELUNCH_TF:-$(command -v tofu || command -v terraform || true)}"
 REAL_TF="$(command -v "$REAL_TF" || true)"
@@ -329,6 +331,10 @@ case "$1 ${2:-}" in
       "query loadbalancer"*) items=""; for ((i = 0; i < ${FAKE_LBS:-0}; i++)); do items="${items:+$items,}{}"; done; printf '{"data": {"items": [%s]}}\n' "$items" ;;
       *) echo '{"data": {"items": []}}' ;;
     esac
+    exit 0 ;;
+  "limits quota")
+    # the quotas of the tenancy: FAKE_QUOTA is the name of the one that exists (none by default)
+    if [[ -n "${FAKE_QUOTA:-}" ]]; then printf '{"data": [{"name": "%s"}]}\n' "$FAKE_QUOTA"; fi
     exit 0 ;;
   "limits resource-availability")
     for a; do
@@ -2456,6 +2462,7 @@ test_a_move_backs_the_app_up_first_and_leaves_the_tenants() {
 test_doctor_reports_backups_and_overlapping_jobs() {
   local p="$WORK/backup-doctor" out
   backup_project "$p"
+  cp "$ROOT/providers/oci/stack/project.tfvars.example" "$p/.freelunch/oci/terraform.tfvars"
   cat >> "$p/.freelunch/apps.tfvars" <<'TFVARS'
 jobs = {
   report = { app = "api", command = "bin/report", schedule = "daily 02:10", heavy = true, timeout_minutes = 30 }
@@ -2487,6 +2494,89 @@ test_notify_events_filter_what_is_sent() {
   rm "$p/fake.log"*
   FREELUNCH_NOTIFY=https://ntfy.sh/topic FREELUNCH_NOTIFY_EVENTS=deploy,wait FAKE_APPLY="capacity ok" apply_in "$p" oci --wait-for-capacity
   grep -q '^post https://ntfy.sh/topic ' "$p/fake.log"
+}
+
+watch_in() { # watch_in <dir> [args]: freelunch watch with the fakes, and a source of releases of its own
+  local dir="$1"; shift
+  (cd "$dir" && HOME="$dir/home" PATH="$WORK/wait-bin:$WORK/bin:$PATH" FREELUNCH_SSH="$WORK/bin/ssh" FAKE_LOG="$dir/fake.log" FAKE_ROOT="$dir/host" \
+    FREELUNCH_SOURCE="${WATCH_SOURCE:-$WORK/watch-source}" FREELUNCH_HOME="$dir/versions" "$CLI" watch "$@")
+}
+
+# a release newer than this checkout, whose OCI free tier is smaller and described differently
+watch_source() {
+  local src="$WORK/watch-source"
+  if [[ ! -d "$src" ]]; then
+    mkdir -p "$src/bin" "$src/providers/oci"
+    printf '#!/usr/bin/env bash\necho newest\n' > "$src/bin/freelunch"; chmod +x "$src/bin/freelunch"
+    sed -e 's/max_ocpus: 2 .*/max_ocpus: 1/' -e 's/^free_tier: .*/free_tier: "1 Arm A1 OCPU + 6 GB RAM"/' "$ROOT/providers/oci/provider.yaml" > "$src/providers/oci/provider.yaml"
+    git -C "$src" init -q -b main
+    git -C "$src" add -A
+    git -C "$src" -c user.name=test -c user.email=test@example.com commit -qm "v9.9.9"
+    git -C "$src" -c user.name=test -c user.email=test@example.com tag -a v9.9.9 -m v9.9.9
+  fi
+  echo "$src"
+}
+
+# watch compares the free tiers with the newest release's, lists what expires, and tells only what is new.
+test_watch_reports_changes_and_tells_only_what_is_new() {
+  local p="$WORK/watch" out soon
+  watch_source >/dev/null
+  new_project "$p"
+  cp "$ROOT/providers/oci/stack/project.tfvars.example" "$p/.freelunch/oci/terraform.tfvars"
+  soon="$(date -u -v+10d +%Y-%m-%d 2>/dev/null || date -u -d '+10 days' +%Y-%m-%d)"
+  printf 'credit_expires_gcp = "%s"\n' "$soon" > "$p/.freelunch/billing.tfvars"
+  : > "$p/fake.log"
+  out="$(FREELUNCH_NOTIFY=https://ntfy.sh/topic watch_in "$p" 2>&1)" || { echo "$out" >&2; return 1; }
+  contains "$out" "oci: free_tier changed in v9.9.9: was \"2 Arm A1 OCPUs + 12 GB RAM"
+  contains "$out" "now \"1 Arm A1 OCPU + 6 GB RAM\""
+  contains "$out" "oci: its limits changed in v9.9.9; this project's instances use 2 OCPUs, over the new 1"
+  contains "$out" "gcp: the free-trial credit ends on $soon"
+  contains "$out" "3 thing(s) to look at."
+  grep -q '^post https://ntfy.sh/topic \[text/plain\] watch: watch: new: ' "$p/fake.log"
+  exists "$p/.freelunch/watch.state"
+  # the same again says nothing new
+  : > "$p/fake.log"
+  FREELUNCH_NOTIFY=https://ntfy.sh/topic watch_in "$p" >/dev/null 2>&1
+  fails grep -q '^post ' "$p/fake.log"
+  # what clears is told once
+  printf '' > "$p/.freelunch/billing.tfvars"
+  FREELUNCH_NOTIFY=https://ntfy.sh/topic watch_in "$p" >/dev/null 2>&1
+  grep -q '^post https://ntfy.sh/topic \[text/plain\] watch: watch: no longer a problem: gcp: the free-trial credit ends' "$p/fake.log"
+  # --strict fails while anything is wrong, and without it the exit is 0; --json is a list
+  if watch_in "$p" --strict >/dev/null 2>&1; then echo "watch --strict should have failed"; return 1; fi
+  watch_in "$p" >/dev/null 2>&1
+  out="$(watch_in "$p" --json 2>/dev/null)"
+  equals "$(jq -r '[.[] | select(.level != "ok")] | length' <<< "$out")" 2
+  equals "$(jq -r '.[0] | .check' <<< "$out")" free-tier
+  # nothing to download from: it says it couldn't check, and goes on
+  out="$(WATCH_SOURCE="$WORK/no-such-source" watch_in "$p" 2>&1)" || true
+  contains "$out" "couldn't check whether the free tiers changed: the newest release of freelunch can't be downloaded"
+}
+
+# Late and failed backups and a nearly full disk are reported, with the bill and the spend cap.
+test_watch_reports_backups_disks_and_bills() {
+  local p="$WORK/watch-hosts" out key
+  watch_source >/dev/null
+  backup_project "$p"
+  cp "$ROOT/providers/oci/stack/project.tfvars.example" "$p/.freelunch/oci/terraform.tfvars"
+  key="$(cut -d' ' -f1,2 "$WORK/hostkey.pub")"
+  GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw FAKE_HOST_KEY="$key" deploy_in "$p" >/dev/null 2>&1
+  echo $(( $(date +%s) - 60 * 3600 )) > "$p/host/backup/api.last"
+  printf 'spend_cap_usd = "2"\n' > "$p/.freelunch/billing.tfvars"
+  out="$(FAKE_DF_PERCENT=90 FAKE_BILLED=3.5 watch_in "$p" 2>&1)" || true
+  contains "$out" "fail  api: its last backup was 2 days ago, and it runs daily 02:00"
+  contains "$out" "warn  oci-main: the disk is 90% full"
+  contains "$out" "fail  oci: \$3.5 billed this month, over the spend cap of \$2"
+  out="$(FAKE_BILLED=1.25 watch_in "$p" 2>&1)" || true
+  contains "$out" "warn  oci: \$1.25 billed this month, and Always Free costs nothing"
+  out="$(watch_in "$p" 2>&1)" || true
+  contains "$out" "ok    oci: nothing billed this month"
+  # an Always Free tenancy whose machine sits under the idle rule is warned, with nothing to do about it
+  local found='[{"display-name": "main", "identifier": "ocid1.instance.oc1..main", "compartment-id": "ocid1.compartment.oc1..c", "additional-details": {"shape": "VM.Standard.A1.Flex"}}]'
+  out="$(FAKE_SHARED_INSTANCES="$found" FAKE_CPU="3 5 4" watch_in "$p" 2>&1)" || true
+  contains "$out" "warn  oci: Oracle may reclaim main as idle: its CPU is at 5% (p95 over the week), under the 20% over 7 days"
+  out="$(FAKE_SHARED_INSTANCES="$found" FAKE_CPU="40 55 60" watch_in "$p" 2>&1)" || true
+  lacks "$out" "may reclaim"
 }
 
 # A deploy that fails tells whoever listens (in CI, or with FREELUNCH_NOTIFY_DEPLOYS=1): the project, the target and the first
@@ -2549,6 +2639,19 @@ test_a_failed_backup_notifies_from_the_host() {
   exists "$p/host/backup/notify.url"
   GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw FREELUNCH_NOTIFY=https://ntfy.sh/secret-topic FREELUNCH_NOTIFY_EVENTS=wait deploy_in "$p" >/dev/null 2>&1
   absent "$p/host/backup/notify.url"
+}
+
+# quick gives up on a command that takes too long, and says nothing of one that fails.
+test_quick_gives_up_on_a_slow_command() {
+  local p="$WORK/quick" out start
+  mkdir -p "$p"
+  sed -n "$(grep -n '^quick() {' "$CLI" | cut -d: -f1),/^}/p" "$CLI" > "$p/fn.sh"
+  start=$SECONDS
+  out="$(bash -c '. '"$p"'/fn.sh; quick 1 sleep 30; echo "[done]"')"
+  equals "$out" "[done]"
+  [[ $((SECONDS - start)) -lt 10 ]] || { echo "quick waited for the command"; return 1; }
+  equals "$(bash -c '. '"$p"'/fn.sh; quick 5 echo hello')" "hello"
+  equals "$(bash -c '. '"$p"'/fn.sh; quick 5 false; echo "[rc $?]"')" "[rc 0]"
 }
 
 # freelunch backup runs the backup unit now and follows it; backup list prints the snapshots.
@@ -3148,6 +3251,16 @@ test_doctor_checks_billing_and_tenancy_wide_free_limits() {
   contains "$out" "  fail  storage: the tenancy's boot and block volumes hold 220 GB"
   contains "$out" "reserved IPs: 1 of 1 aren't attached to anything"
   contains "$out" "load balancers: 2 load balancer(s)"
+  # the quota guard: on in the tenancy, set in the tfvars, missing on a paid tenancy, or off on a free one
+  contains "$out" "  warn  no quota guard: this tenancy can create paid resources"
+  out="$(FAKE_QUOTA=freelunch-always-free-only FAKE_PAID_LEFT=8 FAKE_A1_USED=0 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  ok    quota guard: freelunch-always-free-only keeps compute in this tenancy to the Always Free shapes"
+  printf 'quota_guard = true\n' >> "$p/.freelunch/oci/terraform.tfvars"
+  out="$(FAKE_PAID_LEFT=8 FAKE_A1_USED=0 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  ok    quota guard: quota_guard is on in .freelunch/oci/terraform.tfvars, so apply makes the quota"
+  sed -i.bak '/^quota_guard/d' "$p/.freelunch/oci/terraform.tfvars"
+  out="$(FAKE_A1_USED=0 doctor_in "$p" 2>&1 || true)"
+  contains "$out" "  ok    quota guard: off, and this tenancy is Always Free only"
   # budget_alert_emails in the tfvars is enough before the budget exists.
   printf 'budget_alert_emails = ["me@example.com"]\n' >> "$p/.freelunch/oci/terraform.tfvars"
   out="$(FAKE_A1_USED=0 doctor_in "$p" 2>&1 || true)"
@@ -6181,6 +6294,7 @@ test_doctor_refuses_secrets_in_committed_files() {
 # the job a pull request runs works with none.
 test_workflow_template_keeps_secrets_in_the_deploy_job() {
   local t="$ROOT/docs/workflow-template.yml" p="$WORK/template" out
+  if python3 -c 'import yaml' 2>/dev/null; then
   python3 -c '
 import sys, yaml
 w = yaml.safe_load(open(sys.argv[1]))
@@ -6205,6 +6319,7 @@ up = [x for x in steps if x.get("id") == "up"][0]
 assert set(rb[0]["env"]) == set(up["env"]), "the rollback step has the same secrets as the deploy"
 assert not [u for u in uses if u.endswith("@main") or u.endswith("@master")], uses
 ' "$t"
+  fi
   doctor_project "$p"
   state_store "$p"
   out="$(cd "$p" && HOME="$p/home" "$CLI" check 2>&1)"
@@ -6328,9 +6443,37 @@ test_ci_init_pipeline_fills_in_the_template() {
   fails grep -q 'NORTHFLANK_API_TOKEN' "$w"
   equals "$(grep -c 'FREELUNCH_OCI_KEY: ${{ secrets.FREELUNCH_OCI_KEY }}' "$w")" "2"
   equals "$(grep -c 'IMAGE_TAG:' "$w")" "2"
-  python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$w"
+  if python3 -c 'import yaml' 2>/dev/null; then python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$w"; fi
   if command -v actionlint >/dev/null; then actionlint "$w"; fi
   if ci_in "$p" ci init --pipeline --bundle >/dev/null 2>&1; then echo "should have failed"; return 1; fi
+  # the pipeline comes with the weekly watch workflow
+  w="$p/.github/workflows/freelunch-watch.yml"
+  exists "$w"
+  grep -q 'cron: "17 6 \* \* 1"' "$w"
+  grep -q 'run: watch' "$w"
+  grep -q 'permissions:' "$w"
+  fails grep -q 'secrets.FREELUNCH_BUNDLE' "$w"
+  if python3 -c 'import yaml' 2>/dev/null; then python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$w"; fi
+  if command -v actionlint >/dev/null; then actionlint "$w"; fi
+}
+
+# --jobs=watch writes the watch workflow alone, with the secrets the project's checks use, one by one; ci needs names what is missing
+test_ci_init_writes_the_watch_workflow_on_request() {
+  local p="$WORK/watch-workflow" w out
+  doctor_project "$p"
+  state_store "$p"
+  ci_in "$p" ci init --jobs=watch >/dev/null 2>&1
+  w="$p/.github/workflows/freelunch-watch.yml"
+  exists "$w"
+  absent "$p/.github/workflows/freelunch-provision.yml"
+  grep -q 'FREELUNCH_OCI_KEY: ${{ secrets.FREELUNCH_OCI_KEY }}' "$w"
+  if python3 -c 'import yaml' 2>/dev/null; then python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$w"; fi
+  if out="$(ci_in "$p" ci needs 2>&1)"; then echo "ci needs should name what is missing"; return 1; fi
+  contains "$out" "FREELUNCH_OCI_KEY"
+  # in Actions, what watch finds goes to the run's summary
+  out="$(cd "$p" && GITHUB_STEP_SUMMARY="$p/summary.md" PATH="$WORK/wait-bin:$WORK/bin:$PATH" FREELUNCH_SOURCE="$WORK/no-source" FREELUNCH_HOME="$p/versions" "$CLI" watch 2>&1 || true)"
+  contains "$(cat "$p/summary.md")" "### freelunch watch"
+  contains "$(cat "$p/summary.md")" "couldn't check whether the free tiers changed"
 }
 
 # build detect names the stack, port and start command; build init writes a Dockerfile that
@@ -7449,6 +7592,27 @@ setup_in() {
   (cd "$dir" && env -u CLOUDFLARE_API_TOKEN -u NORTHFLANK_API_TOKEN -u SCW_SECRET_KEY -u RENDER_API_KEY HOME="$dir/home" PATH="$WORK/bin:$PATH" "$CLI" setup "$@")
 }
 
+# A target that sleeps when unused is listed after the ones that stay on, and marked; up --dry-run says what it means.
+test_targets_that_sleep_are_listed_last_and_marked() {
+  local p="$WORK/setup-sleepy" out
+  mkdir -p "$p" && touch "$p/compose.yaml"
+  out="$(FREELUNCH_INTERACTIVE=1 setup_in "$p" --no-doctor <<< $'1\n\n' 2>&1)"
+  # Cloud Run scales to zero: last of the list, and marked; the ones that stay on are not
+  contains "$out" "cloud-run   Google Cloud Run:"
+  contains "$(grep ') cloud-run' <<< "$out")" "(sleeps when idle)"
+  lacks "$(grep ') northflank' <<< "$out")" "sleeps"
+  equals "$(grep ') ' <<< "$out" | tail -1 | sed 's/^ *[0-9]*) \([a-z-]*\).*/\1/')" "cloud-run"
+  # up --dry-run: a target that sleeps says so
+  p="$WORK/up-sleepy"
+  up_project "$p" northflank
+  sed -i.bak 's|^always_on: "yes".*|always_on: "no"\nsleeps_after_minutes: 10|' "$p-checkout/providers/northflank/provider.yaml"
+  out="$(FAKE_UP="northflank=ok" up_in "$p" --dry-run 2>&1)"
+  contains "$out" "up: northflank sleeps after 10 minutes without requests (the first request then waits)"
+  sed -i.bak '/^sleeps_after_minutes/d; s|^always_on: "no"|always_on: "no"|' "$p-checkout/providers/northflank/provider.yaml"
+  out="$(FAKE_UP="northflank=ok" up_in "$p" --dry-run 2>&1)"
+  contains "$out" "up: northflank sleeps when nothing asks for it (the first request then waits)"
+}
+
 # setup says when the tenancy already runs freelunch's machine, using the whole free Arm allowance.
 test_setup_mentions_the_machine_the_tenancy_runs() {
   local p="$WORK/setup-shared" out
@@ -7491,9 +7655,9 @@ test_setup_writes_the_project_from_what_it_finds() {
 test_setup_asks_for_what_it_cant_find() {
   local p="$WORK/setup-ask" out
   mkdir -p "$p" && touch "$p/compose.yaml"
-  out="$(printf '3 1\n\nnf-secret\nocid1.tenancy.oc1..typed\n' | TEST_NO_HOME=1 FREELUNCH_INTERACTIVE=1 setup_in "$p" --no-doctor 2>&1)"
+  out="$(printf '2 1\n\nnf-secret\nocid1.tenancy.oc1..typed\n' | TEST_NO_HOME=1 FREELUNCH_INTERACTIVE=1 setup_in "$p" --no-doctor 2>&1)"
   contains "$out" "Where may your app run?"
-  contains "$out" "3) northflank  Northflank"
+  contains "$out" "2) northflank  Northflank"
   grep -qx 'targets = \["northflank", "oci"\]' "$p/.freelunch/apps.tfvars"
   grep -qx 'NORTHFLANK_API_TOKEN=nf-secret' "$p/.freelunch/.env"
   grep -q 'tenancy_ocid = "ocid1.tenancy.oc1..typed"' "$p/.freelunch/oci/terraform.tfvars"
@@ -7523,9 +7687,9 @@ test_setup_says_what_is_wrong() {
   local p="$WORK/setup-bad" out
   mkdir -p "$p"
   if out="$(setup_in "$p" 2>&1 < /dev/null)"; then echo "setup should have failed"; return 1; fi
-  contains "$out" "setup: nothing to ask the questions of: pass --targets oci,cloud-run"
+  contains "$out" "setup: nothing to ask the questions of: pass --targets oci,northflank"
   if out="$(setup_in "$p" --targets nowhere 2>&1)"; then echo "setup should have failed"; return 1; fi
-  contains "$out" "setup: 'nowhere' is not a target (oci cloud-run northflank scaleway gcp aws azure)"
+  contains "$out" "setup: 'nowhere' is not a target (oci northflank scaleway gcp aws azure cloud-run)"
   if out="$(setup_in "$p" --targets oci --nope 2>&1)"; then echo "setup should have failed"; return 1; fi
   contains "$out" "setup: unknown argument --nope"
   # CI needs everything filled in first.

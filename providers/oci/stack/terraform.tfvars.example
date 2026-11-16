@@ -78,3 +78,8 @@ instances = {
 # host, reusable with a short expiry for several. Not ephemeral: Tailscale removes those
 # nodes after half an hour offline.
 # tailscale_auth_key = "tskey-auth-..."
+
+# Optional: a quota in the tenancy that lets only the Always Free compute shapes be launched, so OCI refuses the rest
+# even on a pay-as-you-go account (a budget alert only reports a charge). It also stops you launching a machine you meant
+# to pay for. See modules/quota-guard/README.md.
+# quota_guard = true

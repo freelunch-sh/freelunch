@@ -12,6 +12,14 @@ release can change commands and the project layout.
 
 ### Added
 
+- **An OCI quota guard that prevents a charge.** `quota_guard = true` in the OCI stack makes a compartment quota that zeroes every
+  compute family but the Always Free Arm and micro amounts (from the catalogue), so OCI refuses a launch outside them; `doctor` says
+  whether it is on. Off by default, and not run against a tenancy yet. `ssh-add` no longer holds `doctor` up when an agent asks for
+  a fingerprint.
+- **`freelunch watch`** looks for what the free tier changes under a project: a provider's free tier that a newer release records
+  differently, what expires within 30 days, a late or failed backup, a full disk, a bill, a machine Oracle may reclaim as idle,
+  and tells `FREELUNCH_NOTIFY` only what is new. `ci init --jobs=watch` (and `--pipeline`) writes a weekly workflow. The catalogue
+  records `always_on`, `sleeps_after_minutes` and a host's `limits.compute.idle`; `setup` lists a target that sleeps last.
 - **Notifications for more than a wait.** `FREELUNCH_NOTIFY_EVENTS` picks the events sent (`wait`, `deploy`, `move`, `backup`, `watch`,
   `expiry`). A failed `deploy` or `up` in CI (or with `FREELUNCH_NOTIFY_DEPLOYS=1`) says so with the first line of the reason,
   an `up` that put the app somewhere new says where, and a backup that fails on the host posts to the same URL. Free domains

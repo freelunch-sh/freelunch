@@ -8,6 +8,8 @@ layer: host                       # host (Docker hosts) | service (managed servi
 terraform_provider: "example/example"   # registry address, or null when none exists
 iac: partner                      # official | partner | community | stale | none (must be none when terraform_provider is null)
 engine: tofu                      # optional: tofu | api | cli | guided. Default: tofu, or guided when iac is stale or none
+# always_on: "yes"                # optional: "yes" (never sleeps) or "no" (sleeps when unused). Shown as "always on" or "sleeps after N min"
+# sleeps_after_minutes: 15        # optional, only with always_on: "no": minutes without requests before it sleeps
 # jobs: [provision, ci, cd]       # optional: what the provider supports in a workflow
 # verified: fake-api              # optional, once implemented: fake-api (a test double) | live (a real account has run it)
 free_tier_type: always-free       # always-free | monthly-credit | trial | startup-credits | none
@@ -22,5 +24,6 @@ inspire: []                       # related paths under inspire/
 
 # Host providers: free-tier limits enforced by the modules' preconditions.
 # limits:
-#   compute: {}
+#   compute:
+#     idle: { percent: 20, days: 7 }   # optional: the provider reclaims a machine below this much use (p95) for this many days
 #   storage: {}

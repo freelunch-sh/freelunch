@@ -58,9 +58,13 @@ locals {
     bad_category   = [for k, p in local.providers : k if !contains(local.category_keys, try(p.category, ""))]
     bad_enum       = [for k, p in local.providers : k if !alltrue([for f, allowed in local.enums : contains(allowed, try(tostring(p[f]), ""))])]
     bad_behavior   = [for k, p in local.providers : k if try(p.behavior, null) != null && !contains(keys(local.behaviors), tostring(p.behavior))]
-    bad_engine     = [for k, p in local.providers : k if !alltrue([for f, v in p : contains(local.engines, tostring(v)) if f == "engine" || startswith(f, "engine_")])]
-    bad_jobs       = [for k, p in local.providers : k if try(p.jobs, null) != null && !alltrue([for j in p.jobs : contains(local.jobs, tostring(j))])]
-    bad_verified   = [for k, p in local.providers : k if try(p.verified, null) != null && !contains(local.verified, tostring(p.verified))]
+    # always_on is "yes" or "no"; sleeps_after_minutes goes with "no" and is a number; a host's idle rule has both a percent and a number of days
+    bad_always_on = [for k, p in local.providers : k if try(p.always_on, null) != null && !contains(["yes", "no"], tostring(p.always_on))]
+    bad_sleeps    = [for k, p in local.providers : k if try(p.sleeps_after_minutes, null) != null && (try(tostring(p.always_on), "") != "no" || !can(tonumber(p.sleeps_after_minutes)))]
+    bad_idle      = [for k, p in local.providers : k if try(p.limits.compute.idle, null) != null && !(can(tonumber(p.limits.compute.idle.percent)) && can(tonumber(p.limits.compute.idle.days)))]
+    bad_engine    = [for k, p in local.providers : k if !alltrue([for f, v in p : contains(local.engines, tostring(v)) if f == "engine" || startswith(f, "engine_")])]
+    bad_jobs      = [for k, p in local.providers : k if try(p.jobs, null) != null && !alltrue([for j in p.jobs : contains(local.jobs, tostring(j))])]
+    bad_verified  = [for k, p in local.providers : k if try(p.verified, null) != null && !contains(local.verified, tostring(p.verified))]
     # a ready provider (or one that says so) has what its engine runs on: tofu a stack, api an api.yaml
     no_stack        = [for k, p in local.providers : k if local.resolved_engine[k] == "tofu" && (try(p.engine, null) != null || try(p.status, "") == "ready") && !contains(local.stack_dirs, k)]
     no_api_yaml     = [for k, p in local.providers : k if local.resolved_engine[k] == "api" && !contains(local.api_dirs, k)]
@@ -100,10 +104,15 @@ locals {
 
   entries = {
     for k in local.sorted : k => merge(local.providers[k], {
-      iac_icon     = try(local.icons.iac[local.providers[k].iac], "?")
-      tier_icon    = try(local.icons.tier[local.providers[k].free_tier_type], "?")
-      behavior_tag = try(" · ${local.behaviors[local.providers[k].behavior]}", "")
-      engine       = local.resolved_engine[k]
+      iac_icon  = try(local.icons.iac[local.providers[k].iac], "?")
+      tier_icon = try(local.icons.tier[local.providers[k].free_tier_type], "?")
+      # "always on" or "sleeps after N min" when the provider says so with always_on, else what behavior says
+      behavior_tag = (
+        try(tostring(local.providers[k].always_on), "") == "yes" ? " · 🟢 always on" :
+        try(tostring(local.providers[k].always_on), "") == "no" ? (try(local.providers[k].sleeps_after_minutes, null) != null ? " · 💤 sleeps after ${local.providers[k].sleeps_after_minutes} min" : " · 💤 sleeps when idle") :
+        try(" · ${local.behaviors[local.providers[k].behavior]}", "")
+      )
+      engine = local.resolved_engine[k]
       # the engine, jobs and verification of an implemented provider, for the checklist
       engine_tag = local.providers[k].status == "ready" ? join("", [
         " · ⚙️ `${local.resolved_engine[k]}`",

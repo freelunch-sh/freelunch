@@ -201,6 +201,13 @@ Infrastructure:
   restore <app> [--snapshot id] [--host h] [--overwrite]
                           Stop the app, put its volumes back from its backup (the latest snapshot, or one),
                           and start it. It works on any host that has the app deployed
+  watch [--strict] [--json]
+                          (ci init --jobs=...,watch writes a weekly workflow for it)
+                          What the free tier changes under the project: a provider's free tier that a
+                          newer release records differently, what expires within 30 days, a late or
+                          failed backup, a full disk, a bill, a machine Oracle may reclaim as idle. It
+                          tells whoever listens (FREELUNCH_NOTIFY) only what is new since the last run;
+                          --strict exits 1 while anything is wrong
   host [name] [--json]    Who is on a VM host: the projects, their apps with the memory they reserve and use
                           now, the disk, and the week's heavy jobs in time order
   restart <app> [--host h] Restart an app on its VM host and wait until it is healthy; if it is not,
@@ -3639,6 +3646,186 @@ host_report_text() {
   fi
 }
 
+# --- watch ------------------------------------------------------------------------------
+# freelunch watch looks for what a project's free tier changes under it: a provider's free tier that a newer release
+# of freelunch records differently, something about to expire, a backup that is late, a machine Oracle may reclaim as
+# idle, a bill where there should be none, a full disk. It prints check lines and tells whoever listens only what is new
+# since its last run, which is kept in .freelunch/watch.state.
+
+# watch_field <dir> <provider> <field>: a provider.yaml field of the freelunch in <dir>
+watch_field() { ( PROVIDERS_DIR="$1/providers"; meta "$2" "$3" ); }
+
+# watch_limits <dir> <provider>: the limits: block of a provider.yaml, without comments and blank lines
+watch_limits() {
+  awk '/^limits:/ { f = 1; next } f && /^[^ #]/ { exit } f { sub(/#.*/, ""); gsub(/[ \t]+$/, ""); if ($0 ~ /[^ ]/) print }' "$1/providers/$2/provider.yaml" 2>/dev/null || true
+}
+
+# watch_a1_max <dir>: the Always Free Arm OCPUs a freelunch records for OCI
+watch_a1_max() { awk '/a1_flex:/ { f = 1 } f && /max_ocpus:/ { print $2; exit }' "$1/providers/oci/provider.yaml" 2>/dev/null || true; }
+
+# wcheck <ok|warn|fail> <check> <message>: a check line, kept for the notification and the state file
+wcheck() {
+  printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$TMP/watch.lines"
+  [[ "$WATCH_JSON" -eq 1 ]] || check "$1" "$3"
+}
+
+# watch_free_tier: for each provider the project uses, what this freelunch records of its free tier against the
+# newest release's
+watch_free_tier() {
+  local newest dir p f old new a1 sum used
+  newest="$(latest_version 2>/dev/null || true)"
+  dir=""
+  [[ -z "$newest" ]] || dir="$( ( fetch_version "$newest" ) 2>/dev/null)" || dir=""
+  if [[ -z "$dir" || ! -d "$dir/providers" ]]; then
+    wcheck warn free-tier "couldn't check whether the free tiers changed: the newest release of freelunch can't be downloaded (offline?)"
+    return 0
+  fi
+  [[ "$dir" != "$ROOT" ]] || { wcheck ok free-tier "this is the newest release ($newest): the free tiers are as it records them"; return 0; }
+  local changed=0
+  for p in $(all_providers); do
+    is_configured "$p" || continue
+    [[ -f "$dir/providers/$p/provider.yaml" ]] || continue
+    for f in free_tier free_tier_type card_required status notes; do
+      old="$(watch_field "$ROOT" "$p" "$f")"; new="$(watch_field "$dir" "$p" "$f")"
+      [[ "$old" == "$new" ]] && continue
+      changed=1
+      wcheck warn free-tier "$p: $f changed in $newest: was \"$(cut -c1-110 <<< "$old")\", now \"$(cut -c1-110 <<< "$new")\""
+    done
+    if [[ "$(watch_limits "$ROOT" "$p")" != "$(watch_limits "$dir" "$p")" ]]; then
+      changed=1
+      sum=""
+      if [[ "$p" == oci ]]; then
+        a1="$(watch_a1_max "$dir")"; used=0
+        while IFS=$'\t' read -r _ shape ocpus; do
+          [[ "$shape" == *A1* ]] && used=$((used + ${ocpus%.*}))
+        done < <(tfvars_map "$(config_dir oci)/terraform.tfvars" instances shape ocpus)
+        if [[ "$a1" =~ ^[0-9]+$ && $used -gt $a1 ]]; then sum="; this project's instances use $used OCPUs, over the new $a1"
+        elif [[ "$a1" =~ ^[0-9]+$ ]]; then sum="; this project uses $used of the $a1 Arm OCPUs"; fi
+      fi
+      wcheck warn free-tier "$p: its limits changed in $newest$sum"
+    fi
+  done
+  [[ $changed -eq 1 ]] || wcheck ok free-tier "the free tiers of the providers this project uses are as $newest records them"
+}
+
+# watch_expiry: what expires within 30 days
+watch_expiry() {
+  local line n=0
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    n=$((n + 1))
+    wcheck warn expiry "$line"
+  done < <(expiry_lines 30)
+  [[ $n -gt 0 ]] || wcheck ok expiry "nothing expires within 30 days"
+}
+
+# watch_hosts: what the checks of the nodes say of backups and disks
+watch_hosts() {
+  local rows line
+  [[ -f "$PROJECT/apps.tfvars" ]] || return 0
+  rows="$( ( cmd_probe --json ) 2>/dev/null || true)"
+  jq -e 'type == "array"' <<< "$rows" >/dev/null 2>&1 || return 0
+  while IFS= read -r line; do wcheck fail backup "$line"; done < <(jq -r '.[] | select(.type == "app" and .healthy == false and ((.reason // "") | test("backup"))) | "\(.node): \(.reason)"' <<< "$rows")
+  while IFS= read -r line; do wcheck warn disk "$line"; done < <(jq -r '.[] | select(.type == "host" and ((.disk_percent // 0) >= 85)) | "\(.node): the disk is \(.disk_percent)% full (docker system df on the host shows what takes it)"' <<< "$rows")
+  jq -e 'any(.[]; .type == "app" and .backup_age_hours != null)' <<< "$rows" >/dev/null 2>&1 \
+    && ! jq -e 'any(.[]; .type == "app" and .healthy == false and ((.reason // "") | test("backup")))' <<< "$rows" >/dev/null 2>&1 \
+    && wcheck ok backup "backups are as recent as their schedules say"
+  return 0
+}
+
+# watch_oci: the month's bill, the spend cap, and a machine OCI may reclaim as idle
+watch_oci() {
+  local tfvars tenancy cost cap state rows name id addr ocpus mem arch comp p95 rule days
+  tfvars="$(config_dir oci)/terraform.tfvars"
+  [[ -f "$tfvars" ]] && command -v oci >/dev/null || return 0
+  tenancy="$(tfvar "$tfvars" tenancy_ocid)"
+  [[ -n "$tenancy" ]] || return 0
+  oci_args "$tfvars"
+  if cost="$(oci_month_cost "$tenancy" 2>/dev/null)" && [[ "$cost" =~ ^[0-9.]+$ ]]; then
+    cap="$(billing_var spend_cap_usd)"
+    if [[ -n "$cap" ]] && awk -v c="$cost" -v cap="$cap" 'BEGIN { exit !(c > cap) }'; then
+      wcheck fail bill "oci: \$$cost billed this month, over the spend cap of \$$cap"
+    elif awk -v c="$cost" 'BEGIN { exit !(c > 0) }'; then
+      wcheck warn bill "oci: \$$cost billed this month, and Always Free costs nothing, so something is billed (freelunch doctor looks for it)"
+    else
+      wcheck ok bill "oci: nothing billed this month"
+    fi
+  fi
+  state="$(oci_billing_state "$tenancy" 2>/dev/null || true)"
+  [[ "$state" == free ]] || return 0
+  rule="$(awk '/idle:/ { match($0, /percent: *[0-9]+/); print substr($0, RSTART + 9, RLENGTH - 9) + 0; exit }' "$PROVIDERS_DIR/oci/provider.yaml")"
+  days="$(awk '/idle:/ { match($0, /days: *[0-9]+/); print substr($0, RSTART + 6, RLENGTH - 6) + 0; exit }' "$PROVIDERS_DIR/oci/provider.yaml")"
+  [[ "$rule" =~ ^[0-9]+$ && $rule -gt 0 ]] || return 0
+  rows="$(oci_find_instances 2>/dev/null || true)"
+  while IFS=$'\t' read -r name id addr ocpus mem arch comp; do
+    [[ -n "$id" ]] || continue
+    p95="$(oci_cpu_p95 "$id" "$comp")"
+    [[ "$p95" =~ ^[0-9]+$ ]] || continue
+    # a warning with nothing to do about it: freelunch doesn't help keep a machine busy to get round the rule
+    if [[ $p95 -lt $rule ]]; then wcheck warn idle "oci: Oracle may reclaim $name as idle: its CPU is at $p95% (p95 over the week), under the $rule% over ${days:-7} days that Always Free instances are held to"; fi
+  done <<< "$rows"
+}
+
+# cmd_watch [--strict] [--json]
+cmd_watch() {
+  local strict=0 a state new line gone prev total project msg
+  WATCH_JSON=0
+  for a in "$@"; do
+    case "$a" in
+      --strict) strict=1 ;;
+      --json)   WATCH_JSON=1 ;;
+      *)        die "watch: freelunch watch [--strict] [--json]" ;;
+    esac
+  done
+  [[ -n "$PROJECT" ]] || die "watch: run it in a project, where its .freelunch/ folder is"
+  command -v jq >/dev/null || die "jq is required for 'watch'"
+  [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
+  : > "$TMP/watch.lines"
+  state="$PROJECT/watch.state"
+  [[ "$WATCH_JSON" -eq 1 ]] || { echo "freelunch watch ($(rel "$PROJECT"))"; echo; }
+  watch_free_tier
+  watch_expiry
+  watch_hosts
+  watch_oci
+  # what is new: the lines that aren't ok and weren't in the last run; what cleared: the ones that were and aren't now
+  new="" gone=""
+  while IFS='|' read -r level chk msg; do
+    [[ "$level" != ok ]] || continue
+    grep -qxF "$level|$chk|$msg" "$state" 2>/dev/null || new="${new:+$new; }$msg"
+  done < "$TMP/watch.lines"
+  if [[ -f "$state" ]]; then
+    while IFS= read -r prev; do
+      grep -qxF "$prev" "$TMP/watch.lines" || gone="${gone:+$gone; }${prev#*|*|}"
+    done < "$state"
+  fi
+  project="$(notify_project)"
+  if [[ -n "$new$gone" ]]; then
+    msg="$project: watch:"
+    [[ -z "$new" ]] || msg="$msg new: $new."
+    [[ -z "$gone" ]] || msg="$msg no longer a problem: $gone."
+    notify_event watch "$(scrub_secrets "$msg")"
+  fi
+  # in Actions, what was found goes to the run's summary
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    {
+      echo "### freelunch watch"
+      echo
+      if [[ -z "$(grep -v '^ok|' "$TMP/watch.lines" || true)" ]]; then echo "Nothing to report."
+      else grep -v '^ok|' "$TMP/watch.lines" | awk -F'|' '{ m = $3; for (i = 4; i <= NF; i++) m = m "|" $i; print "- **" $1 "** " m }'; fi
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
+  grep -v '^ok|' "$TMP/watch.lines" > "$state.new" || true
+  mv "$state.new" "$state"
+  total="$(grep -vc '^ok|' "$TMP/watch.lines" || true)"
+  if [[ "$WATCH_JSON" -eq 1 ]]; then
+    jq -R -s -c --argjson strict "$strict" 'split("\n") | map(select(. != "") | split("|") | {level: .[0], check: .[1], message: (.[2:] | join("|"))})' "$TMP/watch.lines" | jq .
+  else
+    echo
+    if [[ "$total" -eq 0 ]]; then echo "Nothing to report."; else echo "$total thing(s) to look at."; fi
+  fi
+  [[ $strict -eq 0 || "$total" -eq 0 ]]
+}
+
 # --- backups ---------------------------------------------------------------------------
 # An app with `backup` in apps.tfvars is saved with restic (a container, no install on the host) to
 # a bucket freelunch knows, on a timer, and can be brought back with freelunch restore.
@@ -4377,6 +4564,16 @@ setup_token() {
   chmod 600 "$PROJECT/.env"
 }
 
+# sleeps_note <provider> [prefix]: what a provider that sleeps says of it: "sleeps after 15 min" or "sleeps when idle",
+# after the prefix and with ")" closing it when there is one; nothing for one that stays on or doesn't say
+sleeps_note() {
+  local p="$1" prefix="${2:-}" m text
+  [[ "$(meta "$p" always_on)" == no ]] || return 0
+  m="$(meta "$p" sleeps_after_minutes)"
+  if [[ -n "$m" ]]; then text="sleeps after $m min"; else text="sleeps when idle"; fi
+  if [[ "$prefix" == *"(" ]]; then printf '%s%s)' "$prefix" "$text"; else printf '%s%s' "$prefix" "$text"; fi
+}
+
 cmd_setup() {
   command -v jq >/dev/null || die "jq is required for 'setup'"
   local name="" domain="" targets_arg="" ci=0 skip_doctor=0 a
@@ -4399,6 +4596,12 @@ cmd_setup() {
     case "$(meta "$p" layer)" in host|platform) ;; *) continue ;; esac
     choices+=("$p")
   done
+  # a target that sleeps when unused comes after the ones that stay on
+  local awake=() sleepy=()
+  for p in "${choices[@]}"; do
+    if [[ "$(meta "$p" always_on)" == no ]]; then sleepy+=("$p"); else awake+=("$p"); fi
+  done
+  choices=(${awake[@]+"${awake[@]}"} ${sleepy[@]+"${sleepy[@]}"})
   local targets=()
   if [[ -n "$targets_arg" ]]; then
     IFS=, read -ra picked <<< "$targets_arg"
@@ -4412,7 +4615,7 @@ cmd_setup() {
     echo "Where may your app run? Pick the clouds you have an account at, most preferred first." >&2
     for p in "${choices[@]}"; do
       i=$((i + 1))
-      printf '  %d) %-11s %s: %.60s\n' "$i" "$p" "$(meta "$p" display_name)" "$(meta "$p" free_tier)" >&2
+      printf '  %d) %-11s %s: %.60s%s\n' "$i" "$p" "$(meta "$p" display_name)" "$(meta "$p" free_tier)" "$(sleeps_note "$p" " (")" >&2
     done
     read -ra picked <<< "$(ask "Numbers, like \"1 2\":" "1")"
     for t in "${picked[@]}"; do
@@ -5399,6 +5602,15 @@ cmd_up() {
     log "up: $t has no room, on to the next target"
   done
   if [[ $dry_run -eq 1 ]]; then
+    local sl
+    for sl in ${chosen:+"$chosen"} ${chosen:-${targets[@]}}; do
+      [[ "$(meta "$sl" always_on)" == no ]] || continue
+      if [[ -n "$(meta "$sl" sleeps_after_minutes)" ]]; then
+        log "up: $sl sleeps after $(meta "$sl" sleeps_after_minutes) minutes without requests (the first request then waits)"
+      else
+        log "up: $sl sleeps when nothing asks for it (the first request then waits)"
+      fi
+    done
     if [[ -n "$chosen" ]]; then log "up: would deploy to $chosen"; else log "up: would deploy to the first of ${targets[*]} that has room"; fi
     return 0
   fi
@@ -9340,7 +9552,7 @@ oci_billing_state() {
 # budget alert watches the tenancy, and what the whole tenancy uses of the Always Free
 # storage, IPs and load balancers, which the stack's own guardrails can't see
 doctor_oci_billing() {
-  local tenancy="$1" tfvars="$2" budgets state out used=0 want=0 gb existing key shape ocpus
+  local tenancy="$1" tfvars="$2" budgets state out used=0 want=0 gb existing key shape ocpus quotas
   local ips reserved loose lbs nlbs state_file free
   # A budget alert is the net under everything else.
   if budgets="$(oci budgets budget list -c "$tenancy" --all "${OCI_ARGS[@]}" 2>&1)" && jq -e '.data | length > 0' <<< "$budgets" >/dev/null 2>&1; then
@@ -9360,6 +9572,18 @@ doctor_oci_billing() {
     fi
   else
     check warn "can't tell whether the tenancy can create paid resources"
+  fi
+
+  # A quota that forbids what isn't Always Free is the only net that prevents a charge on a paid tenancy.
+  quotas="$(oci limits quota list -c "$tenancy" --all "${OCI_ARGS[@]}" 2>/dev/null | jq -r '[.data[]? | select(.name | endswith("-always-free-only")) | .name] | join(", ")' 2>/dev/null || true)"
+  if [[ -n "$quotas" ]]; then
+    check ok "quota guard: $quotas keeps compute in this tenancy to the Always Free shapes, so OCI refuses anything else"
+  elif grep -qsE '^[[:space:]]*quota_guard[[:space:]]*=[[:space:]]*true' "$tfvars"; then
+    check ok "quota guard: quota_guard is on in $(rel "$tfvars"), so apply makes the quota that keeps compute to the Always Free shapes"
+  elif [[ "${state:-}" == paid ]]; then
+    check warn "no quota guard: this tenancy can create paid resources, and a budget alert only reports a charge. quota_guard = true in $(rel "$tfvars") makes a quota that lets only the Always Free shapes be launched"
+  else
+    check ok "quota guard: off, and this tenancy is Always Free only"
   fi
 
   # Storage across the tenancy: boot volumes plus block volumes, 200 GB free together.
@@ -9462,6 +9686,23 @@ public_keys() {
 
 # The keys deploy can sign in with: FREELUNCH_SSH_KEY, or else the agent's and ssh's default
 # keys. Their public halves come from the .pub file next to them.
+# quick <seconds> <command...>: what the command prints, or what it had printed when it was stopped for taking longer: an
+# ssh agent that waits for a fingerprint or a password would hold freelunch up for good otherwise. Nothing when it fails.
+quick() {
+  local secs="$1" f pid wd
+  shift
+  f="$(mktemp)"
+  "$@" > "$f" 2>/dev/null < /dev/null &
+  pid=$!
+  ( command -p sleep "$secs"; kill "$pid" 2>/dev/null ) > /dev/null 2>&1 &
+  wd=$!
+  wait "$pid" 2>/dev/null || true
+  kill "$wd" 2>/dev/null || true
+  wait "$wd" 2>/dev/null || true
+  cat "$f"
+  rm -f "$f"
+}
+
 deploy_keys() {
   local key f
   if [[ -n "${FREELUNCH_SSH_KEY:-}" ]]; then
@@ -9469,7 +9710,7 @@ deploy_keys() {
     if [[ -f "$key.pub" ]]; then public_keys "$key.pub"; else ssh-keygen -y -P '' -f "$key" 2>/dev/null | public_keys /dev/stdin; fi
     return 0
   fi
-  { ssh-add -L 2>/dev/null || true
+  { quick 5 ssh-add -L
     for f in "$HOME"/.ssh/id_ed25519.pub "$HOME"/.ssh/id_ecdsa.pub "$HOME"/.ssh/id_rsa.pub; do [[ ! -f "$f" ]] || cat "$f"; done
   } | public_keys /dev/stdin
 }
@@ -11259,6 +11500,7 @@ EOF
 
 CI_PROVISION_WORKFLOW="freelunch-provision.yml"
 CI_CHECK_WORKFLOW="freelunch-ci.yml"
+CI_WATCH_WORKFLOW="freelunch-watch.yml"
 
 # job_workflows <project root> <jobs: provision,ci,cd>: the workflows of the jobs engines.md
 # names. cd is freelunch.yml and the wait workflow github_workflows writes; the others are here.
@@ -11317,6 +11559,35 @@ EOF
       # shellcheck disable=SC2016 # GitHub expressions, not ours
       ci_uses "\${{ github.event_name == 'pull_request' && 'plan all' || github.event_name == 'push' && 'apply all' || inputs.action == 'doctor' && 'doctor' || format('{0} all', inputs.action) }}" "FREELUNCH_AUTO_APPROVE: \${{ github.event_name != 'pull_request' && inputs.action != 'plan' && inputs.action != 'doctor' && '1' || '' }}"
     } | write_new "$base/.github/workflows/$CI_PROVISION_WORKFLOW"
+  fi
+  if [[ "$jobs" == *,watch,* ]]; then
+    {
+      cat <<EOF
+# Written by freelunch ci init. The watch job: once a week (and by hand), freelunch watch looks for what the free tier
+# changes under this project: a provider's free tier that a newer freelunch records differently, a credit or a domain about
+# to expire, a late backup, a full disk, a bill, a machine that may be reclaimed as idle. What it finds goes to the run's
+# summary, and to FREELUNCH_NOTIFY when that is set. It reads, and changes nothing.
+name: freelunch-watch
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: freelunch-watch
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+EOF
+      ci_uses watch
+    } | write_new "$base/.github/workflows/$CI_WATCH_WORKFLOW"
   fi
   if [[ "$jobs" == *,ci,* ]]; then
     {
@@ -11527,7 +11798,7 @@ ci_init() {
       --journey)       journey=yes ;;
       --no-journey)    journey=no ;;
       --jobs=*)        jobs="${a#--jobs=}"
-                       [[ "$jobs" =~ ^(provision|ci|cd)(,(provision|ci|cd))*$ ]] || die "ci init: --jobs takes provision, ci and cd, separated by commas" ;;
+                       [[ "$jobs" =~ ^(provision|ci|cd|watch)(,(provision|ci|cd|watch))*$ ]] || die "ci init: --jobs takes provision, ci, cd and watch, separated by commas" ;;
       --set-secrets)   secrets="set" ;;
       --print-secrets) secrets=print ;;
       --bundle) CI_BUNDLE_MODE=1 ;;
@@ -11542,7 +11813,7 @@ ci_init() {
   ci_pin_project_name
   ci_offer_state_store "$state_kind"
   case "$where" in
-    github) if [[ $pipeline -eq 1 ]]; then [[ $CI_BUNDLE_MODE -eq 0 ]] || die "ci init: --pipeline hands secrets over one by one, not as a bundle"; pipeline_workflow "$base"; else [[ ",$jobs," != *,cd,* ]] || github_workflows "$base"; job_workflows "$base" "$jobs"; fi ;;
+    github) if [[ $pipeline -eq 1 ]]; then [[ $CI_BUNDLE_MODE -eq 0 ]] || die "ci init: --pipeline hands secrets over one by one, not as a bundle"; pipeline_workflow "$base"; job_workflows "$base" watch; else [[ ",$jobs," != *,cd,* ]] || github_workflows "$base"; job_workflows "$base" "$jobs"; fi ;;
     gitlab) CI_BUNDLE_MODE=1; gitlab_pipeline "$base" ;;
     *)      if [[ -f "$PROVIDERS_DIR/$where/pipeline.tpl" && "$(engine_of "$where")" == ci ]]; then CI_BUNDLE_MODE=1; ci_provider_pipeline "$base" "$where"
             else die "ci init: github, gitlab or a CI provider with a pipeline ($(ci_providers | tr '\n' ' ')); other CI systems: docs/ci.md#other-ci-systems"; fi ;;
@@ -12590,6 +12861,7 @@ main() {
     jobs)                 cmd_jobs "$@" ;;
     backup)               cmd_backup "$@" ;;
     host)                 cmd_host "$@" ;;
+    watch)                resolve_env_refs; cmd_watch "$@" ;;
     restore)              cmd_restore "$@" ;;
     doctor)               cmd_doctor ;;
     journey)              resolve_state_refs; sync_start status; cmd_journey "$@" ;;

@@ -120,6 +120,12 @@ variable "acknowledge_billable_resources" {
   default     = false
 }
 
+variable "quota_guard" {
+  description = "Make a compartment quota in the tenancy that zeroes every compute family but the Always Free shapes (the Arm A1 and AMD micro amounts in the catalogue). OCI then refuses a launch outside them, even on a pay-as-you-go account. Off by default: it also stops you launching a machine you meant to pay for. It can't be on with acknowledge_billable_resources."
+  type        = bool
+  default     = false
+}
+
 variable "budget_alert_emails" {
   description = "Emailed when the tenancy's spend reaches budget_amount, or is forecast to. freelunch creates a budget with these before the first VM. [] creates none, and freelunch doctor warns."
   type        = list(string)

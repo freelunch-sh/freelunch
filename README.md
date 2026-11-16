@@ -240,6 +240,7 @@ bin/freelunch inventory            # hosts from every cloud in one inventory.jso
 | `freelunch restart <app> [--host h]` | Restart an app on its VM host and wait until it is healthy; if it is not, the last 50 log lines say why |
 | `freelunch shell <app> [--service s] [--host h] [-- command...]` | Run a command in an app's container on its VM host and return its exit code, or open a shell in it |
 | `freelunch host [name] [--json]` | Who is on a VM host: the projects on it, their apps with what they reserve and use, the disk, and the week's heavy jobs. A second project can move onto a host another project made ([docs/shared-host.md](docs/shared-host.md)) |
+| `freelunch watch [--strict] [--json]` | What the free tier changes under the project: a provider's free tier that a newer release records differently, what expires within 30 days, a late backup, a full disk, a bill, a machine Oracle may reclaim as idle. `ci init --jobs=watch` runs it every week ([docs/watch.md](docs/watch.md)) |
 | `freelunch jobs [run <job>]` | The scheduled jobs (`jobs` in `apps.tfvars`) of every VM host: schedule, last run and result, next run; `jobs run <job>` starts one and follows it ([deploy/README.md](deploy/README.md#hooks-and-jobs-vm-hosts)) |
 | `freelunch backup [app]`, `backup list <app>`, `restore <app> [--snapshot id] [--host h] [--overwrite]` | Back an app's volumes up to a bucket now (a timer does it on the schedule in `apps.tfvars`), list the snapshots, and put them back on any host ([docs/backups.md](docs/backups.md)); `up --restore` does it for an app on a new host |
 | `freelunch status` | One screen after setup: hosts and platforms, the apps on each one and whether they run (with the host's disk, memory and load), tunnels and their URLs, service token expiry, capacity waits |
@@ -398,12 +399,12 @@ Run a container without managing a VM. Free tiers usually sleep when idle.
 - [ ] **[Appwrite Cloud](providers/appwrite/)** 🟢 `appwrite/appwrite` · ♾️ Unlimited projects with no pausing; per project: 1 database, 3 buckets, 5 functions
 - [ ] **[Back4App Containers](providers/back4app/)** ⚪ · ♾️ 1 container, 256 MB RAM, 100 GB transfer
 - [ ] **[Clever Cloud](providers/clever-cloud/)** 🟡 `CleverCloud/clevercloud` · ⏳ EUR 20 credit at sign-up; DEV plan with free MySQL and PostgreSQL
-- [x] **[Google Cloud Run](providers/cloud-run/)** 🟢 `hashicorp/google` · ♾️ With request-based billing, per billing account and month: 2M requests, 180,000 vCPU-seconds and 360,000 GB-seconds; scales to zero between requests · ⚙️ `tofu`
+- [x] **[Google Cloud Run](providers/cloud-run/)** 🟢 `hashicorp/google` · ♾️ With request-based billing, per billing account and month: 2M requests, 180,000 vCPU-seconds and 360,000 GB-seconds; scales to zero between requests · 💤 sleeps when idle · ⚙️ `tofu`
 - [ ] **[Leapcell](providers/leapcell/)** ⚪ · ♾️ Hobby plan: 20 projects, 100k serverless invocations/month, 3 GB-hours compute, 2 GB transfer
 - [x] **[Northflank](providers/northflank/)** ⚪ · ♾️ Sandbox: 2 services, 2 jobs and 1 database, always on with no sleeping, plans up to nf-compute-20 (0.2 vCPU, 512 MB) and up to $20/month of resources; no card · 🟢 always on · ⚙️ `guided` · verified: live · **recommended**
 - [x] **[Oracle Kubernetes Engine (OKE)](providers/oke/)** 🟢 `oracle/oci` · ♾️ Basic cluster with no control-plane fee; worker nodes on the Always Free Arm cores (2 OCPUs and 12 GB since June 2026 on new accounts, 4 and 24 on older ones), shared with the oci stack's VMs; 200 GB block storage, 1 flexible load balancer · ⚙️ `tofu`
 - [ ] **[Railway](providers/railway/)** 🟡 `terraform-community-providers/railway` · 🔁 $5 trial credit for 30 days, then the Free plan: $1 of usage credit a month, up to 1 vCPU and 0.5 GB RAM per service, 0.5 GB volume
-- [x] **[Render](providers/render/)** 🟢 `render-oss/render` · ♾️ Free web services: 750 instance-hours/month, 512 MB / 0.1 CPU, spin down after 15 min idle; free Postgres expires after 30 days; 5 GB/month bandwidth · 💤 sleeps when idle · ⚙️ `tofu`
+- [x] **[Render](providers/render/)** 🟢 `render-oss/render` · ♾️ Free web services: 750 instance-hours/month, 512 MB / 0.1 CPU, spin down after 15 min idle; free Postgres expires after 30 days; 5 GB/month bandwidth · 💤 sleeps after 15 min · ⚙️ `tofu`
 - [x] **[Scaleway](providers/scaleway/)** ⚪ · ♾️ Serverless Containers: 400,000 GB-s of memory and 200,000 vCPU-s per account and month, enough for one 128 MB container all month or bigger ones that scale to zero; no free VMs; Startup Program for EU companies (up to EUR 36K) · ⚙️ `guided`
 - [ ] **[SnapDeploy](providers/snapdeploy/)** ⚪ · ♾️ 4 containers, 100 container-hours/month, 512 MB / 0.25 vCPU; sleeps after 15 min idle
 
@@ -575,4 +576,6 @@ compute), add offline tests with `mock_provider`, then run `bin/freelunch catalo
 
 You are responsible for what runs in your accounts. Set budget alerts at the lowest
 threshold each provider allows, especially on Pay-As-You-Go accounts, where anything
-above the free caps is billed.
+above the free caps is billed. A budget alert reports a charge once it has happened, it does
+not prevent one, and neither does `freelunch watch`, which finds changes in the free tiers and
+signs of a bill ([docs/watch.md](docs/watch.md)).

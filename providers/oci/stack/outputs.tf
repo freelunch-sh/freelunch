@@ -14,6 +14,11 @@ output "free_tier_usage" {
   value       = module.docker_host.free_tier_usage
 }
 
+output "quota_guard" {
+  description = "Whether a quota keeps compute to the Always Free shapes."
+  value       = module.quota_guard.enabled
+}
+
 output "budget_alert" {
   description = "Whether a budget alert watches the tenancy."
   value       = module.budget.enabled
