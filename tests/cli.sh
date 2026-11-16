@@ -2486,9 +2486,12 @@ TFVARS
 
 # The CLI's shellcheck findings may be fewer than tests/shellcheck.baseline, never more. Lower the number when some are fixed.
 test_shellcheck_findings_do_not_grow() {
-  local now baseline
+  local now baseline version want
   command -v shellcheck >/dev/null || { echo "(shellcheck isn't installed: skipped)" >&2; return 0; }
-  baseline="$(cat "$ROOT/tests/shellcheck.baseline")"
+  # The count depends on shellcheck's version (newer ones find more or fewer notes), so the baseline names the one it was counted with.
+  read -r baseline want < "$ROOT/tests/shellcheck.baseline"
+  version="$(shellcheck --version | sed -n 's/^version: *//p')"
+  [[ "$version" == "$want" ]] || { echo "(the baseline is for shellcheck $want, this is $version: skipped)" >&2; return 0; }
   now="$( (shellcheck -f gcc "$CLI" 2>&1 || true) | wc -l | tr -d ' ')"
   [[ "$now" -le "$baseline" ]] || { echo "shellcheck finds $now things in bin/freelunch, $baseline at the baseline (tests/shellcheck.baseline): fix the new ones" >&2; return 1; }
 }

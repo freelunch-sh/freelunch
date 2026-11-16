@@ -37,3 +37,6 @@ private/
 # Local machine and tool settings
 .DS_Store
 .claude/settings.local.json
+
+# The CI runners' provider cache (TF_PLUGIN_CACHE_DIR in ci.yml)
+/.plugin-cache/
