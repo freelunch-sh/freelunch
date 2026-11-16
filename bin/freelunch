@@ -288,13 +288,15 @@ EOF
 
 need_tf() { [[ -n "$TF" ]] || die "neither tofu nor terraform found in PATH (or use the runner image, see README)"; }
 
-meta() { # meta <provider> <field>: the first "field: value" line of provider.yaml, read without spawning anything
+meta() { # meta <provider> <field>: the first "field: value" line of provider.yaml, read without spawning anything; also left in $META, so a loop can call it without a subshell
   local line v re="^$2: *\"?([^\"#]*)\"?" f="$PROVIDERS_DIR/$1/provider.yaml"
+  META=""
   [[ -f "$f" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "$line" =~ $re ]]; then
       v="${BASH_REMATCH[1]}"
-      printf '%s\n' "${v%"${v##*[! ]}"}"
+      META="${v%"${v##*[! ]}"}"
+      printf '%s\n' "$META"
       return 0
     fi
   done < "$f"
@@ -624,11 +626,16 @@ hybrid_state() {
   else echo "$ROOT/hybrid/terraform.tfstate"; fi
 }
 
-is_configured() { [[ -f "$(config_dir "$1")/terraform.tfvars" ]]; }
+# config_dir <stack> without a subshell: the folder in $CONFIG_DIR (for loops that ask it for every stack)
+set_config_dir() { if [[ -n "$PROJECT" ]]; then CONFIG_DIR="$PROJECT/$1"; else CONFIG_DIR="$PROVIDERS_DIR/$1/stack"; fi; }
+is_configured() { set_config_dir "$1"; [[ -f "$CONFIG_DIR/terraform.tfvars" ]]; }
 is_deployed() {
-  local state; state="$(config_dir "$1")/terraform.tfstate"
-  # Compact or not: tofu/terraform write it indented, state pull prints it on one line.
-  [[ -s "$state" ]] && grep -Eq '"outputs": ?[{]' "$state" && ! grep -Eq '"outputs": ?[{][[:space:]]*[}]' "$state"
+  local txt="" has='"outputs": ?[{]' empty='"outputs": ?[{][[:space:]]*[}]'
+  set_config_dir "$1"
+  [[ -s "$CONFIG_DIR/terraform.tfstate" ]] || return 1
+  # read, not grep: no process per check. Compact or not: tofu/terraform write it indented, state pull prints it on one line.
+  IFS= read -r -d '' txt < "$CONFIG_DIR/terraform.tfstate" || true
+  [[ "$txt" =~ $has ]] && ! [[ "$txt" =~ $empty ]]
 }
 
 # tofu/terraform would still load a terraform.tfvars sitting next to the code, on top of the
@@ -647,12 +654,12 @@ project_args() { # project_args <provider>
   if [[ "$(meta "$1" layer)" == "glue" ]]; then
     echo "-var=inventory_state_path=$(hybrid_state)"
     # Routes without a host go where the project runs (freelunch up).
-    if grep -qs 'variable "default_host"' "$(stack_dir "$1")"/*.tf; then
+    if grep -qs 'variable "default_host"' "$PROVIDERS_DIR/$1/stack"/*.tf; then
       local default; default="$(default_host)"
       [[ -z "$default" ]] || echo "-var=default_host=$default"
     fi
     # Hosts another project made are known to routes too (hosts with shared = true).
-    if grep -qs 'variable "shared_hosts"' "$(stack_dir "$1")"/*.tf; then
+    if grep -qs 'variable "shared_hosts"' "$PROVIDERS_DIR/$1/stack"/*.tf; then
       local shared; shared="$(shared_hosts | jq -Rsc 'split("\n") | map(select(. != ""))')"
       [[ "$shared" == "[]" ]] || echo "-var=shared_hosts=$shared"
     fi
@@ -718,14 +725,14 @@ resolve() { # resolve <names...> -> validated provider list
   [[ $# -gt 0 ]] || die "name at least one provider, or 'all'"
   for p in "$@"; do
     [[ -f "$PROVIDERS_DIR/$p/provider.yaml" ]] || die "unknown provider '$p' (see: freelunch list)"
-    [[ -d "$(stack_dir "$p")" ]] || die "provider '$p' has no stack yet (status: $(meta "$p" status))"
+    [[ -d "$PROVIDERS_DIR/$p/stack" ]] || die "provider '$p' has no stack yet (status: $(meta "$p" status))"
     echo "$p"
   done
 }
 
 prepare_stack() { # prepare_stack <action> <provider>: check the config, then init the stack
   local p="$2" dir profile=""
-  dir="$(stack_dir "$p")"
+  dir="$PROVIDERS_DIR/$p/stack"
   is_configured "$p" || die "$p: missing $(rel "$(config_dir "$p")")/terraform.tfvars (copy terraform.tfvars.example)"
   check_checkout_tfvars "$dir"
   log "$1 $p${PROJECT:+ ($(rel "$PROJECT")/$p)}"
@@ -745,12 +752,12 @@ run_stack() { # run_stack <action> <provider> [extra args]
   [[ "${FREELUNCH_AUTO_APPROVE:-0}" == "1" && "$action" != "plan" ]] && args+=(-auto-approve)
   [[ "$action" == "plan" ]] || state_dirty "$p"
   if [[ "$action" == "plan" || "${FREELUNCH_AUTO_APPROVE:-0}" == "1" || -t 0 ]]; then
-    tf_for "$p" "$(stack_dir "$p")" "$action" -input=false ${args[@]+"${args[@]}"} "$@"
+    tf_for "$p" "$PROVIDERS_DIR/$p/stack" "$action" -input=false ${args[@]+"${args[@]}"} "$@"
     return
   fi
   # Without a terminal, tofu/terraform's yes/no prompt reads the end of the input and fails.
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-  if tf_for "$p" "$(stack_dir "$p")" "$action" -input=false ${args[@]+"${args[@]}"} "$@" 2>&1 | keep "$TMP/$p.$action.out"; then return 0; fi
+  if tf_for "$p" "$PROVIDERS_DIR/$p/stack" "$action" -input=false ${args[@]+"${args[@]}"} "$@" 2>&1 | keep "$TMP/$p.$action.out"; then return 0; fi
   grep -qi 'asking for approval' "$TMP/$p.$action.out" || return 1
   if [[ "$action" == "apply" ]]; then
     die "apply $p: there is no terminal to answer the prompt at. Save a plan, review it, and apply that: freelunch plan $p --out <file>, then freelunch apply $p --plan <file>"
@@ -802,7 +809,7 @@ project_stacks() {
   [[ -n "$PROJECT" ]] || return 0
   for d in "$PROJECT"/*/; do
     s="$(basename "$d")"
-    if [[ -d "$(stack_dir "$s")" ]]; then echo "$s"; fi
+    if [[ -d "$PROVIDERS_DIR/$s/stack" ]]; then echo "$s"; fi
   done
 }
 
@@ -1729,7 +1736,7 @@ apply_until_capacity() { # apply_until_capacity <provider> <reviewed plan or app
   local dir out plan json profile="" interval delay pause cap deadline="" summary why a pid unreviewed rotates=0
   local cut first=1 exact=0 resumes=0 phase nothing=0 before slept what="the reviewed plan" again reason swept="" sweeping=0 lost
   local args=() state=() approve=() offset=() lookup_json=""
-  dir="$(stack_dir "$p")"
+  dir="$PROVIDERS_DIR/$p/stack"
   interval="${FREELUNCH_CAPACITY_INTERVAL:-120}"
   [[ "$interval" =~ ^[0-9]+$ ]] || die "FREELUNCH_CAPACITY_INTERVAL is a number of seconds, not '$interval'"
   if [[ -n "${FREELUNCH_CAPACITY_TIMEOUT:-}" ]]; then
@@ -1965,7 +1972,7 @@ apply_once() {
   prepare_stack apply "$p"
   while IFS= read -r a; do [[ "$a" != -state=* ]] || state=("$a"); done < <(project_args "$p")
   state_dirty "$p"
-  tf_for "$p" "$(stack_dir "$p")" apply -input=false ${state[@]+"${state[@]}"} "$saved"
+  tf_for "$p" "$PROVIDERS_DIR/$p/stack" apply -input=false ${state[@]+"${state[@]}"} "$saved"
 }
 
 # apply_host <provider> <saved plan, or ""> [extra args]: apply a host stack once, and
@@ -1994,7 +2001,7 @@ apply_host() {
 plan_warnings() {
   local json replaced destroyed tfvars tenancy out avail used id
   json="$TMP/$1.plan.json"
-  tf_for "$1" "$(stack_dir "$1")" show -json "$2" > "$json" 2>/dev/null || return 0
+  tf_for "$1" "$PROVIDERS_DIR/$1/stack" show -json "$2" > "$json" 2>/dev/null || return 0
   replaced="$(jq -r '[.resource_changes[]? | select(.change.actions | index("delete") and index("create")) | .address] | join(", ")' "$json")"
   destroyed="$(jq -r '[.resource_changes[]? | select(.change.actions == ["delete"]) | .address] | join(", ")' "$json")"
   [[ -z "$replaced" ]] || log "$1: this plan replaces $replaced. Each one is destroyed and created again, along with what is in it (a VCN takes its hosts with it)"
@@ -2113,7 +2120,7 @@ abs_path() { # abs_path <file>: the file's absolute path; its folder must exist
 # instance in the plan. OCI keeps it in metadata.user_data, AWS in user_data_base64 and
 # Azure in custom_data, all base64; GCP has it as text in metadata["user-data"].
 user_data_in_plan() {
-  tf_for "$1" "$(stack_dir "$1")" show -json "$2" | jq -r '
+  tf_for "$1" "$PROVIDERS_DIR/$1/stack" show -json "$2" | jq -r '
     .resource_changes[]? | select(.change.after != null) | . as $r | .change.after
     | (.metadata.user_data? // .user_data_base64? // .custom_data? // (.metadata["user-data"]? // empty | @base64)) as $data
     | [($r.index // $r.name | tostring), ($r.change.actions | join(",")), $data] | @tsv'
@@ -2165,7 +2172,7 @@ next_steps() {
   if [[ -f "$(state_root)/apps.tfvars" ]] || is_configured cloudflare || is_deployed cloudflare; then
     [[ -z "$trust" ]] || steps+=("Pin the host keys before the first deploy: $trust")
     [[ -z "$unpinned" ]] || steps+=("Check the host key of $unpinned before the first deploy (docs/deploy-a-container.md#check-the-host-key)")
-    if [[ -d "$(stack_dir cloudflare)" ]] && is_configured cloudflare && ! is_deployed cloudflare; then steps+=("freelunch apply cloudflare"); fi
+    if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_configured cloudflare && ! is_deployed cloudflare; then steps+=("freelunch apply cloudflare"); fi
     steps+=("freelunch deploy")
   fi
   [[ ${#steps[@]} -gt 0 ]] || return 0
@@ -2177,7 +2184,8 @@ deployed_json() { # deployed_json <layer>: the deployed stacks of that layer, as
   local p first=1
   printf '['
   for p in $(all_providers); do
-    if [[ "$(meta "$p" layer)" != "$1" || ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
+    meta "$p" layer > /dev/null
+    if [[ "$META" != "$1" || ! -d "$PROVIDERS_DIR/$p/stack" ]] || ! is_deployed "$p"; then continue; fi
     [[ $first -eq 1 ]] || printf ','
     printf '"%s"' "$p"; first=0
   done
@@ -2224,7 +2232,7 @@ cmd_output() { # cmd_output <stack|hybrid> [tofu/terraform output args]
   if [[ "$name" == "hybrid" ]]; then
     state="$(hybrid_state)"
   else
-    [[ -d "$(stack_dir "$name")" ]] || die "output: no stack named '$name' (stacks: $(ready_stacks)hybrid)"
+    [[ -d "$PROVIDERS_DIR/$name/stack" ]] || die "output: no stack named '$name' (stacks: $(ready_stacks)hybrid)"
     state="$(config_dir "$name")/terraform.tfstate"
   fi
   [[ -s "$state" ]] || die "output: $name has no state yet ($(rel "$state"))"
@@ -2369,7 +2377,7 @@ cmd_list() {
   local p state
   for p in $(all_providers); do
     state="-"
-    if [[ -d "$(stack_dir "$p")" ]]; then
+    if [[ -d "$PROVIDERS_DIR/$p/stack" ]]; then
       if is_deployed "$p"; then state="yes"; elif is_configured "$p"; then state="configured"; else state="no"; fi
     fi
     printf "%-20s %-14s %-9s %-8s %-10s %s\n" "$p" "$(meta "$p" category)" "$(meta "$p" status)" "$(meta "$p" layer)" "$(meta "$p" iac)" "$state"
@@ -2492,7 +2500,7 @@ remote_status_script() { printf 'ns=%s\n%s\n' "$(shq "$(host_ns "$1")")" "$REMOT
 status_hosts() {
   local p out lines="" stacks=()
   for p in $(all_providers); do
-    [[ "$(meta "$p" layer)" == "host" && -d "$(stack_dir "$p")" ]] || continue
+    [[ "$(meta "$p" layer)" == "host" && -d "$PROVIDERS_DIR/$p/stack" ]] || continue
     if is_deployed "$p"; then
       out="$(jq -r '.outputs.hosts.value[]? | "  \("\(.provider)-\(.name)" | . + (" " * ([14 - length, 1] | max)))\(.public_ip // .private_ip // "-")  \(.arch)  \(.size)"' "$(config_dir "$p")/terraform.tfstate")"
       [[ -z "$out" ]] || lines="$lines$out"$'\n'
@@ -2515,7 +2523,7 @@ status_hosts() {
 status_platforms() {
   local p lines=""
   for p in $(all_providers); do
-    if ! is_platform "$p" || [[ ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
+    if ! is_platform "$p" || [[ ! -d "$PROVIDERS_DIR/$p/stack" ]] || ! is_deployed "$p"; then continue; fi
     lines="$lines$(jq -r '.outputs.platforms.value[]? | "  \("\(.provider)-\(.name)" | . + (" " * ([14 - length, 1] | max)))project \(.id) in \(.region)  \(.arch)  \(.size)"' "$(config_dir "$p")/terraform.tfstate")"$'\n'
   done
   [[ -n "$lines" ]] || return 1
@@ -2548,7 +2556,7 @@ status_apps() {
   local apps_file tunnel_state="" host address user out app service state health expected seen numbers line backup_lines
   apps_file="$(state_root)/apps.tfvars"
   [[ -n "$TF" ]] || return 0
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   [[ -f "$apps_file" || -n "$tunnel_state" ]] || return 0
   if ! { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1; then
     echo "Apps"
@@ -2605,7 +2613,7 @@ status_apps() {
 status_tunnels() { # status_tunnels <0 when there are hosts>
   local state tfvars account zone host id out text urls token="${CLOUDFLARE_API_TOKEN:-}"
   state="$(config_dir cloudflare)/terraform.tfstate"
-  [[ -d "$(stack_dir cloudflare)" ]] || return 0
+  [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] || return 0
   if ! is_deployed cloudflare; then
     is_configured cloudflare || return 0
     echo "Tunnels"
@@ -2652,7 +2660,7 @@ status_tokens() {
 # status_billing: what the clouds that can say have billed this month
 status_billing() {
   local line
-  [[ -d "$(stack_dir oci)" && -f "$(config_dir oci)/terraform.tfstate" ]] || return 0
+  [[ -d "$PROVIDERS_DIR/oci/stack" && -f "$(config_dir oci)/terraform.tfstate" ]] || return 0
   line="$(billing_line_oci)"
   [[ -z "$line" ]] || printf 'Billing\n%s\n' "$line"
 }
@@ -2662,7 +2670,7 @@ status_waits() {
   for p in $(all_providers); do
     file="$(config_dir "$p")/wait.state"
     approval="$(config_dir "$p")/approved.json"
-    if [[ ! -d "$(stack_dir "$p")" ]] || [[ ! -f "$file" && ! -f "$approval" ]]; then continue; fi
+    if [[ ! -d "$PROVIDERS_DIR/$p/stack" ]] || [[ ! -f "$file" && ! -f "$approval" ]]; then continue; fi
     [[ $header -eq 1 ]] || { echo "Capacity waits"; header=1; }
     # A wait handed to CI (freelunch ci wait) shows in the state once it is over.
     if [[ -f "$approval" ]]; then
@@ -2708,7 +2716,7 @@ write_new() { # write_new <file>: write stdin to <file> unless it already exists
 
 ready_stacks() {
   local p
-  for p in $(all_providers); do [[ -d "$(stack_dir "$p")" ]] && printf '%s ' "$p"; done
+  for p in $(all_providers); do [[ -d "$PROVIDERS_DIR/$p/stack" ]] && printf '%s ' "$p"; done
   return 0
 }
 
@@ -2914,7 +2922,7 @@ cmd_init() {
   elif [[ -n "$prefix" && "$name" != "$prefix" ]]; then log "the project's other stacks are named $prefix; --name $name names only the new ones"
   fi
   for s in "${stacks[@]}"; do
-    [[ -f "$(stack_dir "$s")/terraform.tfvars.example" ]] || die "no stack named '$s' (stacks: $(ready_stacks))"
+    [[ -f "$PROVIDERS_DIR/$s/stack/terraform.tfvars.example" ]] || die "no stack named '$s' (stacks: $(ready_stacks))"
   done
 
   mkdir -p "$cfg"
@@ -2950,9 +2958,9 @@ cmd_init() {
   # terraform.tfvars.example, and the cloudflare one routes to the project's target.
   for s in "${stacks[@]}"; do
     mkdir -p "$cfg/$s"
-    src="$(stack_dir "$s")/project.tfvars.example"
-    [[ -f "$src" ]] || src="$(stack_dir "$s")/terraform.tfvars.example"
-    with_name "$name" "$src" "$(stack_dir "$s")" | route_example "$s" "$host" "$app" "$platform" | write_new "$cfg/$s/terraform.tfvars.example"
+    src="$PROVIDERS_DIR/$s/stack/project.tfvars.example"
+    [[ -f "$src" ]] || src="$PROVIDERS_DIR/$s/stack/terraform.tfvars.example"
+    with_name "$name" "$src" "$PROVIDERS_DIR/$s/stack" | route_example "$s" "$host" "$app" "$platform" | write_new "$cfg/$s/terraform.tfvars.example"
   done
 
   for f in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
@@ -3219,7 +3227,10 @@ check_images() {
 
 # --- deploy ---------------------------------------------------------------------------
 
-shq() { local s="${1//\'/\'\\\'\'}"; printf "'%s'" "$s"; } # quote for the remote shell
+shq() { # quote for the remote shell; the replacement is in a variable because bash 3.2 keeps the backslashes of a quoted one
+  local q="'" r="'\\''" s="$1"
+  s="${s//$q/$r}"; printf "'%s'" "$s"
+}
 
 b64() { base64 | tr -d '\n'; echo; }
 
@@ -3227,7 +3238,7 @@ b64() { base64 | tr -d '\n'; echo; }
 storage_states() {
   local p state
   for p in $(all_providers); do
-    if [[ ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
+    if [[ ! -d "$PROVIDERS_DIR/$p/stack" ]] || ! is_deployed "$p"; then continue; fi
     state="$(config_dir "$p")/terraform.tfstate"
     if jq -e '.outputs.buckets' "$state" >/dev/null 2>&1; then echo "$state"; fi
   done | jq -Rsc 'split("\n") | map(select(length > 0))'
@@ -3243,7 +3254,7 @@ database_states() {
   local p state
   apps_use_database "$1" || { echo '[]'; return 0; }
   for p in $(all_providers); do
-    if [[ ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
+    if [[ ! -d "$PROVIDERS_DIR/$p/stack" ]] || ! is_deployed "$p"; then continue; fi
     state="$(config_dir "$p")/terraform.tfstate"
     if jq -e '.outputs.databases' "$state" >/dev/null 2>&1; then echo "$state"; fi
   done | jq -Rsc 'split("\n") | map(select(length > 0))'
@@ -3255,7 +3266,7 @@ service_states() {
   local p state
   apps_use_database "$1" || { echo '[]'; return 0; }
   for p in $(all_providers); do
-    if [[ ! -d "$(stack_dir "$p")" ]] || ! is_deployed "$p"; then continue; fi
+    if [[ ! -d "$PROVIDERS_DIR/$p/stack" ]] || ! is_deployed "$p"; then continue; fi
     state="$(config_dir "$p")/terraform.tfstate"
     if jq -e '.outputs.services' "$state" >/dev/null 2>&1; then echo "$state"; fi
   done | jq -Rsc 'split("\n") | map(select(length > 0))'
@@ -3381,7 +3392,7 @@ graph_prepare() {
 mesh_nodes() {
   local p state out='{}'
   for p in $(all_providers); do
-    [[ -d "$(stack_dir "$p")" ]] && is_deployed "$p" || continue
+    [[ -d "$PROVIDERS_DIR/$p/stack" ]] && is_deployed "$p" || continue
     state="$(config_dir "$p")/terraform.tfstate"
     jq -e '.outputs.mesh' "$state" >/dev/null 2>&1 || continue
     out="$(jq -c --slurpfile s "$state" '. + $s[0].outputs.mesh.value' <<< "$out")"
@@ -3421,7 +3432,7 @@ graph_edges() {
   local from dep line medium url why state edges='[]'
   mesh_nodes > "$TMP/mesh.json"
   CF_ROUTES=""
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then CF_ROUTES="$(jq -c '.outputs.routes.value // {}' "$(config_dir cloudflare)/terraform.tfstate")"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then CF_ROUTES="$(jq -c '.outputs.routes.value // {}' "$(config_dir cloudflare)/terraform.tfstate")"; fi
   while IFS=' ' read -r from dep; do
     [[ -n "$from" ]] || continue
     line="$(edge_resolve "$from" "$dep")" || return 1
@@ -3602,7 +3613,7 @@ shared_leave() {
   apps_file="$(state_root)/apps.tfvars"
   [[ -f "$apps_file" ]] || die "destroy: no $(rel "$apps_file")"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1 || die "destroy: apps.tfvars doesn't resolve yet (freelunch deploy --dry-run says why)"
   jq -e --arg h "$host" '.[$h].shared == true' "$TMP/targets.json" >/dev/null 2>&1 || die "destroy: $host isn't a shared host of this project (hosts: $(shared_hosts | paste -sd, -))"
   HOST_NS="$(host_ns "$host")"
@@ -3670,7 +3681,7 @@ cmd_host() {
   apps_file="$(state_root)/apps.tfvars"
   [[ -f "$apps_file" ]] || die "host: no $(rel "$apps_file")"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1 || die "host: apps.tfvars doesn't resolve yet (freelunch deploy --dry-run says why)"
   local hosts=()
   if [[ -n "$want" ]]; then
@@ -3934,14 +3945,14 @@ graph_document() {
   apps_file="$(state_root)/apps.tfvars"
   [[ -f "$apps_file" ]] || die "graph: no $(rel "$apps_file"): the apps come from there"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1 || die "graph: apps.tfvars doesn't resolve against the inventory yet (freelunch deploy --dry-run says why)"
   [[ -z "$PROJECT" ]] || state_arg=(-state="$(hybrid_state)")
   inv="$(tf_for hybrid "$ROOT/hybrid" output ${state_arg[@]+"${state_arg[@]}"} -json hosts 2>/dev/null || echo '[]')"
   root="$(dirname "$PROJECT")"
   # databases, buckets and services the deployed gstacks made, and what the api and cli engines recorded in the state store
   for p in $(all_providers); do
-    [[ -d "$(stack_dir "$p")" ]] && is_deployed "$p" || continue
+    [[ -d "$PROVIDERS_DIR/$p/stack" ]] && is_deployed "$p" || continue
     state="$(config_dir "$p")/terraform.tfstate"
     gstacks="$(graph_output_nodes "$gstacks" "$(jq -c '.outputs' "$state")")"
     if jq -e '.outputs.mesh' "$state" >/dev/null 2>&1; then
@@ -4378,7 +4389,7 @@ next_step() {
   # a stack that has its example but no tfvars
   for d in "$PROJECT"/*/; do
     p="$(basename "$d")"
-    [[ -d "$(stack_dir "$p")" && -f "$d/terraform.tfvars.example" && ! -f "$d/terraform.tfvars" ]] || continue
+    [[ -d "$PROVIDERS_DIR/$p/stack" && -f "$d/terraform.tfvars.example" && ! -f "$d/terraform.tfvars" ]] || continue
     NEXT_CMD="cp $(rel "$d")terraform.tfvars.example $(rel "$d")terraform.tfvars"
     NEXT_WHY="$p has no terraform.tfvars: copy the example and fill it in (freelunch doctor lists what is still empty)"
     return 0
@@ -4401,7 +4412,7 @@ next_step() {
   fi
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   local tunnel_state=""
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   if ! { cmd_hybrid && deploy_plan "$(state_root)/apps.tfvars" "$tunnel_state"; } >/dev/null 2>&1; then
     NEXT_CMD="freelunch deploy --dry-run"; NEXT_WHY="apps.tfvars doesn't resolve against the inventory yet: the dry run says why"; return 0
   fi
@@ -5242,7 +5253,7 @@ cmd_deploy() {
 
   local apps_file tunnel_state=""
   apps_file="$(state_root)/apps.tfvars"
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   [[ -f "$apps_file" || -n "$tunnel_state" ]] || die "nothing to deploy: no $(rel "$apps_file") (freelunch init writes one) and no cloudflare stack"
 
   cmd_hybrid >/dev/null
@@ -5411,7 +5422,7 @@ cmd_setup() {
   # 1. Where the app may run
   local choices=() p i=0 picked t
   for p in "${AUTO_ORDER[@]}"; do
-    [[ "$(meta "$p" status)" == "ready" && -d "$(stack_dir "$p")" ]] || continue
+    [[ "$(meta "$p" status)" == "ready" && -d "$PROVIDERS_DIR/$p/stack" ]] || continue
     case "$(meta "$p" layer)" in host|platform) ;; *) continue ;; esac
     choices+=("$p")
   done
@@ -5696,7 +5707,7 @@ doctor_money() {
   echo "Money ($(rel "$(billing_file)"))"
   fb="$(billing_var paid_fallback)"; cost="$(billing_var paid_fallback_monthly_usd)"; cap="$(billing_var spend_cap_usd)"
   if [[ -n "$fb" ]]; then
-    if [[ ! -f "$PROVIDERS_DIR/$fb/provider.yaml" || ! -d "$(stack_dir "$fb")" ]]; then
+    if [[ ! -f "$PROVIDERS_DIR/$fb/provider.yaml" || ! -d "$PROVIDERS_DIR/$fb/stack" ]]; then
       check fail "paid_fallback $fb has no stack to make: freelunch list shows the ones that exist (Hetzner is only planned)"
     elif ! is_configured "$fb"; then
       check fail "paid_fallback $fb has no terraform.tfvars yet: freelunch init $fb writes an example"
@@ -5739,7 +5750,7 @@ up_targets() {
       host|platform) ;;
       *) die "targets in apps.tfvars: $t is a $(meta "$t" layer) stack, not a host or a container platform" ;;
     esac
-    [[ -d "$(stack_dir "$t")" ]] || die "targets in apps.tfvars: $t has no stack yet (status: $(meta "$t" status))"
+    [[ -d "$PROVIDERS_DIR/$t/stack" ]] || die "targets in apps.tfvars: $t has no stack yet (status: $(meta "$t" status))"
     is_configured "$t" || die "targets in apps.tfvars: $t has no $(rel "$(config_dir "$t")")/terraform.tfvars (freelunch init $t writes an example)"
     [[ "$seen" != *" $t "* ]] || continue
     seen="$seen$t "
@@ -5749,7 +5760,7 @@ up_targets() {
   for p in "${AUTO_ORDER[@]}" $(all_providers); do
     [[ "$seen" != *" $p "* ]] || continue
     case "$(meta "$p" layer)" in host|platform) ;; *) continue ;; esac
-    [[ "$(meta "$p" status)" == "ready" && -d "$(stack_dir "$p")" ]] || continue
+    [[ "$(meta "$p" status)" == "ready" && -d "$PROVIDERS_DIR/$p/stack" ]] || continue
     is_configured "$p" || continue
     seen="$seen$p "
     echo "$p"
@@ -5865,7 +5876,7 @@ up_offer_shared() {
 # when the stack rotates them. Exits with NO_ROOM when none has room.
 up_apply() {
   local t="$1" ads=1 i rc=0 extra=()
-  if grep -qs 'variable "availability_domain_offset"' "$(stack_dir "$t")"/*.tf; then
+  if grep -qs 'variable "availability_domain_offset"' "$PROVIDERS_DIR/$t/stack"/*.tf; then
     ads="${FREELUNCH_UP_ADS:-3}"
     [[ "$ads" =~ ^[1-9][0-9]*$ ]] || die "FREELUNCH_UP_ADS is a number of availability domains, not '$ads'"
   fi
@@ -5943,7 +5954,7 @@ app_target() {
   apps_file="$(state_root)/apps.tfvars"
   [[ -f "$apps_file" ]] || die "$area: no $(rel "$apps_file"): the apps come from there"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   cmd_hybrid >/dev/null
   deploy_plan "$apps_file" "$tunnel_state" >/dev/null
   APP_HOST="$want" APP_KIND=vm APP_ADDR="" APP_USER="" APP_NS="" APP_FOLDER="$app" APP_DIR="/opt/freelunch/apps/$app"
@@ -6020,7 +6031,7 @@ vol_push() {
   for f in "$dir"/*.tar.gz; do
     v="$(basename "$f" .tar.gz)"
     mp="$(host_ssh "\$S docker volume inspect --format '{{.Mountpoint}}' $v")" || die "volume: can't find $v on $APP_HOST (the app stays stopped: freelunch deploy starts it)"
-    host_ssh "\$S sh -c \"find '$mp' -mindepth 1 -delete && tar xzf - -C '$mp'\"" < "$f" \
+    host_ssh "\$S sh -c $(shq "find $(shq "$mp") -mindepth 1 -delete && tar xzf - -C $(shq "$mp")")" < "$f" \
       || die "volume: restoring $v on $APP_HOST failed. The app stays stopped; the archive is still in $(rel "$dir"), so push it again"
     log "volume: $v restored"
     n=$((n + 1))
@@ -6194,7 +6205,7 @@ destroy_data_guard() {
   data_apps="$(up_data_apps)"
   [[ -n "$data_apps" ]] || return 0
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1 || return 0
   for p in "$@"; do
     for app in $data_apps; do
@@ -6368,7 +6379,7 @@ cmd_up() {
       if [[ "$t" == "$fallback" ]]; then fb_listed=1; continue; fi
       ordered+=("$t")
     done
-    if is_deployed "$fallback" || { [[ -d "$(stack_dir "$fallback")" ]] && is_configured "$fallback" && { [[ $dry_run -eq 1 ]] || paid_fallback_gate; }; }; then
+    if is_deployed "$fallback" || { [[ -d "$PROVIDERS_DIR/$fallback/stack" ]] && is_configured "$fallback" && { [[ $dry_run -eq 1 ]] || paid_fallback_gate; }; }; then
       ordered+=("$fallback")
     elif [[ $fb_listed -eq 1 && $dry_run -eq 1 ]]; then
       log "up: the paid fallback $fallback would be held back"
@@ -6452,7 +6463,7 @@ cmd_up() {
   [[ -n "$host" ]] || die "up: $chosen is deployed but its state lists no host or platform"
   cmd_hybrid >/dev/null
 
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_configured cloudflare; then
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_configured cloudflare; then
     tunnel=yes
     if is_platform "$chosen"; then
       tunnel="$(jq -r 'if .outputs.platforms.value[0].tunnel == false then "no" else "yes" end' "$(config_dir "$chosen")/terraform.tfstate")"
@@ -8387,7 +8398,7 @@ cmd_logs() {
   [[ "$lines" =~ ^[0-9]+$ ]] || die "logs: --lines takes a number"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
   apps_file="$(state_root)/apps.tfvars"
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   cmd_hybrid >/dev/null && deploy_plan "$apps_file" "$tunnel_state" >/dev/null 2>&1 \
     || die "logs: apps.tfvars doesn't resolve against the inventory yet (freelunch deploy --dry-run says why)"
   if [[ -z "$want" ]]; then
@@ -8504,7 +8515,7 @@ cmd_backup() {
   apps_file="$(state_root)/apps.tfvars"
   [[ -f "$apps_file" ]] || die "backup: no $(rel "$apps_file"): the apps come from there"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   if ! { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1; then
     die "backup: apps.tfvars doesn't resolve against the inventory yet (freelunch deploy --dry-run says why)"
   fi
@@ -8598,7 +8609,7 @@ cmd_restore() {
   apps_file="$(state_root)/apps.tfvars"
   [[ -f "$apps_file" ]] || die "restore: no $(rel "$apps_file"): the apps come from there"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   if ! { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1; then
     die "restore: apps.tfvars doesn't resolve against the inventory yet (freelunch deploy --dry-run says why)"
   fi
@@ -8660,7 +8671,7 @@ cmd_jobs() {
   apps_file="$(state_root)/apps.tfvars"
   [[ -f "$apps_file" ]] || die "jobs: no $(rel "$apps_file"): the jobs come from there"
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   if ! { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1; then
     die "jobs: apps.tfvars doesn't resolve against the inventory yet (freelunch deploy --dry-run says why)"
   fi
@@ -8801,7 +8812,7 @@ doctor_job_overlaps() {
   apps_file="$(state_root)/apps.tfvars"
   [[ -f "$apps_file" && -n "$TF" ]] || return 0
   [[ -n "$TMP" ]] || TMP="$(mktemp -d)"
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1 || return 0
   if [[ "$(jq -r '[.[].apps[] | select(.backup != null)] | length' "$TMP/targets.json")" -gt 0 ]]; then
     echo "Backups"
@@ -10539,7 +10550,7 @@ doctor_ssh() {
   mine="$(deploy_keys)"
   which="${FREELUNCH_SSH_KEY:+FREELUNCH_SSH_KEY=$FREELUNCH_SSH_KEY}"
   for p in $(all_providers); do
-    if [[ "$(meta "$p" layer)" != "host" || ! -d "$(stack_dir "$p")" ]] || ! is_configured "$p"; then continue; fi
+    if [[ "$(meta "$p" layer)" != "host" || ! -d "$PROVIDERS_DIR/$p/stack" ]] || ! is_configured "$p"; then continue; fi
     tfvars="$(config_dir "$p")/terraform.tfvars"
     echo "SSH to $p hosts"
     theirs="$(public_keys "$tfvars")"
@@ -10596,7 +10607,7 @@ doctor_images() {
   apps_file="$(state_root)/apps.tfvars"
   [[ -f "$apps_file" && -n "$TF" ]] || return 0
   echo "Images ($(rel "$apps_file"))"
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   # Before the hosts exist, apps.tfvars can't resolve against the inventory, but the logins
   # can be checked, and so can the images of an OCI host, whose shape gives its architecture.
   if ! { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1; then
@@ -10812,7 +10823,7 @@ dns_owner_rec() { printf '"freelunch-owner=%s"' "$(dns_owner)"; }
 dns_host_ip() {
   local p state
   for p in $(all_providers); do
-    [[ "$(meta "$p" layer)" == "host" && -d "$(stack_dir "$p")" ]] && is_deployed "$p" || continue
+    [[ "$(meta "$p" layer)" == "host" && -d "$PROVIDERS_DIR/$p/stack" ]] && is_deployed "$p" || continue
     state="$(config_dir "$p")/terraform.tfstate"
     jq -r --arg h "$1" '.outputs.hosts.value[]? | select("\(.provider)-\(.name)" == $h) | .public_ip // empty' "$state" 2>/dev/null
   done | head -1
@@ -11204,7 +11215,7 @@ probe_tcp() {
 probe_stack_nodes() {
   local p state row host port
   for p in $(all_providers); do
-    [[ -d "$(stack_dir "$p")" ]] && is_deployed "$p" || continue
+    [[ -d "$PROVIDERS_DIR/$p/stack" ]] && is_deployed "$p" || continue
     state="$(config_dir "$p")/terraform.tfstate"
     while IFS=$'\t' read -r row host port; do
       [[ -n "$row" ]] && probe_tcp "$row" database "$host" "$port"
@@ -11249,7 +11260,7 @@ probe_hosts_and_apps() {
   local apps_file tunnel_state="" host kind address user out app service state health seen reach why ok bad dp mu mt extra more backup_reason sched blast bfailed bnow interval
   apps_file="$(state_root)/apps.tfvars"
   [[ -n "$TF" ]] || return 0
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then tunnel_state="$(config_dir cloudflare)/terraform.tfstate"; fi
   [[ -f "$apps_file" || -n "$tunnel_state" ]] || return 0
   { cmd_hybrid && deploy_plan "$apps_file" "$tunnel_state"; } >/dev/null 2>&1 || die "check: apps.tfvars doesn't resolve against the inventory (freelunch deploy --dry-run says why)"
   ssh_options yes
@@ -11321,7 +11332,7 @@ probe_hosts_and_apps() {
 probe_tunnels() {
   local state account zone host id out token="${CLOUDFLARE_API_TOKEN:-}" tfvars st
   state="$(config_dir cloudflare)/terraform.tfstate"
-  [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare || return 0
+  [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare || return 0
   tfvars="$(config_dir cloudflare)/terraform.tfvars"
   account="$(tfvar "$tfvars" account_id 2>/dev/null || true)"
   zone="$(tfvar "$tfvars" zone 2>/dev/null || true)"
@@ -11476,7 +11487,7 @@ cmd_journey() {
   rows="$( { probe_hosts_and_apps; probe_stack_nodes; probe_record_nodes; probe_tunnels; probe_dns; } | jq -sc '.')"
   [[ -f "$TMP/graph.json" ]] || die "journey: there are no apps to follow (apps.tfvars)"
   JOURNEY_ROUTES='{}'
-  if [[ -d "$(stack_dir cloudflare)" ]] && is_deployed cloudflare; then JOURNEY_ROUTES="$(jq -c '.outputs.routes.value // {}' "$(config_dir cloudflare)/terraform.tfstate")"; fi
+  if [[ -d "$PROVIDERS_DIR/cloudflare/stack" ]] && is_deployed cloudflare; then JOURNEY_ROUTES="$(jq -c '.outputs.routes.value // {}' "$(config_dir cloudflare)/terraform.tfstate")"; fi
   names="$(journey_names)"
   if [[ -n "$name" ]]; then
     grep -qx -- "$name" <<< "$names" || die "journey: no journey named $name. Journeys: $(tr '\n' ' ' <<< "$names")"
@@ -11506,7 +11517,7 @@ cmd_doctor() {
   doctor_state
   local engine
   for engine in $(engine_providers); do
-    if engine_defined "$engine" check && [[ -d "$(stack_dir "$engine")" ]] && is_configured "$engine"; then engine_call "$engine" check; fi
+    if engine_defined "$engine" check && [[ -d "$PROVIDERS_DIR/$engine/stack" ]] && is_configured "$engine"; then engine_call "$engine" check; fi
   done
   doctor_engines
   doctor_ssh
@@ -11891,7 +11902,7 @@ cmd_state() {
     case "$a" in
       --force) [[ "$sub" != "status" ]] || die "state: only push and pull take --force"; force=force ;;
       -*)      die "state $sub: unknown option $a" ;;
-      *)       [[ -d "$(stack_dir "$a")" && -d "$PROJECT/$a" ]] || die "state: $a is not a stack of this project (it has: $(project_stacks | paste -sd' ' -))"
+      *)       [[ -d "$PROVIDERS_DIR/$a/stack" && -d "$PROJECT/$a" ]] || die "state: $a is not a stack of this project (it has: $(project_stacks | paste -sd' ' -))"
                stacks+=("$a") ;;
     esac
   done
@@ -12724,7 +12735,7 @@ pipeline_workflow() {
   local base="$1" pin platforms="linux/amd64" line name what wf
   wf="$base/.github/workflows/freelunch.yml"
   pin="$(pinned_version)"; [[ -n "$pin" ]] || pin="$(release_version)"; if [[ -z "$pin" ]]; then pin="main"; log "the pipeline uses freelunch-sh/freelunch@main; pin the project to a release with freelunch upgrade, then run ci init --pipeline again"; fi
-  [[ ! -d "$(stack_dir oci)" ]] || ! is_configured oci || platforms="linux/amd64,linux/arm64"
+  [[ ! -d "$PROVIDERS_DIR/oci/stack" ]] || ! is_configured oci || platforms="linux/amd64,linux/arm64"
   mkdir -p "$base/.github/workflows"
   while IFS= read -r line; do
     case "$line" in
@@ -13365,7 +13376,7 @@ bundle_oci() {
 # and the path of its API key in OCI_CI_KEY. Fails quietly when the project has no oci stack.
 oci_ci_files() {
   local tfvars profile key
-  if [[ ! -d "$(stack_dir oci)" ]] || ! is_configured oci; then return 1; fi
+  if [[ ! -d "$PROVIDERS_DIR/oci/stack" ]] || ! is_configured oci; then return 1; fi
   tfvars="$(config_dir oci)/terraform.tfvars"
   [[ -z "$(oci_session_profile "$tfvars")" ]] \
     || die "ci: the oci stack signs in with a session token (oci_auth = \"SecurityToken\"), which CI can't refresh past the session's end. Make an API key (oci setup bootstrap --profile-name freelunch), set oci_config_profile = \"freelunch\" and drop oci_auth in $(rel "$tfvars"), then run this again"
@@ -13604,7 +13615,7 @@ ci_wait() {
     shift
   done
   [[ -n "$stack" ]] || die "ci wait: name the stack, e.g. freelunch ci wait oci --plan .freelunch/oci/reviewed.tfplan"
-  [[ -f "$PROVIDERS_DIR/$stack/provider.yaml" && -d "$(stack_dir "$stack")" && "$(meta "$stack" layer)" == "host" ]] \
+  [[ -f "$PROVIDERS_DIR/$stack/provider.yaml" && -d "$PROVIDERS_DIR/$stack/stack" && "$(meta "$stack" layer)" == "host" ]] \
     || die "ci wait: $stack is not a host stack, so there is no capacity to wait for"
   ci_ready
   where="$(ci_where)"
@@ -13658,7 +13669,7 @@ ci_wait() {
   state_setup
   sync_pull "$stack"
   prepare_stack "read the plan of" "$stack"
-  tf_for "$stack" "$(stack_dir "$stack")" show -json "$plan" > "$TMP/approve.json" || die "ci wait: can't read the plan in $(rel "$plan")"
+  tf_for "$stack" "$PROVIDERS_DIR/$stack/stack" show -json "$plan" > "$TMP/approve.json" || die "ci wait: can't read the plan in $(rel "$plan")"
   if jq -e 'any(.resource_changes[]?.change.actions[]; . == "delete")' "$TMP/approve.json" >/dev/null; then
     die "ci wait: the plan destroys or replaces something, which a wait never applies without you. Apply it here (freelunch apply $stack --plan $(rel "$plan")), and plan again for what is left"
   fi

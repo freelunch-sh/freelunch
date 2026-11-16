@@ -369,6 +369,9 @@ cat > "$WORK/wait-bin/sleep" <<'EOF'
 #!/bin/sh
 echo "sleep $*" >> "$FAKE_LOG"
 [ -z "${FAKE_SLEEP_BLOCK:-}" ] || exec /bin/sleep 30
+# Else a pause is short but real: a poll loop with a $SECONDS deadline would otherwise spin at full CPU
+# until the deadline, thousands of processes a second, and starve the tests running beside it.
+/bin/sleep 0.05
 EOF
 cat > "$WORK/wait-bin/caffeinate" <<'EOF'
 #!/bin/sh
@@ -1267,7 +1270,9 @@ run_test() { # run_test <name>: run test_<name> in a subshell with errexit on; i
   local rc start=$SECONDS
   set +e
   # The ERR trap names the command that failed, so a test that fails without saying why still shows where.
-  (set -eE; trap 'echo "  failed: $BASH_COMMAND (line $LINENO)" >&2' ERR; "test_$1") > "$WORK/$1.log" 2>&1
+  # --map: every freelunch the test starts records the functions it runs (see map_env)
+  (if [[ -n "${MAPPING:-}" ]]; then export BASH_ENV="$WORK/map_env.sh" FL_MAP="$WORK/trace/$1"; fi
+   set -eE; trap 'echo "  failed: $BASH_COMMAND (line $LINENO)" >&2' ERR; "test_$1") > "$WORK/$1.log" 2>&1
   rc=$?
   set -e
   mkdir -p "$WORK/results"
@@ -1284,7 +1289,7 @@ report_test() {
     failed=$((failed + 1)); echo "  FAIL  $1"; sed 's/^/        /' "$WORK/$1.log"
   fi
   reported=" $reported$1 "
-  [[ -z "${SLOW:-}" ]] || printf '%s %s\n' "$secs" "$1" >> "$WORK/times"
+  printf '%s %s\n' "$secs" "$1" >> "$WORK/times"
 }
 
 # A copy of the CLI with the real deploy and hybrid modules and the oci, northflank and
@@ -8533,14 +8538,174 @@ test_up_with_no_domain_says_where_the_app_is() {
   contains "$out" "up: oci-main runs the app, but nothing serves it to the internet: a VM needs a domain on Cloudflare (freelunch setup --domain <name>) or an open port of its own"
 }
 
-# tests/cli.sh [-j N] [pattern]: only the tests whose name matches the pattern (grep -E), N at a
-# time (default: one per CPU; -j 1 runs them in turn, in order). Each test works in names of its
-# own under a temp folder, so they don't get in each other's way. SLOW=1 lists the slowest.
-jobs="${TEST_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
-if [[ "${1:-}" == -j ]]; then jobs="${2:?-j takes a number}"; shift 2; fi
-echo "tests/cli.sh"
+# tests/cli.sh [-j N] [--changed [ref]] [--list] [--map] [pattern]: only the tests whose name matches the pattern (grep -E), N at a
+# time (-j 1 runs them in turn, in order). Each test works in names of its own under a temp
+# folder, so they don't get in each other's way. SLOW=1 lists the slowest.
+#
+# Without -j the number of tests at a time fits the machine: the CPUs it has (less, in a container
+# limited by a quota), about 300 MB of free memory for each, and no more than are idle when it is
+# already busy. A small machine or container runs fewer, down to one, instead of thrashing.
+# TEST_JOBS overrides it. The slowest tests start first (from the times the last run left in
+# $TEST_TIMES), so the run doesn't end waiting on one long test.
+#   --changed [ref]  only the tests the changes since <ref> (default HEAD, with uncommitted and new files)
+#                    can affect, found through tests/map; anything it can't place runs them all
+#   --list           print the tests that would run, and stop
+#   --map            run them all with a trace of the functions each runs, write tests/map, and show
+#                    which tests make the most freelunch calls (each costs about 0.7 s)
+ncpu() { # CPUs this process may use: the cgroup quota when there is one
+  local n q period
+  n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+  if [[ -r /sys/fs/cgroup/cpu.max ]]; then # cgroup v2: "<quota|max> <period>"
+    read -r q period < /sys/fs/cgroup/cpu.max || true
+    [[ "${q:-max}" == max || -z "${period:-}" ]] || n=$(( (q + period - 1) / period < n ? (q + period - 1) / period : n ))
+  elif [[ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]]; then # cgroup v1
+    q="$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)"; period="$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)"
+    [[ "$q" -le 0 || "$period" -le 0 ]] || n=$(( (q + period - 1) / period < n ? (q + period - 1) / period : n ))
+  fi
+  [[ $n -ge 1 ]] || n=1
+  echo "$n"
+}
+free_mb() { # memory this process can still use, in MB; empty when it can't tell
+  local m="" lim="" use=""
+  if [[ -r /proc/meminfo ]]; then
+    m="$(awk '/^MemAvailable:/ {print int($2 / 1024)}' /proc/meminfo)"
+    for lim in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+      [[ -r $lim ]] || continue
+      lim="$(cat "$lim")"; [[ "$lim" =~ ^[0-9]+$ && ${#lim} -lt 16 ]] || continue # "max", or no limit
+      use="$(cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null | head -1)"
+      [[ "$use" =~ ^[0-9]+$ ]] || use=0
+      lim=$(( (lim - use) / 1048576 )); [[ -n "$m" && $m -le $lim ]] || m="$lim"
+      break
+    done
+  elif command -v vm_stat >/dev/null 2>&1; then # macOS: free, inactive and speculative pages
+    m="$(vm_stat | awk '/page size of/ {sz=$8} /^Pages (free|inactive|speculative):/ {n+=$NF} END {if (sz) print int(n * sz / 1048576)}')"
+  fi
+  echo "$m"
+}
+default_jobs() {
+  local n mem load idle
+  n="$(ncpu)"
+  mem="$(free_mb)"
+  if [[ "$mem" =~ ^[0-9]+$ ]]; then [[ $((mem / 300)) -ge $n ]] || n=$((mem / 300)); fi
+  # a machine that is oversubscribed already (load above its CPUs) gets half as many: the load
+  # average is a minute behind and still holds the run that just ended, so it is no finer than that
+  load="$(uptime | sed -E 's/.*load averages?: *([0-9]+)[.,].*/\1/')"
+  if [[ "$load" =~ ^[0-9]+$ && $load -gt $(ncpu) ]]; then n=$(( (n + 1) / 2 )); fi
+  [[ $n -le 16 ]] || n=16 # past that, starting processes is what the tests wait on
+  [[ $n -ge 1 ]] || n=1
+  echo "$n"
+}
+jobs="${TEST_JOBS:-}"
+MAPPING="" changed="" list_only=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -j) jobs="${2:?-j takes a number}"; shift 2 ;;
+    --map) MAPPING=1; shift ;;
+    --changed) changed=HEAD; shift; if [[ "${1:-}" == */* || "${1:-}" == HEAD* || "${1:-}" == origin* ]]; then changed="$1"; shift; fi ;;
+    --list) list_only=1; shift ;;
+    -h|--help) sed -n '/^# tests\/cli.sh \[/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) break ;;
+  esac
+done
+[[ -n "$jobs" ]] || jobs="$(default_jobs)"
+TEST_TIMES="${TEST_TIMES:-${XDG_CACHE_HOME:-$HOME/.cache}/freelunch/test-times}"
+TEST_MAP="$ROOT/tests/map"
 # shellcheck disable=SC2207 # bash 3.2 has no mapfile
 tests=($(declare -F | awk '{print $3}' | grep '^test_' | sed 's/^test_//' | grep -E "${1:-.}"))
+
+# enclosing <file> <line>...: the function each line is in, or "*" for a line outside any (top-level code)
+enclosing() {
+  local f="$1"; shift
+  printf '%s\n' "$@" | awk -v f="$f" '
+    BEGIN { n = 0
+      while ((getline l < f) > 0) { n++
+        if (match(l, /^[A-Za-z_][A-Za-z0-9_]*\(\) *\{/)) { name = substr(l, 1, index(l, "(") - 1); cur = name; st[name] = n
+          if (l ~ /\}[ \t]*(#.*)?$/ && l !~ /\{[ \t]*$/) { en[name] = n; cur = "" } }
+        else if (l ~ /^\}/ && cur != "") { en[cur] = n; cur = "" } } }
+    { line = $1 + 0; hit = "*"
+      for (k in st) if (line >= st[k] && line <= (en[k] ? en[k] : 1e9)) { hit = k; break }
+      print hit }' | sort -u
+}
+# changed_lines <ref> <file>: the lines of <file> that differ from <ref> (a deletion counts as the line after it)
+changed_lines() {
+  git -C "$ROOT" diff -U0 "$1" -- "$2" | awk '/^@@/ { split($3, a, ","); s = substr(a[1], 2) + 0; n = (a[2] == "" ? 1 : a[2] + 0); if (n == 0) n = 1; for (i = 0; i < n; i++) print s + i }'
+}
+# only_code <file>: of the line numbers on stdin, those that are not blank or a comment
+only_code() {
+  awk -v f="$1" 'BEGIN { while ((getline l < f) > 0) { n++; if (l !~ /^[ \t]*(#.*)?$/) code[n] = 1 } } ($1 + 0) in code'
+}
+# select_changed <ref>: keeps in $tests the ones the changes since <ref> can affect; all of them when it can't tell
+select_changed() {
+  local ref="$1" f fns t picked=" " files tf c
+  files="$( { git -C "$ROOT" diff --name-only "$ref"; git -C "$ROOT" ls-files -o --exclude-standard; } | sort -u)"
+  [[ -n "$files" ]] || { echo "  nothing changed since $ref" >&2; tests=(); return 0; }
+  while IFS= read -r f; do
+    case "$f" in
+      bin/freelunch)
+        [[ -f "$TEST_MAP" ]] || { echo "  no tests/map yet (tests/cli.sh --map makes it): running everything" >&2; return 0; }
+        # shellcheck disable=SC2046
+        fns="$(enclosing "$ROOT/$f" $(changed_lines "$ref" "$f" | only_code "$ROOT/$f"))"
+        if [[ "$fns" == *'*'* ]]; then echo "  $f: top-level code changed: running everything" >&2; return 0; fi
+        for c in $fns; do
+          for t in $(awk -F'\t' -v fn="$c" '{ n = split($3, a, " "); for (i = 1; i <= n; i++) if (a[i] == fn) { print $1; break } }' "$TEST_MAP"); do
+            [[ "$picked" == *" $t "* ]] || picked="$picked$t "
+          done
+        done
+        echo "  $f: $(echo "$fns" | tr '\n' ' ')" >&2 ;;
+      tests/cli.sh)
+        # shellcheck disable=SC2046
+        fns="$(enclosing "$ROOT/$f" $(changed_lines "$ref" "$f" | only_code "$ROOT/$f"))"
+        if [[ "$fns" == *'*'* ]]; then echo "  $f: fakes or setup changed: running everything" >&2; return 0; fi
+        for c in $fns; do
+          case "$c" in
+            test_*) [[ "$picked" == *" ${c#test_} "* ]] || picked="$picked${c#test_} " ;;
+            *) echo "  $f: helper $c changed: running everything" >&2; return 0 ;;
+          esac
+        done ;;
+      catalog/*|providers/*|examples/*|deploy/*|hybrid/*|agent/*|shared/*|inspire/*|private/*|Dockerfile|compose.yaml|action.yml|install.sh)
+        echo "  $f: not mapped to tests: running everything" >&2; return 0 ;;
+      *.md|docs/*|CHANGELOG*|LICENSE|NOTICE|.github/*|*.yml|*.yaml|*.toml)
+        # only the tests that read the docs and the tree
+        for t in "${tests[@]}"; do
+          case "$t" in *docs*|*private*|*link*|*readme*|*shellcheck*) [[ "$picked" == *" $t "* ]] || picked="$picked$t " ;; esac
+        done ;;
+      tests/map|tests/shellcheck.baseline) ;;
+      *) echo "  $f: not mapped to tests: running everything" >&2; return 0 ;;
+    esac
+  done <<< "$files"
+  # a test the map has never seen is a new one: it runs
+  for t in "${tests[@]}"; do
+    awk -F'\t' -v t="$t" '$1 == t {f = 1} END {exit !f}' "$TEST_MAP" 2>/dev/null || { [[ "$picked" == *" $t "* ]] || picked="$picked$t "; }
+  done
+  tf=()
+  for t in "${tests[@]}"; do [[ "$picked" != *" $t "* ]] || tf+=("$t"); done
+  tests=(${tf[@]+"${tf[@]}"})
+}
+if [[ -n "$changed" ]]; then
+  echo "tests affected by the changes since $changed:" >&2
+  all=${#tests[@]}
+  select_changed "$changed"
+  echo "  $( [[ ${#tests[@]} -eq $all ]] && echo "all $all" || echo "${#tests[@]} of $all" ) tests" >&2
+fi
+if [[ -n "$list_only" ]]; then printf '%s\n' ${tests[@]+"${tests[@]}"}; exit 0; fi
+echo "tests/cli.sh ($jobs at a time)"
+if [[ -n "$MAPPING" ]]; then
+  mkdir -p "$WORK/trace"
+  cat > "$WORK/map_env.sh" <<'ENVEOF'
+# Read by every bash the tests start (BASH_ENV), before it knows which script it runs, so the check for
+# the CLI is in the trap: count the call, and note each function it enters, once.
+if [ -n "${FL_MAP:-}" ]; then
+  exec 63>>"$FL_MAP"; _fl_seen=' '; set -T
+  trap 'case "$0" in */freelunch) case "$_fl_seen" in *" ${FUNCNAME[0]:-} "*) ;; *) [ "$_fl_seen" != " " ] || echo "@@call" >&63; _fl_seen="$_fl_seen${FUNCNAME[0]:-} "; echo "fn ${FUNCNAME[0]:-}" >&63 ;; esac ;; esac' DEBUG
+fi
+ENVEOF
+fi
+if [[ $jobs -gt 1 && ${#tests[@]} -gt 0 && -f "$TEST_TIMES" ]]; then
+  # slowest first; a test with no time yet counts as 30 s, so a new one starts early
+  # shellcheck disable=SC2207
+  tests=($(printf '%s\n' "${tests[@]}" | awk -v f="$TEST_TIMES" 'BEGIN { while ((getline l < f) > 0) { split(l, a, " "); t[a[2]] = a[1] } }
+    { printf "%s %s\n", ($1 in t) ? t[$1] : 30, $1 }' | sort -rn | awk '{print $2}'))
+fi
 reported=" "
 if [[ $jobs -le 1 ]]; then
   for t in "${tests[@]}"; do run_test "$t"; report_test "$t"; done
@@ -8559,6 +8724,24 @@ else
   done
   wait
   for t in "${tests[@]}"; do [[ "$reported" == *" $t "* ]] || report_test "$t"; done
+fi
+# --map: tests/map is "<test> <TAB> <freelunch calls> <TAB> <functions it ran>", and a table of where the calls go
+if [[ -n "$MAPPING" ]]; then
+  for t in "${tests[@]}"; do
+    [[ -f "$WORK/trace/$t" ]] || { printf '%s\t0\t\n' "$t"; continue; }
+    printf '%s\t%s\t%s\n' "$t" "$(grep -c '^@@call' "$WORK/trace/$t" || true)" \
+      "$(sed -n 's/^fn //p' "$WORK/trace/$t" | grep -v '^$' | sort -u | tr '\n' ' ')"
+  done | sort > "$WORK/map.new"
+  if [[ "$failed" -eq 0 && -z "${1:-}" ]]; then cp "$WORK/map.new" "$TEST_MAP"; echo "wrote tests/map"; fi
+  echo "freelunch calls per test (each costs about 0.7 s), most first:"
+  while IFS=$'\t' read -r t calls _; do echo "  $calls  $t  ($(awk -v t="$t" '$2 == t {print $1 "s"}' "$WORK/times"))"; done < <(sort -t$'\t' -k2 -rn "$WORK/map.new") | head -15
+  echo "  total: $(awk -F'\t' '{n += $2} END {print n}' "$WORK/map.new") calls in $(wc -l < "$WORK/map.new" | tr -d ' ') tests"
+fi
+# remember how long each took, for the next run's order
+if [[ -f "$WORK/times" ]]; then
+  mkdir -p "$(dirname "$TEST_TIMES")" 2>/dev/null || true
+  { [[ ! -f "$TEST_TIMES" ]] || cat "$TEST_TIMES"; cat "$WORK/times"; } | awk '{ t[$2] = $1 } END { for (n in t) print t[n], n }' > "$TEST_TIMES.new" 2>/dev/null \
+    && mv "$TEST_TIMES.new" "$TEST_TIMES" 2>/dev/null || true
 fi
 if [[ -n "${SLOW:-}" && -f "$WORK/times" ]]; then
   echo "slowest:"; sort -rn "$WORK/times" | head -8 | sed 's/^/  /'
