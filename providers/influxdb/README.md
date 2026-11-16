@@ -25,7 +25,7 @@ Writes up to 3 MB/5 min, reads 30 MB/5 min, 10,000 series cardinality
 
 ## References
 
-- inspire/listing/free-for-dev (2026-10-18)
+- https://github.com/ripienaar/free-for-dev (2026-10-18)
 - registry.terraform.io (checked 2026-10-18)
 
 ## Contributing

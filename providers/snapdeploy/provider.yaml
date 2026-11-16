@@ -15,6 +15,5 @@ last_verified: "2026-11-08"
 notes: "Has an API (snapdeploy.dev/api, X-API-Key or sd_pat_ tokens, POST /api/containers/deploy from Docker Hub/ghcr/quay/ECR images), but its own docs say tokens cannot delete containers, so freelunch could not destroy what it creates. Two docs disagree on the deploy endpoint. Refused for the api engine (docs/api-adapter.md): without a delete, freelunch destroy could not clean up what it makes, so it is guided only."
 sources:
   - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

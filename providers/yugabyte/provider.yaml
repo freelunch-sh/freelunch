@@ -16,6 +16,5 @@ notes: "Docs contradict themselves on whether a Sandbox can be paused by hand. W
 sources:
   - "docs.yugabyte.com/preview/yugabyte-cloud/cloud-basics/create-clusters/create-clusters-free (checked 2026-11-08)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []
 limits:
   max_clusters: 1

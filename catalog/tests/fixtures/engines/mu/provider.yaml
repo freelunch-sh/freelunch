@@ -12,7 +12,6 @@ url: "https://mu.example"
 last_verified: "2026-11-08"
 notes: null
 sources: []
-inspire: []
 engine: api
 jobs: [provision]
 verified: fake-api

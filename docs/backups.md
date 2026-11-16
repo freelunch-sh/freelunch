@@ -104,7 +104,7 @@ backup = {
 
 The volume holds `app.db.bak` next to the live files, so the snapshot has a copy that opens (restore
 it by renaming it). The container needs the `sqlite3` command. Streaming a database as it changes
-(Litestream) is not built: see the note in the [enhancement plan](enhancement-plan.md).
+(Litestream) is not built.
 
 ## What a platform does not get
 

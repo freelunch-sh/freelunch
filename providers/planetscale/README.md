@@ -25,7 +25,6 @@ Excluded: no free tier.
 ## References
 
 - registry.terraform.io (checked 2026-10-18)
-- Research corpus: `inspire/repos/terraform-providers/planetscale-terraform-provider-planetscale`
 
 ## Contributing
 

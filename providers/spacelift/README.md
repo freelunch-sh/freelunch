@@ -14,7 +14,7 @@
 
 ## What's free
 
-Free plan: public worker pools up to 200 minutes/month
+Free plan: 200 minutes a month on public worker pools
 
 > Free tiers change without notice. Check <https://spacelift.io/pricing> before relying on this.
 
@@ -25,7 +25,7 @@ Free plan: public worker pools up to 200 minutes/month
 
 ## References
 
-- inspire/listing/free-for-dev (2026-10-18)
+- https://github.com/ripienaar/free-for-dev (2026-10-18)
 - registry.terraform.io (checked 2026-10-18)
 
 ## Contributing

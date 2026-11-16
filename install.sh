@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Install freelunch on this machine:
 #   curl -fsSL https://raw.githubusercontent.com/freelunch-sh/freelunch/main/install.sh | bash
 # The latest release by default; a version as the argument (| bash -s v1.2.0) installs that one.

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Offline tests for the project workflow of bin/freelunch: init, project state, inventory
 # and deploy. A fake ssh runs the deploy script on this machine (with /opt/freelunch/apps
 # moved into a temp folder) and a fake docker records what it is asked to do.
@@ -2483,6 +2484,77 @@ test_shellcheck_findings_do_not_grow() {
   baseline="$(cat "$ROOT/tests/shellcheck.baseline")"
   now="$( (shellcheck -f gcc "$CLI" 2>&1 || true) | wc -l | tr -d ' ')"
   [[ "$now" -le "$baseline" ]] || { echo "shellcheck finds $now things in bin/freelunch, $baseline at the baseline (tests/shellcheck.baseline): fix the new ones" >&2; return 1; }
+}
+
+# The files the public tree has: tracked ones, and new ones git does not ignore (so the test also sees what is
+# about to be committed). One path per line, in $1. Not a checkout of git: returns 1.
+public_files() {
+  git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  (cd "$ROOT" && git ls-files --cached --others --exclude-standard | while IFS= read -r f; do [[ -f "$f" ]] && printf '%s\n' "$f"; done) > "$1"
+}
+
+# What stays private stays out of the tree: the maintainer's private folder, the research corpus, a home folder, the name
+# of a private project, a personal address. The words are built from pieces so this file doesn't match itself, and the
+# ignore files that name the folders are exempt.
+test_public_tree_names_no_private_things() {
+  local files="$WORK/public-tree-files" a b hits
+  public_files "$files" || { echo "(not a git checkout: skipped)" >&2; return 0; }
+  a="priv""ate/|insp""ire/|/Us""ers/"; b="money""spider|@g""mail\.com"
+  hits="$(grep -E "(^|/)(priv""ate|insp""ire)/" "$files" || true)"
+  [[ -z "$hits" ]] || { echo "paths of the private part are in the tree:"; echo "$hits"; return 1; }
+  grep -vxE '\.gitignore|\.dockerignore|tests/cli\.sh' "$files" > "$files.scan"
+  hits="$(cd "$ROOT" && tr '\n' '\0' < "$files.scan" | xargs -0 grep -nI -E "$a" 2>/dev/null | cut -d: -f1,2 || true)"
+  hits="$hits"$'\n'"$(cd "$ROOT" && tr '\n' '\0' < "$files.scan" | xargs -0 grep -nIi -E "$b" 2>/dev/null | cut -d: -f1,2 || true)"
+  hits="$(printf '%s\n' "$hits" | grep . || true)"
+  [[ -z "$hits" ]] || { echo "the tree names something private (file:line):"; echo "$hits"; return 1; }
+}
+
+# a/b/../c -> a/c
+norm_path() {
+  local part out="" IFS=/
+  for part in $1; do
+    case "$part" in
+      ""|.) ;;
+      ..) case "$out" in */*) out="${out%/*}" ;; *) out="" ;; esac ;;
+      *) out="${out:+$out/}$part" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# The slugs GitHub gives a Markdown file's headings: lower case, punctuation gone, spaces become hyphens.
+md_anchors() {
+  awk '/^```/ { fence = !fence; next } !fence && /^#+ / {
+    t = $0; sub(/^#+ +/, "", t); t = tolower(t)
+    gsub(/[^a-z0-9 _-]/, "", t); gsub(/ /, "-", t)
+    n[t]++; print (n[t] > 1 ? t "-" (n[t] - 1) : t)
+  }' "$1"
+}
+
+# Every relative link in a Markdown file points at a file or folder of the tree, and every #anchor at a heading that exists.
+test_docs_links_resolve() {
+  local files="$WORK/docs-links-files" f dir link target anchor bad="" resolved
+  public_files "$files" || { echo "(not a git checkout: skipped)" >&2; return 0; }
+  while IFS= read -r f; do
+    dir="$(dirname "$f")"
+    # links outside code fences and inline code
+    while IFS= read -r link; do
+      case "$link" in http://*|https://*|mailto:*|"") continue ;; esac
+      target="${link%%#*}"; anchor=""
+      [[ "$link" == *"#"* ]] && anchor="${link#*#}"
+      target="${target%%\?*}"
+      if [[ -z "$target" ]]; then resolved="$f"
+      else
+        case "$target" in /*) resolved="${target#/}" ;; *) resolved="$dir/$target" ;; esac
+        resolved="$(norm_path "$resolved")"
+        if ! grep -qxF -- "$resolved" "$files" && ! grep -qF -- "$resolved/" "$files"; then bad="$bad$f: $link (no such file)"$'\n'; continue; fi
+      fi
+      if [[ -n "$anchor" && "$resolved" == *.md ]]; then
+        md_anchors "$ROOT/$resolved" | grep -qxF -- "$anchor" || bad="$bad$f: $link (no such heading)"$'\n'
+      fi
+    done < <(awk '/^```/ { fence = !fence; next } !fence { gsub(/`[^`]*`/, ""); while (match($0, /\]\([^)]+\)/)) { print substr($0, RSTART + 2, RLENGTH - 3); $0 = substr($0, RSTART + RLENGTH) } }' "$ROOT/$f" | sed 's/ ".*$//')
+  done < <(grep -E '\.md$' "$files")
+  [[ -z "$bad" ]] || { echo "links that point nowhere:"; printf '%s' "$bad"; return 1; }
 }
 
 # FREELUNCH_NOTIFY_EVENTS picks which kinds of event are sent; the waits still send theirs when it lists wait.

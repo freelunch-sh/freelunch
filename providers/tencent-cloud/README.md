@@ -30,7 +30,7 @@ Verify trial scope before relying on it.
 
 ## References
 
-- inspire/listing/cloudcredits.io (2025-10)
+- https://github.com/t3-sh/cloudcredits.io (2025-10)
 - registry.terraform.io (checked 2026-10-18)
 
 ## Contributing

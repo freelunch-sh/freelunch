@@ -16,6 +16,5 @@ secrets: "UPTIMEROBOT_API_KEY=UptimeRobot API key"
 last_verified: "2026-10-18"
 notes: "A heartbeat monitor per app, through the api engine (v3 API, JSON with a bearer token). Whether the free plan allows heartbeat monitors is not stated in the API spec (its limit errors are 009-003 and 000-003): check it. Not yet run against a real account."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

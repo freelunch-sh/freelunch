@@ -30,7 +30,6 @@ Trial terms not verified during research.
 ## References
 
 - registry.terraform.io (checked 2026-10-18)
-- Research corpus: `inspire/repos/terraform-providers/timescale-terraform-provider-timescale`
 
 ## Contributing
 

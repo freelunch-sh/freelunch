@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # shellcheck disable=SC2030,SC2031 # watch_field sets PROVIDERS_DIR in a subshell on purpose, to read another checkout's catalogue
 # freelunch: provision free-tier infrastructure per provider, combine it into a hybrid
 # inventory, and deploy Compose apps to the hosts.
@@ -3758,7 +3759,7 @@ usage_aliases() {
 # routes and zone, not what is deployed. graph --config --json is that document (status "planned", no state read), and graph
 # apply writes one back as ordinary HCL: tofu would read a .tfvars.json too, but none of the readers in this CLI do (tfvar,
 # tfvars_map, the secret scan, ci secrets, setup), so a project with only JSON would read as empty, and with both forms the
-# later -var-file replaces the whole variable. See the answer in docs/enhancement-plan.md, section 10.
+# later -var-file replaces the whole variable. docs/graph.md ("Why HCL") has the reasoning.
 
 # declared_json <apps.tfvars>: its project, hosts and apps as JSON, parsed by tofu itself (tofu console in deploy/, which needs
 # no provider), with the unset fields taken out

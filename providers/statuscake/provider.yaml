@@ -18,4 +18,3 @@ notes: "A heartbeat (push) monitor per app, through the api engine (form-encoded
 sources:
   - "statuscake.com/pricing (2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire: []

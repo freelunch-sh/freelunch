@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # freelunch as a GitHub Action: runs a freelunch command in a job, with the project's state
 # from its state store and the files git doesn't have from the FREELUNCH_BUNDLE secret.
 # freelunch ci init writes workflows that use it; docs/ci.md has the rest. It runs the

@@ -14,5 +14,3 @@ last_verified: "2026-10-18"
 notes: "Excluded: no free tier."
 sources:
   - "registry.terraform.io (checked 2026-10-18)"
-inspire:
-  - "repos/terraform-providers/planetscale-terraform-provider-planetscale"

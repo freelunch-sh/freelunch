@@ -30,10 +30,9 @@ No free container tier on App Platform; the cheapest container is $5/month.
 
 ## References
 
-- inspire/listing/cloudcredits.io (2025-10)
+- https://github.com/t3-sh/cloudcredits.io (2025-10)
 - snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)
 - registry.terraform.io (checked 2026-10-18)
-- Research corpus: `inspire/repos/terraform-providers/digitalocean-terraform-provider-digitalocean`
 
 ## Contributing
 

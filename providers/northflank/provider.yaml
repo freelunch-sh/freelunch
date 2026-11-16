@@ -30,7 +30,6 @@ sources:
   - "github.com/Vestmark/terraform-provider-northflank (secret groups only, checked 2026-10-24)"
   - "northflank.com/pricing (volumes listed on the Sandbox, $0.11657 per GB a month, checked 2026-10-25); the default nvme storage class refuses volumes under 6144 MB (live test, 2026-10-25)"
   - "@northflank/js-client 0.12.0 (volumes: create, update, attach, detach, delete; Project > Volumes > General permissions; createOptions.volumesToAttach, checked 2026-10-25)"
-inspire: []
 
 limits:
   plans: [nf-compute-10, nf-compute-20] # a free project locks the bigger plans

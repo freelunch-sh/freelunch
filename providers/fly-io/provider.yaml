@@ -15,4 +15,3 @@ notes: "Excluded: no free tier, and the Terraform provider was archived in 2023.
 sources:
   - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

@@ -15,4 +15,3 @@ notes: "CDN bandwidth is metered per region. Check what happens on overage befor
 sources:
   - "fastly.com/pricing (2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire: []

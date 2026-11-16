@@ -14,6 +14,5 @@ secrets: "CLOUDNS_AUTH_ID=ClouDNS API auth-id; CLOUDNS_PASSWORD=ClouDNS API pass
 last_verified: "2026-10-18"
 notes: "Keeps DNS records for your hosts in a ClouDNS zone (the free plan has one zone with 50 records). Not yet run against a real account."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

@@ -162,8 +162,8 @@ what's described here, fix `provider.yaml` or the modules and note it.
 
 ## References
 
-Research corpus in `inspire/`. No code was copied:
+Ideas were taken from these projects. No code was copied:
 
-- `repos/gcp/codingyoddha-gcp-free-tier-compute-terraform`: minimal free e2-micro
-- `repos/multi-cloud/bodecloud-CloudBooter/cloud/GCP/docs/FREE_TIER_LIMITS.md`: limits and cost traps
-- `repos/multi-cloud/gruberdev-tf-free`: multi-cloud free-tier layout
+- https://github.com/codingyoddha/gcp-free-tier-compute-terraform: minimal free e2-micro
+- https://github.com/bodecloud/CloudBooter (cloud/GCP/docs/FREE_TIER_LIMITS.md): limits and cost traps
+- https://github.com/gruberdev/tf-free: multi-cloud free-tier layout

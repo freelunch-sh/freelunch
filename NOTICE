@@ -1,0 +1,16 @@
+freelunch
+Copyright 2026 Reza Imany
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party material
+--------------------
+
+No third-party code or text is copied into this repository. The catalogue's facts (limits,
+prices, dates) come from the providers' own pages and from public listings, and each
+provider's provider.yaml names its sources. Several open-source projects shaped the ideas
+here; they are credited in the README, as thanks and not as a legal notice.
+
+Code taken from another work goes here, one entry per work: its name, its licence, its URL
+and the files it is in. An MPL-2.0 file also keeps its own header. See "Code and licences"
+in docs/adding-a-provider.md.

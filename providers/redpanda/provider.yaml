@@ -15,4 +15,3 @@ notes: "Clusters suspend when the credit or the 30 days run out. Data is deleted
 sources:
   - "docs.redpanda.com/redpanda-cloud/get-started/cloud-overview (2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire: []

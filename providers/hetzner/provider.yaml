@@ -13,7 +13,5 @@ url: "https://www.hetzner.com/cloud/"
 last_verified: "2026-10-18"
 notes: "Recommended paid fallback when OCI has no A1 capacity. DNS hosting is free."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire:
-  - "repos/terraform-providers/hetznercloud-terraform-provider-hcloud"

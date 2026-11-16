@@ -16,4 +16,3 @@ notes: "No documented API for creating Containers apps was found (2026-11-08); t
 sources:
   - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

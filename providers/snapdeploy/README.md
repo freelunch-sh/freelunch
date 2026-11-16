@@ -30,7 +30,7 @@ Has an API (snapdeploy.dev/api, X-API-Key or sd_pat_ tokens, POST /api/container
 ## References
 
 - snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)
-- inspire/listing/free-for-dev (2026-10-18)
+- https://github.com/ripienaar/free-for-dev (2026-10-18)
 - registry.terraform.io (checked 2026-10-18)
 
 ## Contributing

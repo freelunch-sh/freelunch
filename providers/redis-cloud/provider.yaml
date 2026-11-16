@@ -16,7 +16,6 @@ notes: "Card requirement not stated on the pricing page (unverified)."
 sources:
   - "registry.terraform.io (checked 2026-10-18)"
   - "redis.io/pricing (checked 2026-11-08)"
-inspire: []
 limits:
   max_databases: 1
   size_mb: 30

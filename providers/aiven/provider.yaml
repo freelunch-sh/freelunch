@@ -14,11 +14,9 @@ secrets: "AIVEN_TOKEN=Aiven API token"
 last_verified: "2026-11-08"
 notes: "Free MySQL is not on the free-plan page any more (MySQL is on the paid Developer tier). The Terraform plan slug free-1-1gb is unverified."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
   - "aiven.io/docs/platform/concepts/free-plan, pg-free-tier, valkey-free-tier (checked 2026-11-08)"
-inspire:
-  - "repos/terraform-providers/aiven-terraform-provider-aiven"
 limits:
   max_per_engine: 1
   engines: ["pg", "valkey"]

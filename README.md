@@ -6,13 +6,13 @@ an Arm VM on Oracle, a micro VM on Google, a container on Northflank, a Postgres
 and tunnels on Cloudflare, all joined in one inventory. Then deploy your project's containers
 onto it from your own repository, and move them to another provider by changing one name.
 
-> **Status:** early. Fifty-three providers are ready: four hyperscalers (Oracle Cloud, Google Cloud, AWS
+> **Status:** early, pre-release. Fifty-three providers are ready: four hyperscalers (Oracle Cloud, Google Cloud, AWS
 > and Azure); Northflank, Cloud Run, Scaleway and Render for containers without a VM; Cloudflare for
 > tunnels and DNS; and databases, DNS, meshes, observability, messaging, secrets, CI systems and
-> registries. Each has offline tests. **Oracle Cloud and Cloudflare have been used against live
+> registries. Each has offline tests. **Oracle Cloud, Northflank and Cloudflare have been used against live
 > accounts; the rest have not**, and each provider's README says which of its calls come from
 > documentation or a schema and should be checked on a first real run. See the [checklist](#provider-checklist), the
-> [engines plan](docs/engines-plan.md) (what is built, and what is left on purpose) and the
+> [issues](https://github.com/freelunch-sh/freelunch/issues) (what is unchecked or missing) and the
 > [roadmap](#roadmap).
 
 ## Principles
@@ -292,8 +292,7 @@ freelunch/
 ├── catalog/                       renders the checklist from providers/*/provider.yaml
 ├── examples/backend-app/          a project that deploys one container behind a tunnel
 ├── tests/cli.sh                   offline tests for the CLI: init, state, deploy, the graph, engines, CI
-├── docs/                          architecture and contracts, the graph, engines, CI, free domains, adding a provider, the engines plan
-└── inspire/                       local research corpus (git-ignored, not published)
+└── docs/                          architecture and contracts, the graph, engines, CI, free domains, adding a provider
 ```
 
 ## Roadmap
@@ -314,7 +313,7 @@ doesn't break your project.
 - **On main since:**
   - run the project from CI and other machines: an encrypted copy of the state in a store, a GitHub
     Action, and a wait for capacity in GitHub Actions ([docs/ci.md](docs/ci.md));
-  - **engines and the graph** ([docs/engines-plan.md](docs/engines-plan.md)): records in the state store,
+  - **engines and the graph** ([docs/engines.md](docs/engines.md)): records in the state store,
     the `api`, `cli`, `guided`, `dns`, `ci` and `registry` engines, `needs` between apps, databases,
     buckets and services, node checks and journeys, DNS and mesh providers, and the service contract
     with Axiom, Healthchecks.io, CloudAMQP, Doppler, Sentry, Better Stack, Ably, New Relic, StatusCake
@@ -363,12 +362,12 @@ the provider's page before relying on one.
 Large public clouds. Only OCI and GCP give always-free VMs; Azure gives new accounts 12 months of small VMs, and AWS a 6-month credit.
 
 - [ ] **[Alibaba Cloud](providers/alibaba-cloud/)** 🟢 `aliyun/alicloud` · ⏳ Free trials of selected products for new accounts; startup credit programs
-- [x] **[Amazon Web Services](providers/aws/)** 🟢 `hashicorp/aws` · ⏳ New accounts (since 2025-07-15): up to $200 credit on the Free plan, which ends after 6 months; always-free Lambda 1M requests/month, DynamoDB 25 GB, CloudFront 1 TB egress · ⚙️ `tofu`
-- [x] **[Google Cloud](providers/gcp/)** 🟢 `hashicorp/google` · ♾️ 1 e2-micro VM (us-west1, us-central1 or us-east1) with 30 GB standard disk, 5 GB Cloud Storage, Cloud Run 2M requests + 180k vCPU-s/month; $300 trial credit for 90 days · ⚙️ `tofu`
+- [x] **[Amazon Web Services](providers/aws/)** 🟢 `hashicorp/aws` · ⏳ New accounts (since 2025-07-15): up to $200 credit on the Free plan, which ends after 6 months; always-free Lambda 1M requests/month, DynamoDB 25 GB, CloudFront 1 TB egress · 🟢 always on · ⚙️ `tofu`
+- [x] **[Google Cloud](providers/gcp/)** 🟢 `hashicorp/google` · ♾️ 1 e2-micro VM (us-west1, us-central1 or us-east1) with 30 GB standard disk, 5 GB Cloud Storage, Cloud Run 2M requests + 180k vCPU-s/month; $300 trial credit for 90 days · 🟢 always on · ⚙️ `tofu`
 - [ ] **[Huawei Cloud](providers/huawei-cloud/)** 🟡 `huaweicloud/huaweicloud` · ⏳ Free trial packages for new accounts; free DNS hosting; startup program
 - [ ] **[IBM Cloud](providers/ibm-cloud/)** 🟢 `IBM-Cloud/ibm` · ♾️ Lite plans: Cloudant 1 GB, Db2 100 MB, API Connect 50k calls/month, Log Analysis 500 MB/day
-- [x] **[Microsoft Azure](providers/azure/)** 🟢 `hashicorp/azurerm` · ⏳ $200 credit for 30 days; 12 months: 750 h each of B1s, B2pts v2 (Arm) and B2ats v2 (AMD) VMs, 2 × 64 GB P6 SSD disks; always free: App Service F1 (10 apps), Functions 1M requests, Container Apps 180k vCPU-s + 2M requests, Cosmos DB 25 GB · ⚙️ `tofu`
-- [x] **[Oracle Cloud (OCI)](providers/oci/)** 🟢 `oracle/oci` · ♾️ 2 Arm A1 OCPUs + 12 GB RAM, 2 AMD micro VMs, 200 GB block storage, 10 TB egress/month, 2 VCNs, 1 flexible load balancer, 20 GB object storage; home region only · ⚙️ `tofu` · verified: live
+- [x] **[Microsoft Azure](providers/azure/)** 🟢 `hashicorp/azurerm` · ⏳ $200 credit for 30 days; 12 months: 750 h each of B1s, B2pts v2 (Arm) and B2ats v2 (AMD) VMs, 2 × 64 GB P6 SSD disks; always free: App Service F1 (10 apps), Functions 1M requests, Container Apps 180k vCPU-s + 2M requests, Cosmos DB 25 GB · 🟢 always on · ⚙️ `tofu`
+- [x] **[Oracle Cloud (OCI)](providers/oci/)** 🟢 `oracle/oci` · ♾️ 2 Arm A1 OCPUs + 12 GB RAM, 2 AMD micro VMs, 200 GB block storage, 10 TB egress/month, 2 VCNs, 1 flexible load balancer, 20 GB object storage; home region only · 🟢 always on · ⚙️ `tofu` · verified: live
 - [ ] **[Tencent Cloud](providers/tencent-cloud/)** 🟢 `tencentcloudstack/tencentcloud` · ⏳ Free trial packages for new accounts; startup program
 
 ### VPS & cloud credits (0/10)
@@ -500,7 +499,7 @@ Metrics, logs, uptime and alerting for every host and service.
 
 - [x] **[Axiom](providers/axiom/)** 🟡 `axiomhq/axiom` · ♾️ 0.5 TB logs with 30-day retention · ⚙️ `tofu`
 - [x] **[Better Stack](providers/better-stack/)** 🟢 `BetterStackHQ/better-uptime` · ♾️ 10 monitors with 3-min checks, status page; logs via the BetterStackHQ/logtail provider · ⚙️ `tofu`
-- [ ] **[Checkly](providers/checkly/)** 🟢 `checkly/checkly` · ♾️ 1 user, 10k API/network + 1.5k browser check runs/month
+- [ ] **[Checkly](providers/checkly/)** 🟢 `checkly/checkly` · ♾️ 1 user; each month 10,000 API and network check runs and 1,500 browser check runs
 - [ ] **[Datadog](providers/datadog/)** 🟢 `DataDog/datadog` · ♾️ Free for up to 5 hosts (short retention)
 - [ ] **[Grafana Cloud](providers/grafana-cloud/)** 🟢 `grafana/grafana` · ♾️ 3 users, 10 dashboards, 100 alerts, 10k metric series, 50 GB logs, 14-day retention
 - [x] **[Healthchecks.io](providers/healthchecks-io/)** 🟡 `kristofferahl/healthchecksio` · ♾️ 20 cron/heartbeat checks · ⚙️ `tofu`
@@ -547,7 +546,7 @@ Remote state, pipelines and container registries for running freelunch itself.
 - [x] **[GitLab](providers/gitlab/)** 🟢 `gitlabhq/gitlab` · ♾️ Unlimited repos with up to 5 collaborators; CI/CD minutes, Pages, Container Registry · ⚙️ `ci`
 - [ ] **[HCP Terraform](providers/hcp-terraform/)** 🟢 `hashicorp/tfe` · ♾️ Free tier capped at 500 managed resources (legacy free plan ended 2026-03-31)
 - [ ] **[Scalr](providers/scalr/)** 🟡 `scalr/scalr` · ♾️ All features; 50 runs/month free
-- [ ] **[Spacelift](providers/spacelift/)** 🟡 `spacelift-io/spacelift` · ♾️ Free plan: public worker pools up to 200 minutes/month
+- [ ] **[Spacelift](providers/spacelift/)** 🟡 `spacelift-io/spacelift` · ♾️ Free plan: 200 minutes a month on public worker pools
 
 ### Excluded
 

@@ -12,7 +12,6 @@ url: "https://xi.example"
 last_verified: "2026-11-08"
 notes: null
 sources: []
-inspire: []
 engine: dns
 jobs: [provision]
 verified: fake-api

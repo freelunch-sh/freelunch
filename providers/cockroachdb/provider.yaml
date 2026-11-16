@@ -17,10 +17,8 @@ notes: "Cockroach Continuum pricing (Standard and Mission Critical) applies to o
 sources:
   - "cockroachlabs.com/docs/cockroachcloud/free-trial (checked 2026-11-09)"
   - "cockroachlabs.com/pricing (checked 2026-11-09)"
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire:
-  - "repos/terraform-providers/cockroachdb-terraform-provider-cockroach"
 limits:
   free_request_units: 50000000
   free_storage_mib: 10240

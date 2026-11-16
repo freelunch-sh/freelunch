@@ -24,6 +24,5 @@ registry_token: "GITLAB_TOKEN"
 last_verified: "2026-10-18"
 notes: "freelunch's own CI support for this system is built into the CLI (freelunch ci init gitlab), not a template: see docs/ci.md. Not run on a real account by the tests."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

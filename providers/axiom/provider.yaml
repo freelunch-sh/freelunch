@@ -14,6 +14,5 @@ secrets: "TF_VAR_api_token=Axiom API token (an input variable of the stack)"
 last_verified: "2026-10-18"
 notes: "Makes datasets with an ingest-only token per dataset, as the service contract (docs/architecture.md#service-contract). The ingest capability value (create) follows Axiom's API; the provider docs do not list the allowed values. Not yet run against a real account."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

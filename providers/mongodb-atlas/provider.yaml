@@ -16,10 +16,8 @@ last_verified: "2026-11-08"
 notes: null
 sources:
   - "mongodb.com/docs/atlas/reference/free-shared-limitations (checked 2026-11-08)"
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire:
-  - "repos/terraform-providers/mongodb-terraform-provider-mongodbatlas"
 limits:
   providers: [AWS, GCP, AZURE]
   max_clusters: 5

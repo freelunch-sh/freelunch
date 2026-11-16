@@ -15,4 +15,3 @@ notes: "Excluded: being retired. Atlassian moves customers to Jira Service Manag
 sources:
   - "atlassian.com/licensing/opsgenie (checked 2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire: []

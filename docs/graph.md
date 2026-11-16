@@ -1,7 +1,6 @@
 # The graph: nodes, edges, journeys
 
-Plan: section 9 of [engines-plan.md](engines-plan.md). This page grows with each step; today it
-holds the node inventory and the health probe (9a) the `needs` format (9b), edge media and the mesh (9c), journeys (9e), DNS records (9d), and services (10).
+This page holds the node inventory and the health probe (9a) the `needs` format (9b), edge media and the mesh (9c), journeys (9e), DNS records (9d), and services (10).
 
 ## Nodes
 

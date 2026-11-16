@@ -18,6 +18,5 @@ sources:
   - "scaleway.com/en/pricing/serverless (free tiers per account and month, prices beyond them; checked 2026-10-24)"
   - "scaleway.com/en/blog/a-transparent-update-on-scaleway-pricing (Serverless Containers memory at EUR 0.000002/GB-s from 2026-06-01)"
   - "Pulumi Scaleway container docs (memory and vCPU tiers from 128 MB / 70 mVCPU to 4096 MB / 2240 mVCPU, checked 2026-10-24)"
-  - "inspire/listing/cloudcredits.io (2025-10)"
+  - "https://github.com/t3-sh/cloudcredits.io (2025-10)"
   - "github.com/scaleway/scaleway-sdk-go api/container/v1 (namespaces, containers, public_endpoint, secret_environment_variables, checked 2026-10-30)"
-inspire: []

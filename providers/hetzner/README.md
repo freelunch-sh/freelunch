@@ -30,9 +30,8 @@ Recommended paid fallback when OCI has no A1 capacity. DNS hosting is free.
 
 ## References
 
-- inspire/listing/free-for-dev (2026-10-18)
+- https://github.com/ripienaar/free-for-dev (2026-10-18)
 - registry.terraform.io (checked 2026-10-18)
-- Research corpus: `inspire/repos/terraform-providers/hetznercloud-terraform-provider-hcloud`
 
 ## Contributing
 

@@ -27,7 +27,7 @@ run: the last result is in `.freelunch/watch.state`, and what cleared is told on
 `freelunch ci init --jobs=watch` writes `.github/workflows/freelunch-watch.yml`: a weekly run (Monday, 06:17 UTC) and a
 button, which runs `freelunch watch` with the secrets the project's other workflows use, and puts what it finds in the run's
 summary. `freelunch ci init --pipeline` writes it with the pipeline. The run reads and changes nothing; `freelunch ci needs`
-names any secret it lacks. A run in CI starts without the last run's state, so it tells everything it finds each week.
+names any secret it lacks. A run in CI starts from a fresh checkout: with a state store it reads the last result from there (see the end of this page), and without one it tells everything it finds each week.
 
 ## What it does not do
 

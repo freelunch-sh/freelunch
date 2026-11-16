@@ -22,9 +22,6 @@ sources:
   - "learn.microsoft.com/azure/cost-management-billing/manage/avoid-charges-free-account (2026-03-03)"
   - "Azure free services list: Managed Disks 2 × 64 GB (P6) SSD (checked 2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire:
-  - "repos/azure"
-  - "repos/multi-cloud/gruberdev-tf-free"
 
 limits:
   compute:

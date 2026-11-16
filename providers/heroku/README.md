@@ -26,7 +26,6 @@ Excluded: no free tier.
 
 - snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)
 - registry.terraform.io (checked 2026-10-18)
-- Research corpus: `inspire/repos/terraform-providers/heroku-terraform-provider-heroku`
 
 ## Contributing
 

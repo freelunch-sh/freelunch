@@ -19,13 +19,8 @@ last_verified: "2026-10-18"
 notes: "A1 allowance halved from 4 OCPU / 24 GB on 2026-06-15. A1 creation often fails with 'Out of host capacity'. Idle instances (<20% CPU/network/memory at p95 over 7 days) can be reclaimed."
 sources:
   - "Oracle Always Free docs"
-  - "inspire/repos/oci-vm/filippolmt-terraform-oci-free-tier/docs/adr/0002-always-free-cap-reduction.md"
-  - "inspire/repos/multi-cloud/bodecloud-CloudBooter/cloud/OCI/docs/FREE_TIER_LIMITS.md (2026-07-24)"
-inspire:
-  - "repos/oci-vm"
-  - "repos/oci-kubernetes"
-  - "repos/oci-capacity"
-  - "repos/oci-reference"
+  - "https://github.com/filippolmt/terraform-oci-free-tier (docs/adr/0002-always-free-cap-reduction.md)"
+  - "https://github.com/bodecloud/CloudBooter (cloud/OCI/docs/FREE_TIER_LIMITS.md, 2026-07-24)"
 
 limits:
   compute:

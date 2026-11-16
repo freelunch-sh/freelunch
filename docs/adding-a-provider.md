@@ -30,7 +30,7 @@ Schema (enforced by `catalog/`):
 | `engine` | optional: `tofu`, `api`, `cli`, `guided`, `dns`, `ci` or `registry` ([engines](engines.md); `dns` is for DNS zones: hooks in `dns.sh`, see [graph.md](graph.md#dns-records); `ci` is for a CI system: a `pipeline.tpl` with `@IMAGE@` in it and `ci_file`, `ci_secret` and `ci_run` in `provider.yaml` (`ci_builtin: true` instead of a template for GitHub and GitLab, whose support is in the CLI), see [ci.md](ci.md#other-ci-systems); `registry` is for a container registry: `registry`, `registry_user` and `registry_token` (secret names), and `registry_image` (`@USER@/@REPO@` placeholders) in `provider.yaml`, see [ci.md](ci.md#registries)). Without it, `tofu`, or `guided` when `iac` is `stale` or `none`. `engine_<kind>` (say `engine_database: api`) overrides it for one kind of resource. A provider that is `ready` (or says `engine:`) with `tofu` needs a `stack/`; with `api`, an `api.yaml` ([api-adapter](api-adapter.md)). `bin/freelunch engine <name>` prints the result |
 | `jobs` | optional list of `provision`, `ci`, `cd`: what the provider supports in a workflow |
 | `verified` | optional, for a provider that is `ready`: `fake-api` (only a test double has run it) or `live` (a real account has run apply, deploy and destroy). New `api` providers start as `fake-api`. The checklist shows the engine, jobs and this for implemented providers |
-| `notes`, `sources`, `inspire` | optional |
+| `notes`, `sources` | optional. `sources` lists where the free-tier facts came from, as URLs with the date they were read |
 | `recommended` | optional `true` for the provider to start with when a category has several; at most one per category, never an excluded one. The checklist marks it, and `freelunch domain suggest` lists it first |
 | `suffixes` | free domain providers (category `domains`) only: a one-line list such as `["dpdns.org", "us.kg"]`, which `freelunch domain suggest` checks. List only suffixes on the [Public Suffix List](https://publicsuffix.org/): Cloudflare's free plan treats names under any other suffix as subdomains and won't add them |
 
@@ -73,6 +73,8 @@ Use [`providers/oci`](../providers/oci/) as the reference.
 
 ## Code and licences
 
-`inspire/` contains repos under several licences (MIT, Apache-2.0, GPL-3.0, and some
-with no licence). Take ideas freely, but only copy code from compatibly licensed sources,
-with attribution. GPL or unlicensed code is reference only.
+Take ideas freely. Copy code only from MIT, Apache-2.0 or BSD sources, keep their notice, and
+add the source to [`NOTICE`](../NOTICE). An MPL-2.0 file keeps its header and its licence and is
+listed in `NOTICE` too. Do not copy GPL or unlicensed code: read it, then write your own.
+The same goes for text: a fact and a number are free to use, a sentence from a listing or a
+provider's documentation is not, so put the fact in your own words and keep the source URL.

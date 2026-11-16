@@ -18,6 +18,5 @@ registry_image: "docker.io/@USER@/@REPO@"
 last_verified: "2026-10-18"
 notes: "Images are pushed by the image workflow (freelunch init --image-workflow --registry docker-hub); freelunch makes no repository itself. A free account has one private repository, and pulls from Docker Hub are rate limited. Not yet run on a real account."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

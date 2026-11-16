@@ -14,6 +14,5 @@ secrets: "SENTRY_AUTH_TOKEN=Sentry auth token that can create projects"
 last_verified: "2026-10-18"
 notes: "Makes projects with a client key each; an app that needs one gets SENTRY_DSN (docs/architecture.md#service-contract). The team must exist already. Not yet run against a real account."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

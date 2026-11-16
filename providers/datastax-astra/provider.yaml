@@ -16,7 +16,6 @@ notes: "Monthly credit amount and free-plan regions not published in the docs re
 sources:
   - "registry.terraform.io (checked 2026-10-18)"
   - "docs.datastax.com/en/astra-db-serverless (database limits, statuses; via search 2026-11-08)"
-inspire: []
 limits:
   max_databases: 5
   clouds: ["aws", "gcp", "azure"]

@@ -15,8 +15,7 @@ ci_file: "azure-pipelines.yml"
 ci_secret: "Pipeline Variables: FREELUNCH_BUNDLE, kept secret"
 ci_run: "Run pipeline, and choose the command"
 last_verified: "2026-10-19"
-notes: "New organisations may have to request the free Microsoft-hosted parallel job grant before pipelines run. Free minutes reset on the first day of each month. The pipeline is written from a template (freelunch ci init, docs/ci.md#other-ci-systems) and has not run on a real account."
+notes: "New organisations may have to request the free Microsoft-hosted parallel job grant before pipelines run. The free minutes start again every calendar month. The pipeline is written from a template (freelunch ci init, docs/ci.md#other-ci-systems) and has not run on a real account."
 sources:
   - "azure.microsoft.com/pricing/details/devops (2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire: []

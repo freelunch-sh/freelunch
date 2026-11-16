@@ -14,5 +14,3 @@ last_verified: "2026-10-18"
 notes: "Trial terms not verified during research."
 sources:
   - "registry.terraform.io (checked 2026-10-18)"
-inspire:
-  - "repos/terraform-providers/timescale-terraform-provider-timescale"

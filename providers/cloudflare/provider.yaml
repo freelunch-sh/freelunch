@@ -16,12 +16,6 @@ secrets: "CLOUDFLARE_API_TOKEN=Cloudflare API token"
 last_verified: "2026-10-18"
 notes: "Glue for the hybrid inventory: a Tunnel per host, proxied DNS records and optional Access login, with cloudflared started by freelunch deploy. Provider v5 renamed many resources compared with v4."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire:
-  - "repos/cloudflare"
-  - "repos/oci-kubernetes/dorukgezici-k3s-oci-always-free/cloudflare"
-  - "repos/multi-cloud/guillermo-musumeci-terraform-multicloud-website-cloudflare-dns"
-  - "repos/multi-cloud/bodecloud-CloudBooter/cloud/Cloudflare"
-  - "repos/terraform-providers/cloudflare-terraform-provider-cloudflare"

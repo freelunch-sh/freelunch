@@ -15,4 +15,3 @@ notes: "Excluded: discontinued. HashiCorp points to Vault Community Edition or H
 sources:
   - "support.hashicorp.com HCP Vault Secrets End Of Life (checked 2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire: []

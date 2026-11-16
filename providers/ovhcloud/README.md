@@ -26,7 +26,7 @@ No always-free compute; Startup Program (up to EUR 100K for EU scale-ups)
 
 ## References
 
-- inspire/listing/cloudcredits.io (2025-10)
+- https://github.com/t3-sh/cloudcredits.io (2025-10)
 - thundercompute.com/blog/free-cloud-gpu-credits (2026-10-01)
 - registry.terraform.io (checked 2026-10-18)
 

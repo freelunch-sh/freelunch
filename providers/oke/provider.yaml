@@ -16,4 +16,3 @@ sources:
   - "github.com/nce/oci-free-cloud-k8s (always-free Kubernetes on Oracle Cloud, checked 2026-10-30)"
   - "mrplanb.com/datacenter/free-vps-tiers (Oracle halved the Arm free tier to 2 OCPUs and 12 GB on 2026-06-15, checked 2026-10-30)"
   - "registry.terraform.io (oci_containerengine_cluster, oci_containerengine_node_pool, checked 2026-10-30)"
-inspire: []

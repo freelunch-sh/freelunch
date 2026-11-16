@@ -15,4 +15,3 @@ notes: "Remote-state option. Sources disagree on the current free offer, so veri
 sources:
   - "scalr.com/learning-center/hcp-terraform-free-tier-is-being-discontinued-what-you-need-to-know"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

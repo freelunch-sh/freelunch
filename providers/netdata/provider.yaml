@@ -15,4 +15,3 @@ notes: "The open-source Netdata agent runs on each host; containers on a monitor
 sources:
   - "netdata.cloud/pricing (2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire: []

@@ -7,12 +7,11 @@ layer: service
 terraform_provider: "spacelift-io/spacelift"
 iac: community
 free_tier_type: always-free
-free_tier: "Free plan: public worker pools up to 200 minutes/month"
+free_tier: "Free plan: 200 minutes a month on public worker pools"
 card_required: "no"
 url: "https://spacelift.io/pricing"
 last_verified: "2026-10-18"
 notes: null
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

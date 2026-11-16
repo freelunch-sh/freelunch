@@ -1,7 +1,7 @@
 # API adapter: providers without Terraform
 
-Status: the driver is built (`freelunch api <provider> ...`); no provider uses it yet, Deno Deploy is
-the first (see [engines-plan.md](engines-plan.md)). Render is hand-written in `bin/freelunch` (`render_*`) and stays that way.
+Status: the driver is built (`freelunch api <provider> ...`); Deno Deploy, StatusCake and UptimeRobot use it
+(see [engines.md](engines.md)). Render is hand-written in `bin/freelunch` (`render_*`) and stays that way.
 The adapter is for new providers with an HTTP API and no maintained Terraform provider
 (Deno Deploy and the Phase 6 API-only providers).
 

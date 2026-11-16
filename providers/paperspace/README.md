@@ -30,7 +30,7 @@ Terraform provider has had no release since 2023.
 
 ## References
 
-- inspire/listing/free-for-dev (2026-10-18)
+- https://github.com/ripienaar/free-for-dev (2026-10-18)
 - thundercompute.com/blog/free-cloud-gpu-credits (2026-10-01)
 - registry.terraform.io (checked 2026-10-18)
 

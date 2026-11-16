@@ -15,4 +15,3 @@ notes: "Excluded: discontinued. The equinix/equinix provider still covers Equini
 sources:
   - "docs.equinix.com/releases/end-of-life/eol-products-services (checked 2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire: []

@@ -24,7 +24,7 @@ Unlimited networks, 25 clients
 
 ## References
 
-- inspire/listing/free-for-dev (2026-10-18)
+- https://github.com/ripienaar/free-for-dev (2026-10-18)
 - registry.terraform.io (checked 2026-10-18)
 
 ## Contributing

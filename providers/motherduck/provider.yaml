@@ -18,6 +18,5 @@ sources:
   - "motherduck.com/fees-addendum (February 2026, checked 2026-10-19)"
   - "motherduck.com/pricing (re-checked 2026-11-08)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire: []
 limits:
   max_service_accounts: 2

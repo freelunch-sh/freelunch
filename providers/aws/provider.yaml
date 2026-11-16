@@ -18,11 +18,8 @@ notes: "Free plan: $100 sign-up credit plus up to $100 from activities; EC2 is l
 sources:
   - "docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-free-tier-usage.html (checked 2026-10-19)"
   - "aws.amazon.com/free/free-tier-faqs (checked 2026-10-19)"
-  - "inspire/repos/aws/rogeriomm-aws-lab/README.md"
+  - "https://github.com/rogeriomm/aws-lab (README.md)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire:
-  - "repos/aws"
-  - "repos/multi-cloud/gruberdev-tf-free"
 
 limits:
   compute:

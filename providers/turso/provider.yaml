@@ -16,6 +16,5 @@ secrets: "TURSO_API_TOKEN=Turso platform API token"
 last_verified: "2026-10-18"
 notes: "The community Terraform provider has had no release since 2024, so freelunch drives the turso CLI (the cli engine) and keeps each database's connection string in the provider's record in the state store. Not yet run against a real account."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

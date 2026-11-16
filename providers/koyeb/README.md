@@ -26,7 +26,6 @@ New organisations reportedly start on the $29/month Pro plan with a card hold si
 
 - snapdeploy.dev/state-of-free-hosting (checked 2026-11-08)
 - registry.terraform.io (checked 2026-10-18)
-- Research corpus: `inspire/repos/terraform-providers/koyeb-terraform-provider-koyeb`
 
 ## Contributing
 

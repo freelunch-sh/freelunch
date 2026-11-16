@@ -14,7 +14,7 @@
 
 ## What's free
 
-1 user, 10k API/network + 1.5k browser check runs/month
+1 user; each month 10,000 API and network check runs and 1,500 browser check runs
 
 > Free tiers change without notice. Check <https://www.checklyhq.com/pricing/> before relying on this.
 
@@ -25,7 +25,7 @@
 
 ## References
 
-- inspire/listing/free-for-dev (2026-10-18)
+- https://github.com/ripienaar/free-for-dev (2026-10-18)
 - registry.terraform.io (checked 2026-10-18)
 
 ## Contributing

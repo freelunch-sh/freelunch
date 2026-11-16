@@ -15,5 +15,3 @@ notes: "Excluded: no free tier."
 sources:
   - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire:
-  - "repos/terraform-providers/heroku-terraform-provider-heroku"

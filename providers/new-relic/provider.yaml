@@ -14,6 +14,5 @@ secrets: "NEW_RELIC_API_KEY=New Relic user API key (NRAK-...)"
 last_verified: "2026-10-18"
 notes: "Makes ingest (licence) keys; an app that needs one gets NEW_RELIC_LICENSE_KEY and the OpenTelemetry settings (docs/architecture.md#service-contract). Creating ingest keys needs a user with core or full platform access. Not yet run against a real account."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

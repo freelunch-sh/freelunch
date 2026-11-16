@@ -12,7 +12,6 @@ url: "https://kappa5.example"
 last_verified: "2026-11-14"
 notes: null
 sources: []
-inspire: []
 limits:
   compute:
     idle: { percent: 20 }

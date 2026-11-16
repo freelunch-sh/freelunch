@@ -144,8 +144,8 @@ what's described here, fix `provider.yaml` or the modules and note it.
 
 ## References
 
-Research corpus in `inspire/`. No code was copied:
+Ideas were taken from these projects. No code was copied:
 
-- `repos/azure/xRizur-terraform-azure-free-app-stack`: App Service F1, free Cosmos DB and Key Vault, with free-SKU enforcement
-- `repos/azure/SalesFX-aks-free-tier-terraform`: AKS free control-plane tier with ingress and KEDA
-- `repos/multi-cloud/gruberdev-tf-free`: multi-cloud free-tier layout
+- https://github.com/xRizur/terraform-azure-free-app-stack: App Service F1, free Cosmos DB and Key Vault, with free-SKU enforcement
+- https://github.com/SalesFX/aks-free-tier-terraform: AKS free control-plane tier with ingress and KEDA
+- https://github.com/gruberdev/tf-free: multi-cloud free-tier layout

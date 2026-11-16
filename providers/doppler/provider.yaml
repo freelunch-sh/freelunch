@@ -14,7 +14,5 @@ secrets: "DOPPLER_TOKEN=Doppler token that may create projects"
 last_verified: "2026-10-18"
 notes: "Makes projects with a read-only service token per config; an app that needs one gets DOPPLER_TOKEN (docs/architecture.md#service-contract). Not yet run against a real account."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire:
-  - "repos/terraform-providers/DopplerHQ-terraform-provider-doppler"

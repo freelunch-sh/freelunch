@@ -14,6 +14,5 @@ secrets: "BETTERUPTIME_API_TOKEN=Better Stack Uptime API token (team-scoped)"
 last_verified: "2026-10-18"
 notes: "Makes heartbeats; an app that needs one gets BETTERSTACK_HEARTBEAT_URL (docs/architecture.md#service-contract). Logs use a different provider (logtail) and are not made here. Not yet run against a real account."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

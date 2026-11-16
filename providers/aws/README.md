@@ -148,8 +148,8 @@ what's described here, fix `provider.yaml` or the modules and note it.
 
 ## References
 
-Research corpus in `inspire/`. No code was copied:
+Ideas were taken from these projects. No code was copied:
 
-- `repos/aws/pvarentsov-terraform-aws-free-tier`: free-tier VPC and EC2 layout
-- `repos/aws/rogeriomm-aws-lab`: VPC, EC2 running Docker Compose, and RDS on the free tier
-- `repos/multi-cloud/gruberdev-tf-free`: multi-cloud free-tier layout
+- https://github.com/pvarentsov/terraform-aws-free-tier: free-tier VPC and EC2 layout
+- https://github.com/rogeriomm/aws-lab: VPC, EC2 running Docker Compose, and RDS on the free tier
+- https://github.com/gruberdev/tf-free: multi-cloud free-tier layout

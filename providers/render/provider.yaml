@@ -20,7 +20,5 @@ notes: "Hobby bandwidth was cut from 100 GB to 5 GB/month in Apr 2026."
 sources:
   - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire:
-  - "repos/terraform-providers/render-oss-terraform-provider-render"
 limits:
   plans: ["free"]

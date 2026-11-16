@@ -17,5 +17,3 @@ sources:
   - "docs.railway.com/reference/pricing/free-trial (checked 2026-10-24)"
   - "snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire:
-  - "repos/terraform-providers/terraform-community-providers-terraform-provider-railway"

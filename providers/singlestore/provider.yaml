@@ -15,4 +15,3 @@ notes: "Left planned: the singlestoredb provider (0.1.19) has no shared/free wor
 sources:
   - "singlestore.com/pricing (checked 2026-11-08)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

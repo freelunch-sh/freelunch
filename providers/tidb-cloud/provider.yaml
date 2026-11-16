@@ -19,7 +19,6 @@ sources:
   - "docs.pingcap.com/tidbcloud/select-cluster-tier (2026-10-19)"
   - "pingcap.com/tidb-cloud-pricing (2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire: []
 limits:
   max_clusters: 5
   max_spending_limit_cents: 0

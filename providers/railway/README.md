@@ -33,7 +33,6 @@ At $10 per GB of RAM and $20 per vCPU a month, $1 covers about 12 days of a 256 
 - docs.railway.com/reference/pricing/free-trial (checked 2026-10-24)
 - snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)
 - registry.terraform.io (checked 2026-10-18)
-- Research corpus: `inspire/repos/terraform-providers/terraform-community-providers-terraform-provider-railway`
 
 ## Contributing
 

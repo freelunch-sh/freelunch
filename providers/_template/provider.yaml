@@ -23,7 +23,6 @@ last_verified: "YYYY-MM-DD"
 notes: null                       # gotchas: sleeping, expiry, card holds, regional limits...
 sources:                          # where the free-tier facts came from, with dates
   - "example.com/pricing (YYYY-MM-DD)"
-inspire: []                       # related paths under inspire/
 
 # Host providers: free-tier limits enforced by the modules' preconditions.
 # limits:

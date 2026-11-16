@@ -15,4 +15,3 @@ notes: "Excluded: names are records in is-a.dev's own zone (A, AAAA, CNAME, MX, 
 sources:
   - "github.com/is-a-dev/docs FAQ: who can use NS records (checked 2026-10-23)"
   - "github.com/is-a-dev/docs maintainers guide on reviewing PRs (checked 2026-10-23)"
-inspire: []

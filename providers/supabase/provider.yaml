@@ -17,7 +17,5 @@ notes: "Free projects pause after 7 days of inactivity and need a manual restore
 sources:
   - "costbench.com/software/database-as-service/supabase/free-plan (checked 2026-11-08)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire:
-  - "repos/terraform-providers/supabase-terraform-provider-supabase"
 limits:
   max_projects: 2

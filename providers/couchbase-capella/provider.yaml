@@ -14,9 +14,8 @@ secrets: "CAPELLA_AUTHENTICATION_TOKEN=Couchbase Capella API token"
 last_verified: "2026-11-08"
 notes: "The Capella pricing page returned 403; limits come from Couchbase docs and blog via search. Storage cap unverified."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
   - "docs.couchbase.com/cloud/get-started, couchbase.com/blog/free-tier-capella-dev-available (via search, 2026-11-08)"
-inspire: []
 limits:
   max_clusters: 1

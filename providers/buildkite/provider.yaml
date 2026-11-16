@@ -19,4 +19,3 @@ notes: "Self-hosted agents can run on free VMs from the hybrid inventory. The pi
 sources:
   - "buildkite.com/pricing (2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire: []

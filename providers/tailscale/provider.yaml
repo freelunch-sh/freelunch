@@ -14,8 +14,5 @@ secrets: "TAILSCALE_API_KEY=Tailscale API access token"
 last_verified: "2026-10-18"
 notes: "Makes the key hosts join with on first boot (tailscale_auth_key in the host stacks) and reports each host's tailnet address as the mesh contract (docs/graph.md#the-mesh). Not yet run against a real tailnet."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire:
-  - "repos/terraform-providers/tailscale-terraform-provider-tailscale"
-  - "repos/oci-kubernetes/dorukgezici-k3s-oci-always-free/tailscale"

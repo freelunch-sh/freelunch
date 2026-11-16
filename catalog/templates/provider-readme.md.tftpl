@@ -50,15 +50,12 @@ ${p.notes}
 - `stack/`: a root module that reads the hybrid inventory (`hybrid/` state) and wires every host (DNS records, mesh ACLs, tunnels)
 %{ endif ~}
 %{ endif ~}
-%{ if length(try(p.sources, [])) > 0 || length(try(p.inspire, [])) > 0 ~}
+%{ if length(try(p.sources, [])) > 0 ~}
 
 ## References
 
 %{ for s in try(p.sources, []) ~}
 - ${s}
-%{ endfor ~}
-%{ for i in try(p.inspire, []) ~}
-- Research corpus: `inspire/${i}`
 %{ endfor ~}
 %{ endif ~}
 

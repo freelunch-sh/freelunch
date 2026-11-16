@@ -14,6 +14,5 @@ secrets: "CLOUDAMQP_APIKEY=CloudAMQP API key"
 last_verified: "2026-10-18"
 notes: "Makes the one free Little Lemur instance; an app that needs it gets AMQP_URL (docs/architecture.md#service-contract). Not yet run against a real account."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

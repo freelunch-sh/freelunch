@@ -125,7 +125,7 @@ instances = {
 ```
 
 For a full self-hosting platform, run Dokploy or Coolify as an app and deploy everything
-else through its UI (see `inspire/repos/oci-vm/statickidz-*` for reference).
+else through its UI (see [statickidz/dokploy-oci-free](https://github.com/statickidz/dokploy-oci-free) and [statickidz/coolify-oci-free](https://github.com/statickidz/coolify-oci-free)).
 
 ### Waiting for capacity
 
@@ -372,15 +372,15 @@ bin/freelunch test     # or: cd providers/oci/modules/compute && terraform test
 - [x] Object Storage bucket for the project's state (`freelunch state init oci`, through the S3-compatible API)
 - [x] Budget alert module ($1 threshold, `budget_alert_emails`)
 - [ ] Always Free Autonomous DB / MySQL HeatWave modules
-- [ ] k3s cluster layout (see `inspire/repos/oci-kubernetes`)
+- [ ] k3s cluster layout (see [dorukgezici/k3s-oci-always-free](https://github.com/dorukgezici/k3s-oci-always-free))
 
 ## References
 
-Research corpus in `inspire/`. Ideas were taken from these repos; no code was copied:
+Ideas were taken from these projects. No code was copied:
 
-- `repos/oci-vm/filippolmt-terraform-oci-free-tier`: free-cap guardrails and design notes (GPL, ideas only)
-- `repos/oci-vm/briansunter-oracle-world`: module structure, host firewall handling (MIT)
-- `repos/oci-vm/RhubarbSin-terraform-oci-free-compute-maximal-example`: maximal free layout (MIT)
-- `repos/oci-kubernetes/dorukgezici-k3s-oci-always-free`: OCI + Cloudflare + Tailscale, recovery from reclaim (MIT)
-- `repos/oci-capacity/*`: capacity retry approaches
-- `repos/multi-cloud/bodecloud-CloudBooter/cloud/OCI/docs/FREE_TIER_LIMITS.md`: limits and PAYG safety
+- https://github.com/filippolmt/terraform-oci-free-tier: free-cap guardrails and design notes (GPL, ideas only)
+- https://github.com/briansunter/oracle-world: module structure, host firewall handling (MIT)
+- https://github.com/RhubarbSin/terraform-oci-free-compute-maximal-example: maximal free layout (MIT)
+- https://github.com/dorukgezici/k3s-oci-always-free: OCI + Cloudflare + Tailscale, recovery from reclaim (MIT)
+- [hitrov/oci-arm-host-capacity](https://github.com/hitrov/oci-arm-host-capacity), [mohankumarpaluru/oracle-freetier-instance-creation](https://github.com/mohankumarpaluru/oracle-freetier-instance-creation), [gardinbe/oracle-compute-instance-creation-script](https://github.com/gardinbe/oracle-compute-instance-creation-script) and [HxX2/ocip](https://github.com/HxX2/ocip): capacity retry approaches
+- https://github.com/bodecloud/CloudBooter (cloud/OCI/docs/FREE_TIER_LIMITS.md): limits and PAYG safety

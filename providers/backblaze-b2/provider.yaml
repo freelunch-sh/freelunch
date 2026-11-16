@@ -16,12 +16,10 @@ secrets: "B2_APPLICATION_KEY_ID=Backblaze key ID; B2_APPLICATION_KEY=Backblaze a
 last_verified: "2026-10-25"
 notes: "Buckets for apps: each one private, with a key that only reaches it, and its S3 settings in the app's environment on freelunch deploy."
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
   - "backblaze.com/cloud-storage/pricing (10 GB free, downloads free up to 3x the average stored, checked 2026-10-25)"
   - "Backblaze/b2 provider 0.14.1 schema: b2_bucket, b2_application_key (bucket_ids), b2_account_info (s3_api_url), checked 2026-10-25"
-inspire:
-  - "repos/terraform-providers/Backblaze-terraform-provider-b2"
 
 limits:
   storage_gb: 10

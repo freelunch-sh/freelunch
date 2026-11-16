@@ -26,9 +26,8 @@
 ## References
 
 - snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)
-- inspire/listing/free-for-dev (2026-10-18)
+- https://github.com/ripienaar/free-for-dev (2026-10-18)
 - registry.terraform.io (checked 2026-10-18)
-- Research corpus: `inspire/repos/terraform-providers/netlify-terraform-provider-netlify`
 
 ## Contributing
 

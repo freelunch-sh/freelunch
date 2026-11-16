@@ -21,4 +21,3 @@ sources:
   - "developers.cloudflare.com/rules/origin-rules (Host header, SNI and DNS record overrides are Enterprise only; checked 2026-10-24)"
   - "registry.terraform.io (google_cloud_run_v2_service: invoker_iam_disabled, scaling, resources.cpu_idle, checked 2026-10-24)"
   - "azure.microsoft.com/en-us/pricing/details/container-apps (the same grant on Azure Container Apps, for comparison, checked 2026-10-30)"
-inspire: []

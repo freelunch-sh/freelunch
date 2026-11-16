@@ -27,7 +27,6 @@ Hobby (non-commercial only): 100 GB transfer, 1M edge requests, 1M function invo
 
 - snapdeploy.dev/state-of-free-hosting (checked 2026-09-28)
 - registry.terraform.io (checked 2026-10-18)
-- Research corpus: `inspire/repos/terraform-providers/vercel-terraform-provider-vercel`
 
 ## Contributing
 

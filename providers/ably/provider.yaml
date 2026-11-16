@@ -16,4 +16,3 @@ notes: "Makes apps with a capability-limited key each; an app that needs one get
 sources:
   - "ably.com/docs/pricing/free (2026-10-19)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire: []

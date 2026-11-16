@@ -30,7 +30,7 @@ Infrastructure is defined in Modal's Python SDK; there is no Terraform provider.
 ## References
 
 - spheron.network/blog/free-gpu-cloud-credits-2026 (2026-08)
-- inspire/listing/free-for-dev (2026-10-18)
+- https://github.com/ripienaar/free-for-dev (2026-10-18)
 - registry.terraform.io (checked 2026-10-18)
 
 ## Contributing

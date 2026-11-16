@@ -21,12 +21,8 @@ sources:
   - "cloud.google.com/vpc/pricing-announce-external-ips ($0.005/h per in-use IPv4 since 2024-02-01, checked 2026-10-19)"
   - "cloud.google.com/vpc/network-pricing (no charge for external IPv6 addresses on VMs; Standard Tier: first 200 GiB a month free per account across all regions; checked 2026-10-24)"
   - "DNS lookups for AAAA records: none for ghcr.io and github.com; Docker Hub, Artifact Registry, the Ubuntu mirrors and Cloudflare's tunnel edge have them (2026-10-24)"
-  - "inspire/repos/multi-cloud/bodecloud-CloudBooter/cloud/GCP/docs/FREE_TIER_LIMITS.md (2026-07)"
+  - "https://github.com/bodecloud/CloudBooter (cloud/GCP/docs/FREE_TIER_LIMITS.md, 2026-07)"
   - "registry.terraform.io (checked 2026-10-19)"
-inspire:
-  - "repos/gcp"
-  - "repos/multi-cloud/gruberdev-tf-free"
-  - "repos/multi-cloud/bodecloud-CloudBooter"
 
 limits:
   compute:

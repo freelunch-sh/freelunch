@@ -13,6 +13,5 @@ url: "https://www.datadoghq.com/pricing/"
 last_verified: "2026-10-18"
 notes: null
 sources:
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire: []

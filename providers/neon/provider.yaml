@@ -16,10 +16,8 @@ last_verified: "2026-11-08"
 notes: "Neon's FAQ (updated 2026-10-01) says 1 GB per project; some older pages say 0.5 GB. Suspended projects still count toward the storage cap. An official neondatabase/neon provider exists in source but is not yet published to the Terraform Registry."
 sources:
   - "neon.com/faqs/free-plan-limits-and-quotas (checked 2026-11-08)"
-  - "inspire/listing/free-for-dev (2026-10-18)"
+  - "https://github.com/ripienaar/free-for-dev (2026-10-18)"
   - "registry.terraform.io (checked 2026-10-18)"
-inspire:
-  - "repos/terraform-providers/neondatabase-terraform-provider-neon"
 limits:
   max_projects: 100
   max_cu: 2
