@@ -6,8 +6,12 @@ on:
   pull_request:
   workflow_call:
 
-permissions:
-  contents: read
+permissions: {}
+
+# A newer push to the same pull request replaces the run in progress
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   TOFU_VERSION: 1.12.7
@@ -16,6 +20,9 @@ jobs:
   test:
     name: test (${{ matrix.tool }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -36,14 +43,14 @@ jobs:
       FREELUNCH_TF: ${{ matrix.tool }}
       TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.plugin-cache
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - if: matrix.tool == 'tofu'
-        uses: opentofu/setup-opentofu@v2
+        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2
         with:
           tofu_version: ${{ env.TOFU_VERSION }}
           tofu_wrapper: false
       - if: matrix.tool == 'terraform'
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_wrapper: false
       - run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
@@ -53,9 +60,12 @@ jobs:
 
   lint:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: opentofu/setup-opentofu@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2
         with:
           tofu_version: ${{ env.TOFU_VERSION }}
           tofu_wrapper: false
@@ -69,11 +79,31 @@ jobs:
           bin/freelunch catalog
           git diff --exit-code || { echo "::error::run bin/freelunch catalog and commit the result"; exit 1; }
 
+  # bash 3.2 is what macOS ships, and the CLI has to keep working on it. Free minutes for a public repository only.
+  macos:
+    if: ${{ !github.event.repository.private }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+      - run: brew install jq
+      - name: the CLI suite under the system bash (3.2)
+        run: /bin/bash tests/cli.sh
+
   # The action that projects' workflows use (action.yml), with the version CI tests
   action:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: the action runs the CLI
         uses: ./
         with:
@@ -82,11 +112,14 @@ jobs:
 
   image:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: build the runner image (amd64, not pushed)
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           push: false

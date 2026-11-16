@@ -1,0 +1,16 @@
+name: Free tier changed
+description: A provider changed or removed its free tier
+labels: [free tier changed]
+body:
+  - type: input
+    id: provider
+    attributes:
+      label: Provider
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: What changed, with a link to the provider's page and the date you read it
+    validations:
+      required: true

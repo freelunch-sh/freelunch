@@ -1,0 +1,23 @@
+name: Bug
+description: Something does not work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not paste tokens, keys or state files. Remove them from any output first.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Commands you ran
+      render: shell
+  - type: textarea
+    id: versions
+    attributes:
+      label: Output of `freelunch version` and `freelunch doctor`
+      render: text

@@ -6,6 +6,12 @@ contract, the CLI or the project layout. Before 1.0, any minor release can break
 
 ## [Unreleased]
 
+- Repository files for a public release: `SECURITY.md`, `CODE_OF_CONDUCT.md`, `NOTICE`, `docs/security.md`, issue and
+  pull request templates, Dependabot, and a secret-scan config. Actions are pinned to commit SHAs (in the workflows, in
+  `action.yml` and in what `ci init` writes), the Dockerfile's base image is pinned by digest, release images carry a
+  build attestation, and CI runs the suite under macOS's bash 3.2 on a public repository.
+- A provider's `provider.yaml` no longer has an `inspire:` list, and `sources:` cite URLs.
+
 The first release, planned as 0.1.0: deploy your project's container from its own repository.
 Versions stay below 1.0 until every part has run against real accounts; until then a minor
 release can change commands and the project layout.

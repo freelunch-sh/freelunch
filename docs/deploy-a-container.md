@@ -73,7 +73,7 @@ second machine and CI all run what the project pins. `freelunch version` says wh
 
 **Runner image** (needs only Docker). The image has OpenTofu and the freelunch code baked in;
 your project is mounted at `/project`. Use the tag of the version the project pins, or each
-run downloads that version into the container first:
+run downloads that version into the container first (the image exists from the first release):
 
 ```bash
 alias freelunch='docker run --rm -it -v "$PWD:/project" \

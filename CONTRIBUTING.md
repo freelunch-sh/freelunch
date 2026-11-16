@@ -41,10 +41,14 @@ Follow [docs/adding-a-provider.md](docs/adding-a-provider.md). In short:
   account, mention the provider and the date.
 - Defaults must stay inside the free tier. Anything billable needs an explicit
   `acknowledge_*` opt-in.
-- Only copy code from compatibly licensed sources (MIT, Apache-2.0, BSD, MPL-2.0), with
-  attribution. freelunch is Apache-2.0.
+- Sign off every commit (`git commit -s`): that is the [Developer Certificate of Origin](https://developercertificate.org/),
+  and says you wrote the change or have the right to submit it under Apache-2.0.
+- Only copy code from compatibly licensed sources (MIT, Apache-2.0, BSD), keep their notice and add the source to
+  [NOTICE](NOTICE). An MPL-2.0 file keeps its header and its licence and is listed there too. Never copy GPL or
+  unlicensed code. freelunch is Apache-2.0.
 - Out of scope for now: LLM APIs and inference platforms, app-level SaaS such as auth or
-  email, and anything that automates account creation or dodges a provider's terms.
+  email, anything that automates account creation or dodges a provider's terms, and licence keys, a "pro" flag or an
+  `ee/` folder.
 - Add a line for your change under `## [Unreleased]` in `CHANGELOG.md`.
 
 ## Releases

@@ -2781,23 +2781,23 @@ jobs:
   image:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
           registry: $reg_host
           username: $reg_user
           password: $reg_pass
       - id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: $reg_image
           tags: |
             type=ref,event=branch
             type=sha
             type=semver,pattern={{version}}
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           platforms: $platforms
@@ -12385,7 +12385,7 @@ tool_version() { CHECKPOINT_DISABLE=1 "$TF" version -json 2>/dev/null | jq -r '.
 # ci_uses <command> [env line]: the steps of a job that runs freelunch with the action, with
 # the secrets as its environment and one more line of it when given (NAME: value)
 ci_uses() {
-  echo "      - uses: actions/checkout@v7"
+  echo "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7"
   # keyless sign-in to the clouds the project set up (freelunch ci oidc), before freelunch runs
   if [[ -z "${CI_CHECK_ONLY:-}" ]]; then ci_oidc_steps; fi
   cat <<EOF
@@ -12611,7 +12611,7 @@ EOF
       ci_uses "graph --json --live --out=freelunch-graph.json"
       # shellcheck disable=SC2016 # GitHub expressions and the shell of the runner, not ours
       cat <<'EOF'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: freelunch-graph
           path: freelunch-graph.json
@@ -12899,7 +12899,7 @@ ci_oidc_steps() {
   if ci_oidc_on aws; then
     # shellcheck disable=SC2016 # GitHub expressions, not ours
     cat <<'EOF'
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -12908,7 +12908,7 @@ EOF
   if ci_oidc_on gcp; then
     # shellcheck disable=SC2016 # GitHub expressions, not ours
     cat <<'EOF'
-      - uses: google-github-actions/auth@v2
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
@@ -12917,7 +12917,7 @@ EOF
   if ci_oidc_on azure; then
     # shellcheck disable=SC2016 # GitHub expressions, not ours
     cat <<'EOF'
-      - uses: azure/login@v2
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}

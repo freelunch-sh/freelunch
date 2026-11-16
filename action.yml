@@ -39,12 +39,12 @@ runs:
   using: composite
   steps:
     - if: inputs.tool == 'tofu'
-      uses: opentofu/setup-opentofu@v2
+      uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2
       with:
         tofu_version: ${{ inputs.version || 'latest' }}
         tofu_wrapper: false
     - if: inputs.tool == 'terraform'
-      uses: hashicorp/setup-terraform@v4
+      uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
       with:
         terraform_version: ${{ inputs.version || 'latest' }}
         terraform_wrapper: false

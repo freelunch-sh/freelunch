@@ -2557,6 +2557,29 @@ test_docs_links_resolve() {
   [[ -z "$bad" ]] || { echo "links that point nowhere:"; printf '%s' "$bad"; return 1; }
 }
 
+# The README's account-free demo: the example project with a made-up host, a dry run that connects to nothing.
+test_readme_demo_dry_run_prints_the_deploy() {
+  local p="$WORK/readme-demo" out
+  cp -R "$ROOT/examples/backend-app" "$p"
+  sed -i.bak 's|# host = "oci-main"|host = "oci-main"|' "$p/.freelunch/apps.tfvars"
+  echo 'hosts = { "oci-main" = { address = "192.0.2.10" } }' >> "$p/.freelunch/apps.tfvars"
+  out="$(cd "$p" && PATH="$WORK/bin:$PATH" "$CLI" deploy --dry-run 2>&1)"
+  contains "$out" "up api"
+}
+
+# A version the README or docs tell people to pin (the Action's tag, the image's tag) is a released heading of CHANGELOG.md,
+# until the first release, when the page says it is "from the first release".
+test_pinned_versions_in_docs_are_released() {
+  local f v bad="" released
+  released="$(sed -n 's/^## \[\([0-9][0-9.]*\)\].*/\1/p' "$ROOT/CHANGELOG.md")"
+  for f in README.md docs/*.md; do
+    for v in $(grep -oE 'freelunch(@v|:)[0-9]+\.[0-9]+\.[0-9]+' "$ROOT/$f" | sed -E 's/.*[@:]v?//' | sort -u); do
+      grep -qxF "$v" <<< "$released" || grep -q 'first release' "$ROOT/$f" || bad="$bad$f pins $v, which CHANGELOG.md has not released"$'\n'
+    done
+  done
+  [[ -z "$bad" ]] || { printf '%s' "$bad"; return 1; }
+}
+
 # FREELUNCH_NOTIFY_EVENTS picks which kinds of event are sent; the waits still send theirs when it lists wait.
 test_notify_events_filter_what_is_sent() {
   local p="$WORK/notify-events"
@@ -2684,7 +2707,7 @@ test_failed_deploys_and_new_homes_are_notified() {
 
 # A backup that fails says so to the URL of FREELUNCH_NOTIFY, from the host: text for ntfy, JSON for Discord and Slack.
 test_a_failed_backup_notifies_from_the_host() {
-  local p="$WORK/backup-notify" out run
+  local p="$WORK/backup-notify" out
   backup_project "$p"
   out="$(GHCR_TOKEN=x FREELUNCH_BACKUP_PASSPHRASE=pw FREELUNCH_NOTIFY=https://ntfy.sh/secret-topic deploy_in "$p" --dry-run 2>&1)"
   lacks "$out" "secret-topic"
@@ -2925,7 +2948,7 @@ TFVARS
   lacks "$out" "cf-secretvalue456"
   lacks "$out" "s3cret-value"
   equals "$(jq -c '.nodes[] | select(.id == "tunnel-oci-main") | .secrets' <<< "$out")" '[{"secret":"CLOUDFLARE_API_TOKEN","set":true}]'
-  equals "$(CLOUDFLARE_API_TOKEN= graph_in "$p" --json | jq -c '.nodes[] | select(.id == "tunnel-oci-main") | .secrets')" '[{"secret":"CLOUDFLARE_API_TOKEN","set":false}]'
+  equals "$(CLOUDFLARE_API_TOKEN="" graph_in "$p" --json | jq -c '.nodes[] | select(.id == "tunnel-oci-main") | .secrets')" '[{"secret":"CLOUDFLARE_API_TOKEN","set":false}]'
   # the ids are check's
   chk="$(check_in "$p" --json | jq -r '[.[].node] | sort | join(" ")')"
   for n in $chk; do
@@ -2953,7 +2976,7 @@ test_catalog_json_is_the_palette() {
   out="$("$CLI" catalog --json 2>/dev/null)"
   jq -e 'type == "array" and length > 50' <<< "$out" >/dev/null
   # every ready provider is there, once
-  local n total
+  local n
   n="$(grep -l '^status: ready' "$ROOT"/providers/*/provider.yaml | wc -l | tr -d ' ')"
   equals "$(jq '[.[] | select(.status == "ready")] | length' <<< "$out")" "$n"
   equals "$(jq '[.[].provider] | unique | length == length' <<< "$out")" true
@@ -6576,7 +6599,7 @@ test_ci_oidc_aws_sets_up_keyless_sign_in() {
   ci_in "$p" ci init --print-secrets >/dev/null 2>&1
   for w in freelunch freelunch-wait freelunch-provision; do
     grep -q 'id-token: write' "$p/.github/workflows/$w.yml"
-    grep -q 'uses: aws-actions/configure-aws-credentials@v4' "$p/.github/workflows/$w.yml"
+    grep -q 'uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4' "$p/.github/workflows/$w.yml"
     fails grep -q 'AWS_ACCESS_KEY_ID' "$p/.github/workflows/$w.yml"
   done
   fails grep -q 'id-token\|aws-actions' "$p/.github/workflows/freelunch-ci.yml"
@@ -6631,7 +6654,7 @@ test_ci_oidc_gcp_sets_up_keyless_sign_in() {
   ci_in "$p" ci init --print-secrets >/dev/null 2>&1
   for w in freelunch freelunch-wait freelunch-provision; do
     grep -q 'id-token: write' "$p/.github/workflows/$w.yml"
-    grep -q 'uses: google-github-actions/auth@v2' "$p/.github/workflows/$w.yml"
+    grep -q 'uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2' "$p/.github/workflows/$w.yml"
   done
   fails grep -q 'google-github-actions' "$p/.github/workflows/freelunch-ci.yml"
   grep -q 'workload_identity_provider: \${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}' "$p/.github/workflows/freelunch.yml"
@@ -6676,7 +6699,7 @@ test_ci_oidc_azure_sets_up_keyless_sign_in() {
   ci_in "$p" ci init --print-secrets >/dev/null 2>&1
   for w in freelunch freelunch-wait freelunch-provision; do
     grep -q 'id-token: write' "$p/.github/workflows/$w.yml"
-    grep -q 'uses: azure/login@v2' "$p/.github/workflows/$w.yml"
+    grep -q 'uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2' "$p/.github/workflows/$w.yml"
   done
   fails grep -q 'azure/login' "$p/.github/workflows/freelunch-ci.yml"
   grep -q 'client-id: \${{ vars.AZURE_CLIENT_ID }}' "$p/.github/workflows/freelunch.yml"
@@ -7022,7 +7045,7 @@ test_ci_init_can_publish_the_live_graph() {
   absent "$p/.github/workflows/freelunch-provision.yml"
   contains "$(cat "$w")" "run: graph --json --live --out=freelunch-graph.json"
   contains "$(cat "$w")" "workflows: [freelunch-provision]"
-  contains "$(cat "$w")" "actions/upload-artifact@v4"
+  contains "$(cat "$w")" "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4"
   contains "$(cat "$w")" 'GITHUB_STEP_SUMMARY'
   grep -q 'FREELUNCH_OCI_KEY: ${{ secrets.FREELUNCH_OCI_KEY }}' "$w"
   if python3 -c 'import yaml' 2>/dev/null; then python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$w"; fi
@@ -7092,7 +7115,7 @@ test_check_lints_the_workflows() {
   lacks "$out" "pull_request_target"
   w="$p/.github/workflows/bad.yml"
   mkdir -p "$p/.github/workflows"
-  printf 'on:\n  pull_request_target:\n    types: [opened]\npermissions: write-all\njobs:\n  x:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: someone/their-action@v1\n      - uses: other/pinned@0123456789abcdef0123456789abcdef01234567 # v2\n      - uses: actions/checkout@v7\n' > "$w"
+  printf 'on:\n  pull_request_target:\n    types: [opened]\npermissions: write-all\njobs:\n  x:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: someone/their-action@v1\n      - uses: other/pinned@0123456789abcdef0123456789abcdef01234567 # v2\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\n' > "$w"
   if out="$(cd "$p" && HOME="$p/home" "$CLI" check 2>&1)"; then echo "check should have failed"; return 1; fi
   contains "$out" "bad.yml runs on pull_request_target"
   contains "$out" "bad.yml has permissions: write-all"

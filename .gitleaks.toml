@@ -1,0 +1,27 @@
+# Secret scanning: the default rules, minus the fakes the offline tests and the catalogue hold.
+# Each entry names the exact string, not a folder, so a real key in tests/ is still found.
+title = "freelunch"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "mock values in provider tests, and a made-up id and token in the CLI tests"
+regexes = [
+  '''^"?mock-[a-z]+"?$''',
+  '''^nf-compute-10$''',
+  '''^nf_abcdef123456$''',
+  '''^3537a672-e4d8-4d89-aab9-26cb622918a1$''',
+]
+
+[[allowlists]]
+description = "provider.yaml secrets: lines are NAME=provider name"
+condition = "AND"
+paths = ['''providers/[^/]+/provider\.yaml$''']
+regexes = ['''^[A-Z0-9_]+=[A-Za-z0-9]+$''']
+
+[[allowlists]]
+description = "the CLI tests feed a fake key to ci restore"
+condition = "AND"
+paths = ['''tests/cli\.sh$''']
+regexes = ['''BEGIN PRIVATE KEY-----' FREELUNCH_SSH_PRIVATE_KEY=''']

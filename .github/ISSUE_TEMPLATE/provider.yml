@@ -1,0 +1,14 @@
+name: Provider request
+description: Add a provider, or implement one that is only catalogued
+labels: [provider]
+body:
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and its free tier page
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: What it would make (host, platform, database, DNS, ...) and how you would check it

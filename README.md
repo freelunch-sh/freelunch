@@ -15,6 +15,11 @@ onto it from your own repository, and move them to another provider by changing 
 > [issues](https://github.com/freelunch-sh/freelunch/issues) (what is unchecked or missing) and the
 > [roadmap](#roadmap).
 
+> **Read this first.** freelunch creates real resources in your cloud accounts. The provider, not this tool, enforces
+> the free limits, and a mistake can cost money: a budget alert reports a charge, it does not stop one. Don't use it for
+> production that needs an SLA, for a team that needs roles and audit, or for anything a provider's terms forbid.
+> What it does and doesn't do: [docs/security.md](docs/security.md).
+
 ## Principles
 
 - **Free by default, paid only on purpose.** Each provider's free-tier limits live in its
@@ -150,14 +155,14 @@ In GitHub Actions, the [Run freelunch](action.yml) action runs any command with 
 the project pins; `freelunch ci init` writes the workflows:
 
 ```yaml
-- uses: actions/checkout@v7
-- uses: freelunch-sh/freelunch@v0.1.0
+- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+- uses: freelunch-sh/freelunch@main   # a version tag, once there is a release
   with:
     run: deploy
     bundle: ${{ secrets.FREELUNCH_BUNDLE }}
 ```
 
-Without installing anything but Docker:
+Without installing anything but Docker (the image exists from the first release, 0.1.0):
 
 ```bash
 docker run --rm -it -v "$PWD:/project" -v ~/.oci:/root/.oci:ro \
@@ -168,6 +173,17 @@ docker run --rm -it -v "$PWD:/project" -v ~/.oci:/root/.oci:ro \
 The full walkthrough, with private images, secrets and persistent data, is
 [docs/deploy-a-container.md](docs/deploy-a-container.md). A finished project is in
 [examples/backend-app](examples/backend-app/).
+
+### Try it without an account
+
+A dry run prints what `deploy` would send to a host and connects to nothing:
+
+```bash
+cp -R examples/backend-app demo && cd demo
+sed -i.bak 's|# host = "oci-main"|host = "oci-main"|' .freelunch/apps.tfvars
+echo 'hosts = { "oci-main" = { address = "192.0.2.10" } }' >> .freelunch/apps.tfvars
+../bin/freelunch deploy --dry-run
+```
 
 ## Quick start inside this checkout (OCI)
 
@@ -580,6 +596,19 @@ compute), add offline tests with `mock_provider`, then run `bin/freelunch catalo
 ## License
 
 [Apache-2.0](LICENSE)
+
+## Not affiliated
+
+Provider names and marks belong to their owners. freelunch uses them only to say what it works with, and their free tiers
+are theirs to change.
+
+## Thanks
+
+The Oracle capacity wait and the catalogue owe ideas to [hitrov/oci-arm-host-capacity](https://github.com/hitrov/oci-arm-host-capacity),
+[filippolmt/terraform-oci-free-tier](https://github.com/filippolmt/terraform-oci-free-tier),
+[dorukgezici/k3s-oci-always-free](https://github.com/dorukgezici/k3s-oci-always-free),
+[free-for-dev](https://github.com/ripienaar/free-for-dev) and [cloudcredits.io](https://github.com/t3-sh/cloudcredits.io).
+No code or text is copied from them (see [NOTICE](NOTICE)).
 
 ## Disclaimer
 
